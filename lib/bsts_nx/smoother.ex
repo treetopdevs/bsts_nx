@@ -408,21 +408,20 @@ defmodule BstsNx.Smoother do
           j = smoother_gain(p_filt, f_t, p_pred_next)
 
           # Conditional mean and covariance
-          # Use the stable form: Cov = P_filt - C * F * P_filt
-          # This is algebraically equivalent to P_filt - C * P_pred * C',
-          # but avoids the double-inverse instability when smoother_gain
-          # applies jitter to invert P_pred (the jittered P_pred used in C
-          # would not cancel cleanly with the un-jittered P_pred here).
+          # Covariance uses the symmetric form:
+          # Cov(x_k | x_{k+1}, y_{1:T}) = P_k - J_k P_{k+1|k} J_k^T
+          # This generally stays closer to PSD under finite precision.
           mean = add(x_filt, dot(j, subtract(x_next, x_pred_next)))
 
           cov =
             if Nx.rank(p_filt) == 0 do
               Nx.multiply(p_filt, Nx.subtract(1.0, Nx.multiply(j, f_t)))
             else
-              n = Nx.axis_size(p_filt, 0)
-              identity = Nx.eye(n)
-              i_jf = subtract(identity, dot(j, f_t))
-              dot(i_jf, p_filt)
+              # Prefer the symmetric form for numerical robustness:
+              # Cov(x_k | x_{k+1}, y_{1:T}) = P_k - J_k P_{k+1|k} J_k^T
+              # This tends to stay closer to PSD under finite precision.
+              subtract(p_filt, dot(j, dot(p_pred_next, transpose(j))))
+              |> symmetrize()
             end
 
           eps_k = :array.get(idx, noises_arr)
@@ -562,20 +561,60 @@ defmodule BstsNx.Smoother do
   end
 
   # Matrix-covariance Cholesky used by simulation smoothing.
-  # Symmetrizes the covariance and degrades gracefully when decomposition fails.
+  # Symmetrizes the covariance and tries a nearest-PSD projection before
+  # degrading to zero process noise.
   defp safe_cholesky_or_zero(cov, label) do
-    cov_sym = Nx.multiply(Nx.add(cov, transpose(cov)), 0.5)
+    cov_sym = symmetrize(cov)
 
     try do
       BstsNx.Utils.safe_cholesky(cov_sym)
     rescue
       _ ->
-        Logger.warning(
-          "Simulation smoother: #{label} not positive-definite even with jitter; " <>
-            "using zero process noise for this step"
-        )
+        case project_to_psd_cholesky(cov_sym) do
+          {:ok, chol} ->
+            Logger.warning(
+              "Simulation smoother: #{label} not positive-definite; " <>
+                "projecting to nearest PSD covariance"
+            )
 
-        Nx.broadcast(Nx.tensor(0.0), Nx.shape(cov_sym))
+            chol
+
+          :error ->
+            Logger.warning(
+              "Simulation smoother: #{label} not positive-definite even after PSD projection; " <>
+                "using zero process noise for this step"
+            )
+
+            Nx.broadcast(Nx.tensor(0.0), Nx.shape(cov_sym))
+        end
+    end
+  end
+
+  defp symmetrize(t), do: Nx.multiply(Nx.add(t, transpose(t)), 0.5)
+
+  defp project_to_psd_cholesky(cov_sym) do
+    projected =
+      try do
+        {e_vals, e_vecs} = Nx.LinAlg.eigh(cov_sym)
+        eps = Nx.tensor(1.0e-9, type: Nx.type(e_vals))
+        clipped = Nx.max(e_vals, eps)
+        d = Nx.make_diagonal(clipped)
+        dot(dot(e_vecs, d), transpose(e_vecs)) |> symmetrize()
+      rescue
+        _ -> :failed
+      end
+
+    case projected do
+      :failed ->
+        :error
+
+      %Nx.Tensor{} = proj ->
+        try do
+          chol = BstsNx.Utils.safe_cholesky(proj)
+          if has_non_finite?(chol), do: :error, else: {:ok, chol}
+        rescue
+          _ -> :error
+        end
     end
   end
 end
