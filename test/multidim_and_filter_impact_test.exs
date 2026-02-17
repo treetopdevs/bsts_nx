@@ -4,6 +4,37 @@ defmodule BstsNx.MultidimAndFilterImpactTest do
   alias BstsNx.{KalmanFilter, Smoother, StateSpace, Components, CausalImpact}
 
   describe "multi-dimensional state-space pipeline (3+ dims)" do
+    test "static multivariate H is not misclassified as time-varying when rows(H) == T" do
+      # Two-dimensional state and two-dimensional observation.
+      # rows(H) == T is intentional to guard the static-vs-time-varying ambiguity.
+      f = Nx.eye(2)
+      h = Nx.eye(2)
+      q = Nx.eye(2) |> Nx.multiply(0.1)
+      r = Nx.eye(2) |> Nx.multiply(0.1)
+      x0 = Nx.tensor([0.0, 0.0])
+      p0 = Nx.eye(2)
+      obs = [Nx.tensor([1.0, 2.0]), Nx.tensor([1.1, 1.9])]
+
+      {filtered, predicted} = KalmanFilter.filter_with_pred(obs, f, h, q, r, x0, p0)
+
+      assert length(filtered) == 2
+      assert length(predicted) == 2
+
+      {x1, p1} = hd(filtered)
+      assert Nx.shape(x1) == {2}
+      assert Nx.shape(p1) == {2, 2}
+
+      # One-step reference for F=I, H=I, Q=0.1I, R=0.1I, x0=0, P0=I
+      # K = 1.1 / (1.1 + 0.1) = 0.916666...
+      x1_vals = Nx.to_flat_list(x1)
+      assert_in_delta Enum.at(x1_vals, 0), 0.9166667, 1.0e-5
+      assert_in_delta Enum.at(x1_vals, 1), 1.8333334, 1.0e-5
+      assert_in_delta Nx.to_number(p1[0][0]), 0.0916667, 1.0e-5
+      assert_in_delta Nx.to_number(p1[1][1]), 0.0916667, 1.0e-5
+      assert abs(Nx.to_number(p1[0][1])) < 1.0e-5
+      assert abs(Nx.to_number(p1[1][0])) < 1.0e-5
+    end
+
     test "3-dim composed model through filter + smoother" do
       # Compose local_level + local_linear_trend → 3-dim state
       ll = Components.local_level(0.5)

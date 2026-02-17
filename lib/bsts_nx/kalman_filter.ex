@@ -113,9 +113,7 @@ defmodule BstsNx.KalmanFilter do
       # Determine H per time step.  If `h` is scalar or a constant matrix,
       # replicate for each step.  If `h` is a tensor whose first axis matches
       # the number of observations, treat it as time-varying and slice per step.
-      t_len = length(obs_list)
-
-      h_series = normalize_h_series(h, t_len)
+      h_series = normalize_h_series(h, obs_list)
 
       # zip observations and h series
       zipped = Enum.zip(obs_list, h_series)
@@ -257,7 +255,8 @@ defmodule BstsNx.KalmanFilter do
     # wrapper to ensure h is a vector of same length as observations.  Allows constant or vector h.
     t = Nx.axis_size(observations, 0)
     f_t = to_tensor(f)
-    # convert h to vector: if scalar, broadcast; else assume vector with length t
+    # convert h to vector: if scalar, broadcast; otherwise accept a length-t vector
+    # or a {t, 1} column vector for convenience.
     h_vec =
       cond do
         is_number(h) ->
@@ -266,8 +265,15 @@ defmodule BstsNx.KalmanFilter do
         match?(%Nx.Tensor{}, h) and Nx.rank(h) == 0 ->
           Nx.broadcast(h, {t})
 
-        match?(%Nx.Tensor{}, h) and Nx.axis_size(h, 0) == t ->
+        match?(%Nx.Tensor{}, h) and Nx.rank(h) == 1 and Nx.axis_size(h, 0) == t ->
           h
+
+        match?(%Nx.Tensor{}, h) and Nx.rank(h) == 2 and Nx.shape(h) == {t, 1} ->
+          Nx.squeeze(h, axes: [1])
+
+        match?(%Nx.Tensor{}, h) ->
+          raise ArgumentError,
+                "h must be scalar, rank-1 length #{t}, or rank-2 shape {#{t}, 1} for filter_defn/7"
 
         true ->
           raise ArgumentError, "h must be a scalar or a tensor of length equal to observations"
@@ -328,9 +334,23 @@ defmodule BstsNx.KalmanFilter do
   end
 
   # Normalizes the observation matrix `h` into a list of per-time-step tensors.
-  # Handles scalar, list, rank-1 vector, rank-2+ tensor, and time-varying cases.
-  # Row-matrix entries ({1, n}) are squeezed to vectors ({n}).
-  defp normalize_h_series(h, t_len) do
+  #
+  # Supports:
+  #   * scalar h (broadcast)
+  #   * list of per-step h entries
+  #   * tensor h:
+  #       - rank 1: time-varying scalar/row coefficients of length T
+  #       - rank 2:
+  #           - static matrix (default)
+  #           - time-varying rows when observations are scalar and shape {T, n}
+  #       - rank >= 3: time-varying matrices with first axis T
+  #
+  # Row matrices ({1, n}) are squeezed to vectors ({n}) for scalar-observation
+  # paths, preserving compatibility with scalar update code.
+  defp normalize_h_series(h, obs_list) do
+    t_len = length(obs_list)
+    obs_dim = observation_dim(obs_list)
+
     h_series =
       cond do
         is_number(h) or (match?(%Nx.Tensor{}, h) and Nx.rank(h) == 0) ->
@@ -352,16 +372,23 @@ defmodule BstsNx.KalmanFilter do
 
           cond do
             rank == 1 ->
+              if obs_dim != 1 do
+                raise ArgumentError,
+                      "rank-1 observation matrix h implies scalar observations, got observation dimension #{obs_dim}"
+              end
+
               if len != t_len do
                 raise ArgumentError,
                       "observation matrix length must match observations length"
               end
 
+              # Time-varying scalar coefficients.
               Enum.map(0..(len - 1), fn idx ->
                 Nx.slice(h, [idx], [1]) |> Nx.squeeze()
               end)
 
-            len == t_len ->
+            rank == 2 and obs_dim == 1 and len == t_len ->
+              # Scalar-observation time-varying H encoded as {T, n}
               Enum.map(0..(len - 1), fn idx ->
                 start_indices = [idx | List.duplicate(0, rank - 1)]
                 lengths = [1 | Enum.map(1..(rank - 1)//1, &Nx.axis_size(h, &1))]
@@ -369,10 +396,24 @@ defmodule BstsNx.KalmanFilter do
               end)
 
             rank == 2 ->
-              # Static matrix: first axis doesn't match t_len, treat as
-              # constant H replicated for each step.
+              # Rank-2 tensors are static observation matrices by default.
+              # This avoids misclassifying static multivariate H matrices when
+              # rows(H) == T by coincidence.
+              if obs_dim != 1 and len != obs_dim do
+                raise ArgumentError,
+                      "static observation matrix row count #{len} must match observation dimension #{obs_dim}"
+              end
+
               h_t = to_tensor(h)
               Enum.map(0..(t_len - 1), fn _ -> h_t end)
+
+            len == t_len ->
+              # Rank-3+ time-varying matrix H_t over first axis
+              Enum.map(0..(len - 1), fn idx ->
+                start_indices = [idx | List.duplicate(0, rank - 1)]
+                lengths = [1 | Enum.map(1..(rank - 1)//1, &Nx.axis_size(h, &1))]
+                Nx.slice(h, start_indices, lengths) |> Nx.squeeze()
+              end)
 
             true ->
               raise ArgumentError,
@@ -404,6 +445,32 @@ defmodule BstsNx.KalmanFilter do
   end
 
   defp squeeze_1x1(t), do: t
+
+  # Infers observation dimension from the first non-missing observation.
+  # Scalars -> 1, vectors -> length, matrices -> row count.
+  defp observation_dim([]), do: 1
+
+  defp observation_dim(obs_list) do
+    obs_list
+    |> Enum.find(&(not missing_observation?(&1)))
+    |> case do
+      nil ->
+        1
+
+      %Nx.Tensor{} = t ->
+        case Nx.rank(t) do
+          0 -> 1
+          1 -> Nx.axis_size(t, 0)
+          _ -> Nx.axis_size(t, 0)
+        end
+
+      v when is_number(v) ->
+        1
+
+      list when is_list(list) ->
+        length(list)
+    end
+  end
 
   # Detects missing observations: nil values or NaN tensors
   defp missing_observation?(nil), do: true
