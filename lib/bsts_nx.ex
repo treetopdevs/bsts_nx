@@ -24,6 +24,7 @@ defmodule BstsNx do
 
     * `BstsNx.InterventionAnalysis` — Measure the causal effect of any intervention
     * `BstsNx.Forecaster` — Time series forecasting with credible intervals
+    * `BstsNx.BCT.ARForecaster` — Phase A BCT-AR forecasting scaffold
 
   ## Domain Applications
 

@@ -148,14 +148,12 @@ defmodule BstsNx.SmootherDefnTest do
     # Smoothed states and variances should match
     Enum.zip(Nx.to_flat_list(sxs), Nx.to_flat_list(sxs_lag))
     |> Enum.each(fn {expected, actual} ->
-      assert_in_delta(expected, actual, 1.0e-4,
-        "smoothed state mismatch with lag1 variant")
+      assert_in_delta(expected, actual, 1.0e-4, "smoothed state mismatch with lag1 variant")
     end)
 
     Enum.zip(Nx.to_flat_list(sps), Nx.to_flat_list(sps_lag))
     |> Enum.each(fn {expected, actual} ->
-      assert_in_delta(expected, actual, 1.0e-4,
-        "smoothed variance mismatch with lag1 variant")
+      assert_in_delta(expected, actual, 1.0e-4, "smoothed variance mismatch with lag1 variant")
     end)
 
     # lag1 should have t-1 entries
@@ -202,8 +200,12 @@ defmodule BstsNx.SmootherDefnTest do
       expected_lag1 = Enum.at(sps_list, i + 1) * gain
       actual_lag1 = Enum.at(lag1_list, i)
 
-      assert_in_delta(expected_lag1, actual_lag1, 1.0e-4,
-        "lag1[#{i}] mismatch: expected #{expected_lag1}, got #{actual_lag1}")
+      assert_in_delta(
+        expected_lag1,
+        actual_lag1,
+        1.0e-4,
+        "lag1[#{i}] mismatch: expected #{expected_lag1}, got #{actual_lag1}"
+      )
     end)
   end
 
