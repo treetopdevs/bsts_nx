@@ -10,11 +10,11 @@
 
 | Component | Module | Notes |
 |-----------|--------|-------|
-| Kalman Filter (scalar + multidim) | `kalman_filter.ex` | defn JIT, missing obs |
+| Kalman Filter (scalar + multidimensional) | `kalman_filter.ex` | defn JIT, missing obs |
 | RTS Smoother + Carter-Kohn | `smoother.ex` | List-based + defn |
-| Gibbs Sampler | `gibbs_sampler.ex` | Local level, structured, multi-chain |
+| Gibbs Sampler | `gibbs_sampler.ex` | Local-level, structured, multi-chain |
 | Components (level, trend, seasonal, regression) | `components.ex` | ModelSpec factories |
-| CausalImpact (MCMC + filter + structured) | `causal_impact.ex` | Local-level + ModelSpec |
+| Causal Impact (MCMC + filter + structured) | `causal_impact.ex` | Local-level + ModelSpec |
 | Shapley (exact + MC + time-decay) | `shapley.ex` | Overlap detection, time-weighted VF |
 | SpotAttributor (point + posterior) | `spot_attributor.ex` | Per-spot lift + Shapley + posterior propagation |
 | Pipeline | `pipeline.ex` | CausalImpact → SpotAttributor (posterior) |
@@ -62,3 +62,60 @@ covers the true value. Returns coverage, relative error, and full CI statistics.
 Added `BstsNx.CovariateSelection` with `select/3` for pre-period correlation-based
 control selection. Uses Pearson correlation with configurable threshold and
 max_controls. Also exposes `pearson_correlation/2` as a public utility.
+
+## Next Roadmap (post-Step-7)
+
+The core structured stack is in place. Next work is mainly about broadening
+model expressiveness and closing remaining scalar assumptions.
+
+### Phase 8: Documentation and API Contract Sync
+
+Goal: ensure docs reflect current structured capabilities and known boundaries.
+
+- Update README and guides to clearly separate:
+  - already-supported structured composition and higher-dimensional latent state spaces,
+  - remaining limits (scalar-observation structured MCMC, diagonal `Q`, scalar `R`).
+- Add examples that use `estimate_structured/5` and composed specs.
+
+Estimated effort (1 engineer): 1-2 days.
+
+### Phase 9: Structured Multivariate-Observation MCMC
+
+Goal: support vector observations in structured Gibbs workflows.
+
+- Extend structured residual and likelihood code paths to handle vector `y_t`.
+- Add observation covariance modeling options (start with diagonal `R`, then full `R`).
+- Generalize `CausalImpact.estimate_structured/5` and `Forecaster` structured paths.
+- Expand tests for multivariate synthetic cases and edge conditions.
+
+Estimated effort (1 engineer): 2-4 weeks.
+
+### Phase 10: Richer Component Families
+
+Goal: make model composition expressive for real production use cases.
+
+- Add additional component factories/specs (for example AR, multiple seasonalities,
+  and holiday/event effects).
+- Add stronger prior controls per component.
+- Extend `ModelBuilder` composition helpers for common patterns.
+
+Estimated effort (1 engineer): 2-3 weeks.
+
+### Phase 11: Correlated State Innovations
+
+Goal: move beyond diagonal process-noise learning.
+
+- Add parameterization and sampling for correlated state innovations
+  (block-diagonal or full covariance approaches).
+- Update structured sampler internals and diagnostics for new parameter families.
+
+Estimated effort (1 engineer): 3-5 weeks.
+
+### Phase 12: Performance and Defn Parity
+
+Goal: improve throughput and reduce gap between list-based and compiled paths.
+
+- Add compiled/optimized paths for broader structured workflows.
+- Benchmark representative model sizes and tune memory/runtime hotspots.
+
+Estimated effort (1 engineer): 2-4 weeks.

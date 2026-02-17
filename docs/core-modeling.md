@@ -28,6 +28,9 @@ filtered =
 - `filter_with_pred/7`: filtered + one-step predictions (needed by RTS smoother)
 - `filter_defn/7`: compiled tensor path for scalar systems (`NaN` for missing)
 
+`filter_with_pred/7` supports scalar and multi-dimensional observations with
+static or time-varying `H_t`.
+
 ## RTS and Simulation Smoothing (`BstsNx.Smoother`)
 
 Use smoothing when you need posterior state trajectories conditioned on all observations.
@@ -68,6 +71,9 @@ samples = BstsNx.GibbsSampler.sample_structured(observations, spec, 200, seed: 4
 
 Multiple chains are available via `sample_chains/8` and `sample_structured_chains/5`.
 
+`sample_structured/4` supports higher-dimensional latent states and composed
+models; it currently targets scalar observations.
+
 ## Building Models (`BstsNx.Components`, `BstsNx.StateSpace`, `BstsNx.ModelSpec`)
 
 ### Component factories
@@ -87,6 +93,19 @@ composed = BstsNx.StateSpace.compose(level, season)
 ```
 
 Use `ModelSpec` for structured samplers and any API that needs explicit model structure.
+
+## Current Boundaries
+
+Current implementation boundaries to keep in mind:
+
+- structured Gibbs sampling assumes a scalar observation equation per time step,
+- observation variance is sampled as a scalar (`R`),
+- process covariance learning is diagonal (`Q` diagonal entries sampled independently),
+- compiled `defn` filter/smoother paths remain scalar-oriented.
+
+In practice, this means you can already build rich high-dimensional latent
+state compositions, while full multivariate-observation Bayesian sampling
+remains a roadmap item.
 
 ## Random Variables (`BstsNx.Distributions`)
 

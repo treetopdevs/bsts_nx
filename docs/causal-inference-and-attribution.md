@@ -29,9 +29,12 @@ analysis.significant?
 
 `BstsNx.CausalImpact` exposes direct estimators:
 
-- `estimate/4`: local-level model,
-- `estimate_structured/5`: custom `ModelSpec`,
-- `estimate_from_filter/3`: non-MCMC fast path.
+- `estimate/4`: local-level convenience API,
+- `estimate_structured/5`: custom `ModelSpec` for trend/seasonal/regression/composed models,
+- `estimate_from_filter/3`: non-MCMC fast path (compiled scalar filter/smoother path).
+
+For most production workflows with covariates or richer model structure, prefer
+`estimate_structured/5` (or `InterventionAnalysis` with `:model_spec`).
 
 ```elixir
 impact = BstsNx.CausalImpact.estimate(observations, {1, 90}, {91, 120}, num_samples: 200)

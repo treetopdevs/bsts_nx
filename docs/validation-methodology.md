@@ -7,8 +7,11 @@ This document describes the statistical validation tests applied to the Bayesian
 The BSTS pipeline estimates the **causal lift** of TV advertising on GA4 web sessions by:
 
 1. Fetching minute-level GA4 session data and TV spot air times
-2. Building a **baseline** (counterfactual) using either a **seasonal regression** or **local level** state-space model
+2. Building a **baseline** (counterfactual) using either a **seasonal regression** or **local-level** state-space model in this workflow
 3. Comparing actual sessions during "on-air" minutes (when a spot recently aired) against the baseline to estimate lift
+
+Scope note: this validation workflow benchmarks seasonal regression and local-level
+baselines. The core library also supports richer structured `ModelSpec` baselines.
 
 The validation suite runs six independent checks that test different assumptions. A well-specified model should pass all of them.
 
@@ -24,7 +27,7 @@ Whether the model produces a false positive when there is no real intervention.
 2. Count the number of on-air minutes: `n_on_air`
 3. Find the **pre-period** — all minute indices that are NOT in the on-air set
 4. Place a fake ("placebo") intervention window of size `n_on_air` in the **middle** of the pre-period (to avoid edge effects near the start or end)
-5. Re-run the same estimator (seasonal regression or local level) with the placebo window as if those minutes were on-air
+5. Re-run the same configured estimator (for example seasonal regression or local-level) with the placebo window as if those minutes were on-air
 6. Compute placebo lift, lift %, and 95% confidence interval
 
 ### Pass criteria
@@ -37,7 +40,7 @@ If the placebo test fails, the baseline is **biased** — it systematically over
 ### Remediation
 - Adjust Fourier terms (fewer terms reduce overfitting; more terms capture intra-day patterns)
 - Toggle the RTS smoother (smoothing stabilizes the baseline but can amplify drift)
-- Try the alternative model type (seasonal regression vs local level)
+- Try the alternative model type (seasonal regression vs local-level)
 - Reduce the attribution window
 - Extend the date range to provide more pre-period training data
 
@@ -189,7 +192,7 @@ When diagnostics show failures, the **Auto-Tune** feature runs a grid search ove
 
 | Parameter | Values |
 |-----------|--------|
-| Model | Seasonal Regression, Local Level |
+| Model | Seasonal Regression, Local-Level (workflow defaults) |
 | Daily Fourier terms | 3, 4, 6, 8 |
 | Weekly Fourier terms | 1, 2, 3 |
 | Window (minutes) | 10, 15, 20, 30 |

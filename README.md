@@ -1,8 +1,9 @@
 # BstsNx
 
 BstsNx is a pure-Elixir library for Bayesian Structural Time Series (BSTS) models built on top of Nx.
-It provides Kalman filtering and smoothing, a Gibbs sampler for a local-level model, and a
-Causal Impact workflow for intervention analysis.
+It provides Kalman filtering and smoothing for scalar and multi-dimensional state-space systems,
+Gibbs samplers for both local-level and structured composed models, and Causal Impact,
+forecasting, and attribution workflows.
 
 ## Installation
 
@@ -18,7 +19,7 @@ end
 
 ## Quick start
 
-### Kalman filter (local level model)
+### Kalman filter (local-level model)
 
 ```elixir
 obs = [1.0, 2.0, 3.0]
@@ -30,7 +31,7 @@ Enum.map(xs, &Nx.to_number/1)
 #=> [0.666..., 1.5, 2.428...]
 ```
 
-### Gibbs sampler (local level model)
+### Gibbs sampler (local-level model)
 
 ```elixir
 obs = Enum.map(1..30, fn _ -> :rand.normal() * 2.0 + 10.0 end)
@@ -92,5 +93,14 @@ config :nx, :default_backend, EXLA.Backend
 
 ## Status
 
-This is an early-stage implementation focused on scalar local-level models. The APIs are
-intended to expand to richer component compositions and higher-dimensional state spaces.
+This is an early-stage implementation with solid support for structured model composition
+(trend, seasonal, regression, and composed `ModelSpec`s) and higher-dimensional latent states.
+
+Current limitations remain in some paths:
+
+- compiled `defn` filter/smoother paths are scalar-oriented;
+- structured Gibbs samplers currently learn a diagonal `Q` and scalar observation variance `R`;
+- structured MCMC workflows currently target scalar observations per time step.
+
+The roadmap includes richer component families and full multivariate-observation support
+through structured MCMC and downstream APIs.
