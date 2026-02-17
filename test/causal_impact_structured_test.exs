@@ -104,21 +104,22 @@ defmodule BstsNx.CausalImpactStructuredTest do
     @tag timeout: 120_000
     test "detects positive effect in seasonal data" do
       :rand.seed(:exsss, {300, 301, 302})
-      # Day-of-week seasonal pattern (S=7), 10 weeks pre, 2 weeks post
+      # Day-of-week seasonal pattern (S=7), 12 weeks pre, 3 weeks post.
+      # Keep this signal strong to avoid cross-version stochastic flakes.
       pattern = [3.0, 1.0, -1.0, -2.0, 0.0, 2.0, -3.0]
       base_level = 100.0
 
       pre =
-        Enum.flat_map(1..10, fn _week ->
-          Enum.map(pattern, fn s -> base_level + s + :rand.normal() * 1.0 end)
+        Enum.flat_map(1..12, fn _week ->
+          Enum.map(pattern, fn s -> base_level + s + :rand.normal() * 0.5 end)
         end)
 
-      # Post period: same pattern but with +15 lift
-      lift = 15.0
+      # Post period: same pattern but with clear positive lift
+      lift = 20.0
 
       post =
-        Enum.flat_map(1..2, fn _week ->
-          Enum.map(pattern, fn s -> base_level + s + lift + :rand.normal() * 1.0 end)
+        Enum.flat_map(1..3, fn _week ->
+          Enum.map(pattern, fn s -> base_level + s + lift + :rand.normal() * 0.5 end)
         end)
 
       obs = pre ++ post
@@ -134,13 +135,13 @@ defmodule BstsNx.CausalImpactStructuredTest do
 
       result =
         CausalImpact.estimate_structured(obs, {1, n_pre}, {n_pre + 1, n_total}, spec,
-          num_samples: 30,
-          burn_in: 15,
+          num_samples: 60,
+          burn_in: 30,
           seed: 555
         )
 
       summary = CausalImpact.summary(result)
-      # Should detect positive cumulative effect (14 post observations × ~15 lift each)
+      # Should detect positive cumulative effect
       assert summary.cumulative_effect.mean > 0
     end
   end

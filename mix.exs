@@ -32,13 +32,15 @@ defmodule BstsNx.MixProject do
   defp deps do
     [
       # Nx provides numerical computing primitives used throughout the library.
-      {:nx, "~> 0.6"},
+      # Keep Nx on the 0.6 line for compatibility with the CI matrix
+      # (Elixir 1.14/OTP 25 through Elixir 1.18/OTP 27).
+      {:nx, "~> 0.6.0"},
       # EXLA optionally enables just-in-time compilation and hardware acceleration.
       # To use EXLA, add it to your dependencies and configure Nx to use the
       # EXLA backend in your application (see README for details).  This
       # dependency is optional and will be ignored unless explicitly
       # installed.
-      {:exla, "~> 0.6", optional: true},
+      {:exla, "~> 0.6.0", optional: true},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:stream_data, "~> 1.0", only: [:test, :dev]}
     ]
