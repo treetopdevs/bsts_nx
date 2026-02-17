@@ -16,6 +16,7 @@ defmodule BstsNx.MixProject do
       elixir: "~> 1.14",
       name: "BstsNx",
       description: description(),
+      package: package(),
       source_url: "https://github.com/Cleveland-Software-LLC/bsts_elixir",
       homepage_url: "https://github.com/Cleveland-Software-LLC/bsts_elixir",
       docs: docs(),
@@ -44,7 +45,37 @@ defmodule BstsNx.MixProject do
   end
 
   defp description do
-    "Bayesian Structural Time Series (BSTS) utilities for Elixir/Nx."
+    "Bayesian Structural Time Series for Elixir/Nx: causal impact, forecasting, attribution, and validation."
+  end
+
+  defp package do
+    [
+      licenses: ["LGPL-2.1-only"],
+      maintainers: ["Cleveland Software LLC"],
+      links: %{
+        "GitHub" => "https://github.com/Cleveland-Software-LLC/bsts_elixir",
+        "Docs" => "https://hexdocs.pm/bsts_nx"
+      },
+      files: [
+        "lib",
+        "docs",
+        "mix.exs",
+        "README.md",
+        "LICENSE"
+      ],
+      keywords: [
+        "bsts",
+        "bayesian",
+        "time-series",
+        "causal-inference",
+        "forecasting",
+        "kalman-filter",
+        "mcmc",
+        "attribution",
+        "nx",
+        "elixir"
+      ]
+    ]
   end
 
   defp docs do
@@ -53,6 +84,7 @@ defmodule BstsNx.MixProject do
       extras: [
         "README.md",
         "docs/overview.md",
+        "docs/hex-publishing-checklist.md",
         "docs/getting-started.md",
         "docs/core-modeling.md",
         "docs/causal-inference-and-attribution.md",
@@ -65,6 +97,7 @@ defmodule BstsNx.MixProject do
       groups_for_extras: [
         Guides: [
           "docs/overview.md",
+          "docs/hex-publishing-checklist.md",
           "docs/getting-started.md",
           "docs/core-modeling.md",
           "docs/causal-inference-and-attribution.md",

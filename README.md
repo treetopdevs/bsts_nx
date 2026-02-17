@@ -80,6 +80,7 @@ config :nx, :default_backend, EXLA.Backend
 ## Documentation
 
 - `docs/overview.md` for a map of modules and workflows
+- `docs/hex-publishing-checklist.md` for release and Hex publish prep
 - `docs/getting-started.md` for an end-to-end starter walkthrough
 - `docs/core-modeling.md` for Kalman/smoother/Gibbs/model composition details
 - `docs/causal-inference-and-attribution.md` for intervention + attribution workflows

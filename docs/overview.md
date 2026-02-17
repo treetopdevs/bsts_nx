@@ -92,3 +92,7 @@ result.spots
 4. [Forecasting and Applications](forecasting-and-applications.html)
 5. [Synthetic Data and Validation](synthetic-data-and-validation.html)
 6. [Module Reference](module-reference.html)
+
+## Publishing Prep
+
+Use [Hex Publishing Checklist](hex-publishing-checklist.html) before tagging and releasing.

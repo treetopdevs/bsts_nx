@@ -41,6 +41,7 @@ defmodule BstsNx do
   If you are new to the project, read the guides in this order:
 
     * `overview` — module map + workflow selection
+    * `hex-publishing-checklist` — release quality gates and publish steps
     * `getting-started` — first end-to-end examples
     * `core-modeling` — Kalman/smoother/Gibbs/model composition
     * `causal-inference-and-attribution` — intervention and overlap attribution
