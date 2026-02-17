@@ -339,6 +339,78 @@ defmodule BstsNx.GibbsStructuredTest do
       end)
     end
 
+    test "supports rank-2 time-varying H encoded as {T, n}" do
+      obs = [1.0, 2.0, 2.5, 3.0]
+
+      spec = %ModelSpec{
+        f: Nx.tensor([[1.0]]),
+        h: Nx.tensor([[1.0], [0.8], [1.2], [1.0]]),
+        x0: Nx.tensor([0.0]),
+        p0: Nx.tensor([[1.0]]),
+        obs_var: 1.0,
+        q_specs: [%{dim_index: 0, initial: 0.5, prior_shape: 1.0, prior_scale: 1.0}],
+        obs_prior_shape: 1.0,
+        obs_prior_scale: 1.0
+      }
+
+      samples = GibbsSampler.sample_structured(obs, spec, 2, seed: 42)
+
+      assert length(samples) == 2
+
+      Enum.each(samples, fn s ->
+        assert length(s.states) == length(obs)
+        assert Nx.shape(s.q_matrix) == {1, 1}
+        assert Nx.to_number(s.obs_var) > 0.0
+      end)
+    end
+
+    test "supports static rank-2 row H matrices" do
+      obs = [1.0, 2.0, 3.0]
+
+      spec = %ModelSpec{
+        f: Nx.eye(2),
+        h: Nx.tensor([[1.0, 0.0]]),
+        x0: Nx.tensor([0.0, 0.0]),
+        p0: Nx.eye(2),
+        obs_var: 1.0,
+        q_specs: [
+          %{dim_index: 0, initial: 0.2, prior_shape: 1.0, prior_scale: 1.0},
+          %{dim_index: 1, initial: 0.2, prior_shape: 1.0, prior_scale: 1.0}
+        ],
+        obs_prior_shape: 1.0,
+        obs_prior_scale: 1.0
+      }
+
+      samples = GibbsSampler.sample_structured(obs, spec, 1, seed: 77)
+
+      assert length(samples) == 1
+      [sample] = samples
+      assert length(sample.states) == length(obs)
+      assert Nx.shape(sample.q_matrix) == {2, 2}
+    end
+
+    test "raises for invalid static rank-2 H without singleton axis" do
+      obs = [1.0, 2.0, 3.0]
+
+      spec = %ModelSpec{
+        f: Nx.tensor([[1.0, 0.0], [0.0, 1.0]]),
+        h: Nx.tensor([[1.0, 0.0], [0.0, 1.0]]),
+        x0: Nx.tensor([0.0, 0.0]),
+        p0: Nx.eye(2),
+        obs_var: 1.0,
+        q_specs: [
+          %{dim_index: 0, initial: 0.5, prior_shape: 1.0, prior_scale: 1.0},
+          %{dim_index: 1, initial: 0.5, prior_shape: 1.0, prior_scale: 1.0}
+        ],
+        obs_prior_shape: 1.0,
+        obs_prior_scale: 1.0
+      }
+
+      assert_raise ArgumentError, ~r/singleton axis/, fn ->
+        GibbsSampler.sample_structured(obs, spec, 1, seed: 42)
+      end
+    end
+
     test "burn_in and thinning" do
       :rand.seed(:exsss, {700, 701, 702})
       obs = Enum.map(1..20, fn _ -> :rand.normal() end)

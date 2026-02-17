@@ -634,7 +634,7 @@ defmodule BstsNx.GibbsSampler do
   end
 
   # Computes observation sum of squares with multi-dimensional state support.
-  # h_list is a list of {1, n} tensors (one per timestep).
+  # h_list is a list of per-timestep observation tensors.
   defp obs_residuals_structured(observations, sampled_states, h_list) do
     residuals =
       observations
@@ -647,8 +647,7 @@ defmodule BstsNx.GibbsSampler do
 
           _ ->
             y_val = if is_number(y), do: y, else: Nx.to_number(y)
-            # H_t · x_t: squeeze the {1,n} x {n} product to scalar
-            h_row = if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: h_t
+            h_row = structured_h_row(h_t)
             pred = Nx.to_number(Nx.dot(h_row, Nx.flatten(x_t)))
             diff = y_val - pred
             [diff * diff]
@@ -705,10 +704,57 @@ defmodule BstsNx.GibbsSampler do
 
     unless rank >= 1 and rank <= 2 do
       raise ArgumentError,
-            "static observation matrix H must be rank 1 or 2, got rank #{rank}"
+            "observation matrix H must be rank 1 or 2, got rank #{rank}"
     end
 
-    List.duplicate(h, t)
+    cond do
+      rank == 1 ->
+        # Static observation vector.
+        List.duplicate(h, t)
+
+      rank == 2 and Nx.axis_size(h, 0) == t ->
+        # Time-varying scalar-observation rows encoded as {T, n}.
+        Enum.map(0..(t - 1), fn i ->
+          Nx.slice(h, [i, 0], [1, Nx.axis_size(h, 1)])
+        end)
+
+      rank == 2 ->
+        # Static scalar-observation matrix (must have at least one singleton axis).
+        if Nx.axis_size(h, 0) != 1 and Nx.axis_size(h, 1) != 1 do
+          raise ArgumentError,
+                "structured sampler expects static H with a singleton axis, got shape #{inspect(Nx.shape(h))}"
+        end
+
+        List.duplicate(h, t)
+    end
+  end
+
+  # Converts a per-step H tensor into a row vector for scalar-observation residuals.
+  defp structured_h_row(%Nx.Tensor{} = h_t) do
+    case Nx.rank(h_t) do
+      0 ->
+        Nx.reshape(h_t, {1})
+
+      1 ->
+        h_t
+
+      2 ->
+        cond do
+          Nx.axis_size(h_t, 0) == 1 ->
+            Nx.squeeze(h_t, axes: [0])
+
+          Nx.axis_size(h_t, 1) == 1 ->
+            Nx.squeeze(h_t, axes: [1])
+
+          true ->
+            raise ArgumentError,
+                  "structured scalar-observation residual expects rank-2 H with a singleton axis, got shape #{inspect(Nx.shape(h_t))}"
+        end
+
+      _ ->
+        raise ArgumentError,
+              "structured scalar-observation residual expects rank <= 2 H, got rank #{Nx.rank(h_t)}"
+    end
   end
 
   # -- Input validation helpers ------------------------------------------------
