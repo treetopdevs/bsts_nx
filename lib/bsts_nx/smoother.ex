@@ -392,7 +392,7 @@ defmodule BstsNx.Smoother do
         chol_T = Nx.sqrt(safe_var)
         Nx.add(x_T_mean, Nx.multiply(chol_T, eps_T))
       else
-        chol_T = BstsNx.Utils.safe_cholesky(p_T_cov)
+        chol_T = safe_cholesky_or_zero(p_T_cov, "terminal covariance")
 
         add(x_T_mean, dot(chol_T, eps_T))
       end
@@ -445,7 +445,7 @@ defmodule BstsNx.Smoother do
               chol_k = Nx.sqrt(safe_cov)
               Nx.add(mean, Nx.multiply(chol_k, eps_k))
             else
-              chol_k = BstsNx.Utils.safe_cholesky(cov)
+              chol_k = safe_cholesky_or_zero(cov, "conditional covariance at step #{idx}")
 
               add(mean, dot(chol_k, eps_k))
             end
@@ -507,13 +507,14 @@ defmodule BstsNx.Smoother do
 
   defp solve_with_jitter(a, b) do
     dim = Nx.shape(a) |> elem(0)
+    a_sym = Nx.multiply(Nx.add(a, transpose(a)), 0.5)
 
     Enum.reduce_while([1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3], nil, fn jitter_scale, _acc ->
       jitter = Nx.eye(dim) |> Nx.multiply(jitter_scale)
 
       result =
         try do
-          Nx.LinAlg.solve(Nx.add(a, jitter), b)
+          Nx.LinAlg.solve(Nx.add(a_sym, jitter), b)
         rescue
           _ -> :failed
         end
@@ -530,6 +531,7 @@ defmodule BstsNx.Smoother do
           end
       end
     end) ||
+      pinv_fallback(a_sym, b) ||
       (
         Logger.warning(
           "Smoother.safe_solve: solve failed even with max jitter 1e-3; " <>
@@ -538,5 +540,42 @@ defmodule BstsNx.Smoother do
 
         Nx.broadcast(Nx.tensor(0.0), Nx.shape(b))
       )
+  end
+
+  # Final linear solve fallback for singular systems.
+  # Uses Moore-Penrose pseudoinverse to retain as much gain information as possible.
+  defp pinv_fallback(a, b) do
+    result =
+      try do
+        Nx.dot(Nx.LinAlg.pinv(a), b)
+      rescue
+        _ -> :failed
+      end
+
+    case result do
+      :failed ->
+        nil
+
+      tensor ->
+        if has_non_finite?(tensor), do: nil, else: tensor
+    end
+  end
+
+  # Matrix-covariance Cholesky used by simulation smoothing.
+  # Symmetrizes the covariance and degrades gracefully when decomposition fails.
+  defp safe_cholesky_or_zero(cov, label) do
+    cov_sym = Nx.multiply(Nx.add(cov, transpose(cov)), 0.5)
+
+    try do
+      BstsNx.Utils.safe_cholesky(cov_sym)
+    rescue
+      _ ->
+        Logger.warning(
+          "Simulation smoother: #{label} not positive-definite even with jitter; " <>
+            "using zero process noise for this step"
+        )
+
+        Nx.broadcast(Nx.tensor(0.0), Nx.shape(cov_sym))
+    end
   end
 end
