@@ -85,6 +85,7 @@ defmodule BstsNx.MixProject do
         "README.md",
         "docs/overview.md",
         "docs/hex-publishing-checklist.md",
+        "docs/release-readiness-plan.md",
         "docs/getting-started.md",
         "docs/core-modeling.md",
         "docs/causal-inference-and-attribution.md",
@@ -98,6 +99,7 @@ defmodule BstsNx.MixProject do
         Guides: [
           "docs/overview.md",
           "docs/hex-publishing-checklist.md",
+          "docs/release-readiness-plan.md",
           "docs/getting-started.md",
           "docs/core-modeling.md",
           "docs/causal-inference-and-attribution.md",
