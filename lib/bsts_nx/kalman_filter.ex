@@ -212,7 +212,7 @@ defmodule BstsNx.KalmanFilter do
 
   * `observations` – an `Nx` tensor of shape `{t}` containing the
     observations.  Missing observations should be encoded as
-    `Float.nan/0` (i.e. `:nan`) in the tensor.  When an observation is
+    `Nx.Constants.nan/0` in the tensor.  When an observation is
     `NaN` the filter performs only the prediction step and skips the
     update.
   * `f` – the scalar state transition parameter.  If an `Nx` tensor is

@@ -10,7 +10,8 @@ defmodule BstsNx.Distributions do
 
   To draw a sample from this distribution we exploit the relation
   that if `G ∼ Gamma(α, 1)` then `X = β / G` has the above
-  inverse–gamma distribution.  Erlang's `:rand.gamma/2` function
+  inverse–gamma distribution.  Erlang's random gamma sampler
+  (`:rand` module, shape + scale)
   samples from a gamma distribution with given shape and scale
   parameters, which we use internally.  The resulting value is
   wrapped in an `Nx` tensor to integrate with the rest of this

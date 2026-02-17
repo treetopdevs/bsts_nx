@@ -79,9 +79,14 @@ config :nx, :default_backend, EXLA.Backend
 
 ## Documentation
 
-- `docs/getting-started.md` for a structured walkthrough
-- `docs/causal-impact.md` for intervention analysis
-- API docs are generated with ExDoc
+- `docs/overview.md` for a map of modules and workflows
+- `docs/getting-started.md` for an end-to-end starter walkthrough
+- `docs/core-modeling.md` for Kalman/smoother/Gibbs/model composition details
+- `docs/causal-inference-and-attribution.md` for intervention + attribution workflows
+- `docs/forecasting-and-applications.md` for forecasting and domain wrappers
+- `docs/synthetic-data-and-validation.md` for scenario generation and calibration
+- `docs/module-reference.md` for module-by-module use cases and snippets
+- API docs are generated with ExDoc (`mix docs`)
 
 ## Status
 

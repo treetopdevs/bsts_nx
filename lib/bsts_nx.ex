@@ -36,6 +36,25 @@ defmodule BstsNx do
     * `BstsNx.Applications.PolicyEvaluator` — Interrupted time series for policy evaluation
     * `BstsNx.Applications.TVAttribution` — TV-to-web ad attribution
 
+  ## Documentation Map
+
+  If you are new to the project, read the guides in this order:
+
+    * `overview` — module map + workflow selection
+    * `getting-started` — first end-to-end examples
+    * `core-modeling` — Kalman/smoother/Gibbs/model composition
+    * `causal-inference-and-attribution` — intervention and overlap attribution
+    * `forecasting-and-applications` — forecasting and domain wrappers
+    * `synthetic-data-and-validation` — synthetic scenarios and calibration
+    * `module-reference` — module-by-module lookup with snippets
+
+  ## Indexing Conventions
+
+  Be explicit with index semantics:
+
+    * `pre_period` and `post_period` are **1-based inclusive**
+    * spot windows are **0-based half-open** (`[window_start, window_end)`)
+
   ## Quick Start
 
   ### Causal Impact Analysis

@@ -127,7 +127,7 @@ defmodule BstsNx.Validation do
   @doc """
   Two-tailed z-score for significance level alpha.
 
-  Delegates to `BstsNx.Utils.z_score/1`. Returns `z` such that
+  Delegates to the shared z-score helper. Returns `z` such that
   `P(-z < Z < z) = 1 - alpha` for a standard normal `Z`.
 
   ## Examples

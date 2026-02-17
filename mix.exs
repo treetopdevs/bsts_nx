@@ -52,16 +52,75 @@ defmodule BstsNx.MixProject do
       main: "readme",
       extras: [
         "README.md",
+        "docs/overview.md",
         "docs/getting-started.md",
+        "docs/core-modeling.md",
+        "docs/causal-inference-and-attribution.md",
+        "docs/forecasting-and-applications.md",
+        "docs/synthetic-data-and-validation.md",
+        "docs/module-reference.md",
         "docs/components.md",
         "docs/causal-impact.md"
       ],
       groups_for_extras: [
         Guides: [
+          "docs/overview.md",
           "docs/getting-started.md",
+          "docs/core-modeling.md",
+          "docs/causal-inference-and-attribution.md",
+          "docs/forecasting-and-applications.md",
+          "docs/synthetic-data-and-validation.md",
+          "docs/module-reference.md",
           "docs/components.md",
           "docs/causal-impact.md"
         ]
+      ],
+      groups_for_modules: [
+        "Top-Level": [
+          BstsNx
+        ],
+        "Core Modeling": [
+          BstsNx.KalmanFilter,
+          BstsNx.Smoother,
+          BstsNx.GibbsSampler,
+          BstsNx.StateSpace,
+          BstsNx.Components,
+          BstsNx.ModelSpec,
+          BstsNx.Distributions,
+          BstsNx.ModelBuilder
+        ],
+        "Causal Inference": [
+          BstsNx.CausalImpact,
+          BstsNx.InterventionAnalysis,
+          BstsNx.Pipeline,
+          BstsNx.RollingBaseline,
+          BstsNx.SpotAttributor,
+          BstsNx.ShapleyAllocator,
+          BstsNx.CovariateSelection,
+          BstsNx.Diagnostics,
+          BstsNx.Validation
+        ],
+        Forecasting: [
+          BstsNx.Forecaster,
+          BstsNx.BCT.ARForecaster
+        ],
+        Applications: [
+          BstsNx.Applications.TVAttribution,
+          BstsNx.Applications.MarketingLift,
+          BstsNx.Applications.DemandForecaster,
+          BstsNx.Applications.AnomalyDetector,
+          BstsNx.Applications.PolicyEvaluator
+        ],
+        "Synthetic Data": [
+          BstsNx.Synthetic.Generator,
+          BstsNx.Synthetic.Scenarios,
+          BstsNx.Synthetic.Adstock
+        ]
+      ],
+      nest_modules_by_prefix: [
+        BstsNx.Applications,
+        BstsNx.BCT,
+        BstsNx.Synthetic
       ]
     ]
   end
