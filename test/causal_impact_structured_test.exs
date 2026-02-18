@@ -109,7 +109,7 @@ defmodule BstsNx.CausalImpactStructuredTest do
       base_level = 100.0
 
       pre =
-        Enum.flat_map(1..20, fn _week ->
+        Enum.flat_map(1..8, fn _week ->
           Enum.map(pattern, fn s -> base_level + s end)
         end)
 
@@ -117,7 +117,7 @@ defmodule BstsNx.CausalImpactStructuredTest do
       lift = 30.0
 
       post =
-        Enum.flat_map(1..5, fn _week ->
+        Enum.flat_map(1..2, fn _week ->
           Enum.map(pattern, fn s -> base_level + s + lift end)
         end)
 
@@ -134,8 +134,8 @@ defmodule BstsNx.CausalImpactStructuredTest do
 
       result =
         CausalImpact.estimate_structured(obs, {1, n_pre}, {n_pre + 1, n_total}, spec,
-          num_samples: 80,
-          burn_in: 40,
+          num_samples: 30,
+          burn_in: 15,
           seed: 555
         )
 

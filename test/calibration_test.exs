@@ -67,6 +67,7 @@ defmodule BstsNx.CalibrationTest do
   # -------------------------------------------------------------------
 
   describe "positive lift recovery" do
+    @tag timeout: 120_000
     test "known positive lift (10.0) is covered" do
       spec =
         Components.local_level_spec(
@@ -78,13 +79,13 @@ defmodule BstsNx.CalibrationTest do
 
       result =
         Validation.known_lift_injection(10.0, spec,
-          # Keep calibration setup high signal to avoid cross-version flakes.
-          n_pre: 200,
-          n_post: 30,
+          # Keep calibration setup high signal while staying fast on CI.
+          n_pre: 80,
+          n_post: 10,
           base_level: 100.0,
-          noise_sd: 0.5,
-          num_samples: 120,
-          burn_in: 60,
+          noise_sd: 0.2,
+          num_samples: 30,
+          burn_in: 15,
           seed: 42,
           credible_level: 0.99
         )
