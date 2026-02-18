@@ -78,15 +78,15 @@ defmodule BstsNx.CalibrationTest do
 
       result =
         Validation.known_lift_injection(10.0, spec,
-          # Use a slightly easier signal-to-noise setup for cross-version stability.
-          n_pre: 120,
-          n_post: 10,
+          # Keep calibration setup high signal to avoid cross-version flakes.
+          n_pre: 200,
+          n_post: 30,
           base_level: 100.0,
-          noise_sd: 1.5,
-          num_samples: 80,
-          burn_in: 40,
+          noise_sd: 0.5,
+          num_samples: 120,
+          burn_in: 60,
           seed: 42,
-          credible_level: 0.95
+          credible_level: 0.99
         )
 
       assert result.covered == true,

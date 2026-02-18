@@ -228,10 +228,13 @@ defmodule BstsNx.Smoother do
             c = smoother_gain(p_filt, f_t, p_pred_next)
 
             # state estimate
-            x_smooth = add(x_filt, dot(c, subtract(x_smooth_next, x_pred_next)))
+            x_smooth = add(x_filt, compat_dot(c, subtract(x_smooth_next, x_pred_next)))
             # covariance estimate
             p_smooth =
-              add(p_filt, dot(c, dot(subtract(p_smooth_next, p_pred_next), transpose(c))))
+              add(
+                p_filt,
+                compat_dot(c, compat_dot(subtract(p_smooth_next, p_pred_next), transpose(c)))
+              )
 
             :array.set(idx, {x_smooth, p_smooth}, acc)
           end)
@@ -394,7 +397,7 @@ defmodule BstsNx.Smoother do
       else
         chol_T = safe_cholesky_or_zero(p_T_cov, "terminal covariance")
 
-        add(x_T_mean, dot(chol_T, eps_T))
+        add(x_T_mean, compat_dot(chol_T, eps_T))
       end
 
     states_arr = :array.set(t - 1, x_sample_T, states_arr)
@@ -411,7 +414,7 @@ defmodule BstsNx.Smoother do
           # Covariance uses the symmetric form:
           # Cov(x_k | x_{k+1}, y_{1:T}) = P_k - J_k P_{k+1|k} J_k^T
           # This generally stays closer to PSD under finite precision.
-          mean = add(x_filt, dot(j, subtract(x_next, x_pred_next)))
+          mean = add(x_filt, compat_dot(j, subtract(x_next, x_pred_next)))
 
           cov =
             if Nx.rank(p_filt) == 0 do
@@ -420,7 +423,7 @@ defmodule BstsNx.Smoother do
               # Prefer the symmetric form for numerical robustness:
               # Cov(x_k | x_{k+1}, y_{1:T}) = P_k - J_k P_{k+1|k} J_k^T
               # This tends to stay closer to PSD under finite precision.
-              subtract(p_filt, dot(j, dot(p_pred_next, transpose(j))))
+              subtract(p_filt, compat_dot(j, compat_dot(p_pred_next, transpose(j))))
               |> symmetrize()
             end
 
@@ -446,7 +449,7 @@ defmodule BstsNx.Smoother do
             else
               chol_k = safe_cholesky_or_zero(cov, "conditional covariance at step #{idx}")
 
-              add(mean, dot(chol_k, eps_k))
+              add(mean, compat_dot(chol_k, eps_k))
             end
 
           :array.set(idx, x_k, st_acc)
@@ -470,8 +473,21 @@ defmodule BstsNx.Smoother do
         p_filt |> Nx.multiply(f_t) |> Nx.divide(p_pred_next)
       end
     else
-      rhs = dot(f_t, p_filt)
-      safe_solve(p_pred_next, rhs) |> transpose()
+      rhs = compat_dot(f_t, p_filt)
+
+      # Avoid LinAlg.solve for 1x1 systems to prevent version-specific
+      # warnings and numeric jitter in older Nx/Elixir combinations.
+      if Nx.shape(p_pred_next) == {1, 1} and Nx.shape(rhs) == {1, 1} do
+        denom = Nx.to_number(Nx.squeeze(p_pred_next))
+
+        if abs(denom) < 1.0e-15 do
+          Nx.tensor([[0.0]])
+        else
+          Nx.divide(rhs, p_pred_next)
+        end
+      else
+        safe_solve(p_pred_next, rhs) |> transpose()
+      end
     end
   end
 
@@ -546,7 +562,7 @@ defmodule BstsNx.Smoother do
   defp pinv_fallback(a, b) do
     result =
       try do
-        Nx.dot(Nx.LinAlg.pinv(a), b)
+        compat_dot(Nx.LinAlg.pinv(a), b)
       rescue
         _ -> :failed
       end
@@ -557,6 +573,43 @@ defmodule BstsNx.Smoother do
 
       tensor ->
         if has_non_finite?(tensor), do: nil, else: tensor
+    end
+  end
+
+  # Nx 0.6 emits range warnings for some dot rank combinations on newer
+  # Elixir versions. Use explicit multiply/sum forms for common low-rank
+  # cases to keep smoother paths stable across the CI matrix.
+  defp compat_dot(a, b) do
+    case {Nx.rank(a), Nx.rank(b)} do
+      {0, 0} ->
+        Nx.multiply(a, b)
+
+      {2, 1} ->
+        b_row = Nx.reshape(b, {1, Nx.axis_size(b, 0)})
+        Nx.multiply(a, b_row) |> Nx.sum(axes: [1])
+
+      {2, 2} ->
+        {m, n} = Nx.shape(a)
+        {n_b, p} = Nx.shape(b)
+
+        if n != n_b do
+          raise ArgumentError,
+                "incompatible matrix shapes for multiplication: #{inspect(Nx.shape(a))} and #{inspect(Nx.shape(b))}"
+        end
+
+        a_expanded = Nx.reshape(a, {m, n, 1})
+        b_expanded = Nx.reshape(b, {1, n, p})
+        Nx.multiply(a_expanded, b_expanded) |> Nx.sum(axes: [1])
+
+      {1, 2} ->
+        a_col = Nx.reshape(a, {Nx.axis_size(a, 0), 1})
+        Nx.multiply(a_col, b) |> Nx.sum(axes: [0])
+
+      {1, 1} ->
+        Nx.multiply(a, b) |> Nx.sum()
+
+      _ ->
+        dot(a, b)
     end
   end
 
@@ -599,7 +652,7 @@ defmodule BstsNx.Smoother do
         eps = Nx.tensor(1.0e-9, type: Nx.type(e_vals))
         clipped = Nx.max(e_vals, eps)
         d = Nx.make_diagonal(clipped)
-        dot(dot(e_vecs, d), transpose(e_vecs)) |> symmetrize()
+        compat_dot(compat_dot(e_vecs, d), transpose(e_vecs)) |> symmetrize()
       rescue
         _ -> :failed
       end

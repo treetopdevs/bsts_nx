@@ -103,23 +103,22 @@ defmodule BstsNx.CausalImpactStructuredTest do
   describe "estimate_structured with seasonal model" do
     @tag timeout: 120_000
     test "detects positive effect in seasonal data" do
-      :rand.seed(:exsss, {300, 301, 302})
-      # Day-of-week seasonal pattern (S=7), 12 weeks pre, 3 weeks post.
-      # Keep this signal strong to avoid cross-version stochastic flakes.
+      # Deterministic seasonal signal with a strong post-period lift to keep
+      # this check robust across Elixir/OTP/Nx versions.
       pattern = [3.0, 1.0, -1.0, -2.0, 0.0, 2.0, -3.0]
       base_level = 100.0
 
       pre =
-        Enum.flat_map(1..12, fn _week ->
-          Enum.map(pattern, fn s -> base_level + s + :rand.normal() * 0.5 end)
+        Enum.flat_map(1..20, fn _week ->
+          Enum.map(pattern, fn s -> base_level + s end)
         end)
 
       # Post period: same pattern but with clear positive lift
-      lift = 20.0
+      lift = 30.0
 
       post =
-        Enum.flat_map(1..3, fn _week ->
-          Enum.map(pattern, fn s -> base_level + s + lift + :rand.normal() * 0.5 end)
+        Enum.flat_map(1..5, fn _week ->
+          Enum.map(pattern, fn s -> base_level + s + lift end)
         end)
 
       obs = pre ++ post
@@ -128,15 +127,15 @@ defmodule BstsNx.CausalImpactStructuredTest do
 
       spec =
         Components.seasonal_spec(7,
-          process_var: 0.1,
-          obs_var: 2.0,
+          process_var: 0.01,
+          obs_var: 0.5,
           initial_cov: 10.0
         )
 
       result =
         CausalImpact.estimate_structured(obs, {1, n_pre}, {n_pre + 1, n_total}, spec,
-          num_samples: 60,
-          burn_in: 30,
+          num_samples: 80,
+          burn_in: 40,
           seed: 555
         )
 

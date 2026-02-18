@@ -126,8 +126,8 @@ defmodule BstsNx.KalmanFilter do
                                                                                               filt_acc,
                                                                                               pred_acc} ->
           # one-step ahead prediction
-          x_pred = dot(f_t, x_prev)
-          p_pred = add(dot(dot(f_t, p_prev), transpose(f_t)), q_t)
+          x_pred = mul_or_dot(f_t, x_prev)
+          p_pred = add(mul_or_dot(mul_or_dot(f_t, p_prev), transpose(f_t)), q_t)
           # record prediction
           pred_acc2 = [{x_pred, p_pred} | pred_acc]
           # update with observation; handle missing observations (nil)
@@ -140,8 +140,8 @@ defmodule BstsNx.KalmanFilter do
           else
             # update with actual observation
             z_t = to_tensor(z)
-            y = subtract(z_t, dot(h_i, x_pred))
-            s = add(dot(dot(h_i, p_pred), transpose(h_i)), r_t)
+            y = subtract(z_t, mul_or_dot(h_i, x_pred))
+            s = add(mul_or_dot(mul_or_dot(h_i, p_pred), transpose(h_i)), r_t)
             # Compute Kalman gain K = P * H^T * S^{-1}.
             # For scalar S use dot+division; otherwise use solve for stability.
             # dot(p_pred, h_i) correctly handles both scalar (multiply) and
@@ -151,16 +151,16 @@ defmodule BstsNx.KalmanFilter do
                 if abs(Nx.to_number(s)) < 1.0e-15 do
                   Nx.broadcast(0.0, Nx.shape(x_pred))
                 else
-                  dot(p_pred, h_i) |> Nx.divide(s)
+                  mul_or_dot(p_pred, h_i) |> Nx.divide(s)
                 end
               else
                 # Solve S * X = H * P_pred for X; the result has shape (m x n)'
-                k_t = Nx.LinAlg.solve(s, dot(h_i, p_pred))
+                k_t = Nx.LinAlg.solve(s, mul_or_dot(h_i, p_pred))
                 transpose(k_t)
               end
 
             # State update: use dot for matrix K (multi-dim obs), multiply for vector/scalar K
-            k_times_y = if Nx.rank(k) >= 2, do: dot(k, y), else: Nx.multiply(k, y)
+            k_times_y = if Nx.rank(k) >= 2, do: mul_or_dot(k, y), else: Nx.multiply(k, y)
             x_new = add(x_pred, k_times_y)
             # Joseph form covariance update: (I - K H) P (I - K H)' + K R K'
             p_new =
@@ -178,7 +178,7 @@ defmodule BstsNx.KalmanFilter do
                   if Nx.rank(k) < 2 do
                     Nx.outer(Nx.flatten(k), Nx.flatten(h_i))
                   else
-                    dot(k, h_i)
+                    mul_or_dot(k, h_i)
                   end
 
                 i_kh = subtract(identity, kh)
@@ -187,10 +187,10 @@ defmodule BstsNx.KalmanFilter do
                   if Nx.rank(k) < 2 do
                     Nx.outer(Nx.flatten(k), Nx.flatten(k)) |> Nx.multiply(r_t)
                   else
-                    dot(dot(k, r_t), transpose(k))
+                    mul_or_dot(mul_or_dot(k, r_t), transpose(k))
                   end
 
-                add(dot(dot(i_kh, p_pred), transpose(i_kh)), kr_kt)
+                add(mul_or_dot(mul_or_dot(i_kh, p_pred), transpose(i_kh)), kr_kt)
               end
 
             # accumulate filtered estimates
@@ -480,4 +480,41 @@ defmodule BstsNx.KalmanFilter do
   end
 
   defp missing_observation?(_), do: false
+
+  # Nx 0.6 emits warnings for scalar dot paths in some Elixir/OTP combos.
+  # Also avoid rank-2/rank-1 dot calls (matrix-vector and vector-matrix),
+  # which can trigger noisy range warnings in older Nx versions.
+  defp mul_or_dot(a, b) do
+    case {Nx.rank(a), Nx.rank(b)} do
+      {0, 0} ->
+        Nx.multiply(a, b)
+
+      {2, 1} ->
+        b_row = Nx.reshape(b, {1, Nx.axis_size(b, 0)})
+        Nx.multiply(a, b_row) |> Nx.sum(axes: [1])
+
+      {2, 2} ->
+        {m, n} = Nx.shape(a)
+        {n_b, p} = Nx.shape(b)
+
+        if n != n_b do
+          raise ArgumentError,
+                "incompatible matrix shapes for multiplication: #{inspect(Nx.shape(a))} and #{inspect(Nx.shape(b))}"
+        end
+
+        a_expanded = Nx.reshape(a, {m, n, 1})
+        b_expanded = Nx.reshape(b, {1, n, p})
+        Nx.multiply(a_expanded, b_expanded) |> Nx.sum(axes: [1])
+
+      {1, 2} ->
+        a_col = Nx.reshape(a, {Nx.axis_size(a, 0), 1})
+        Nx.multiply(a_col, b) |> Nx.sum(axes: [0])
+
+      {1, 1} ->
+        Nx.multiply(a, b) |> Nx.sum()
+
+      _ ->
+        dot(a, b)
+    end
+  end
 end
