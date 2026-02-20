@@ -302,7 +302,10 @@ defmodule BstsNx.ModelBuilder do
         else: Nx.reshape(Nx.slice(h_last, [0], [n_non_reg]), {1, n_non_reg})
 
     Enum.map(0..(horizon - 1), fn i ->
-      reg_row = Nx.reshape(future_t[i], {1, p})
+      reg_row =
+        Nx.slice_along_axis(future_t, i, 1, axis: 0)
+        |> Nx.reshape({1, p})
+
       Nx.concatenate([static_h, reg_row], axis: 1)
     end)
   end

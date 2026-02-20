@@ -5,14 +5,14 @@ defmodule BstsNx.Components do
   Bayesian Structural Time Series models are typically constructed from
   modular building blocks such as local level, trend and regression
   components.  This module provides helper functions to instantiate
-  these components as maps with keys `:f`, `:q` and `:h`, consistent
-  with the expectations of `BstsNx.StateSpace.compose/2` and the
-  Kalman filter.
+  local level, trend and seasonal components as maps with keys `:f`,
+  `:q` and `:h`, consistent with the expectations of
+  `BstsNx.StateSpace.compose/2` and the Kalman filter.
 
-  Additionally, this module provides `*_spec` factory functions that
-  return `%BstsNx.ModelSpec{}` structs for use with the structured
-  Gibbs sampler (`BstsNx.GibbsSampler.sample_structured/4`).  These
-  specs fully describe a model's matrices, initial conditions and
+  Regression and structured workflows are built via `%BstsNx.ModelSpec{}`
+  factories (`regression/2`, `regression_spec/2`, and other `*_spec`
+  helpers) for use with `BstsNx.GibbsSampler.sample_structured/4`.
+  These specs fully describe matrices, initial conditions and
   inverse-gamma priors for each diagonal Q entry.
   """
 
@@ -74,42 +74,41 @@ defmodule BstsNx.Components do
   end
 
   @doc """
-  Constructs a regression component for one or more regressors.
+  Constructs a regression `%BstsNx.ModelSpec{}` from time-varying regressors.
 
-  Given a vector of regression coefficients `betas` and a matrix of
-  design covariances `sigma_betas`, this component models the latent
-  coefficients as a random walk with innovation variance `sigma_betas`.
-  The transition matrix is an identity matrix of size equal to the
-  number of regressors, the process covariance is `sigma_betas`, and
-  the observation matrix is the row vector of betas.  This component
-  can be composed with others via `BstsNx.StateSpace.compose/2`.
+  This is the primary regression constructor and delegates to
+  `regression_spec/2`. The model uses latent coefficients with random-walk
+  dynamics and time-varying observation rows from the regressor matrix.
 
-  The initial beta estimates and their covariance should be provided
-  separately to the Kalman filter.
+  The first argument must be regressors with shape `{T, p}` (tensor or
+  list-of-lists). The second argument is a keyword list of options
+  accepted by `regression_spec/2`.
 
   ## Examples
 
-      iex> betas = Nx.tensor([0.5, -0.2])
-      iex> sigma = Nx.eye(2) |> Nx.multiply(0.01)
-      iex> c = BstsNx.Components.regression(betas, sigma)
-      iex> Nx.shape(c.f)
+      iex> x = Nx.tensor([[1.0, 0.5], [0.8, 1.2], [1.1, 0.9]])
+      iex> spec = BstsNx.Components.regression(x, var_beta: 0.01, obs_var: 1.0)
+      iex> Nx.shape(spec.f)
       {2, 2}
   """
-  @spec regression(Nx.t(), Nx.t()) :: %{f: Nx.t(), q: Nx.t(), h: Nx.t()}
-  def regression(betas, sigma_betas) do
-    # ensure betas is a vector tensor
-    beta_vec =
-      case betas do
-        %Nx.Tensor{} -> betas
-        v when is_list(v) or is_number(v) -> Nx.tensor(v)
-      end
+  @spec regression(Nx.t() | list(), keyword()) :: ModelSpec.t()
+  def regression(regressors, opts \\ [])
 
-    dim = Nx.axis_size(beta_vec, 0)
-    f = Nx.eye(dim)
-    q = sigma_betas
-    # observation matrix is 1×dim row vector of betas
-    h = Nx.reshape(beta_vec, {1, dim})
-    %{f: f, q: q, h: h}
+  def regression(regressors, opts) when is_list(opts) do
+    if Keyword.keyword?(opts) do
+      regression_spec(regressors, opts)
+    else
+      legacy_regression_error!()
+    end
+  end
+
+  def regression(_regressors, _opts), do: legacy_regression_error!()
+
+  defp legacy_regression_error! do
+    raise ArgumentError,
+          "Components.regression/2 now expects (regressors, opts). " <>
+            "Legacy (betas, sigma_matrix) is no longer supported. " <>
+            "Use Components.regression_spec(regressors, opts) or Components.regression(regressors, opts)."
   end
 
   @doc """
@@ -165,21 +164,9 @@ defmodule BstsNx.Components do
   Computes the regression contribution for a given latent coefficient state and
   a vector of regressor values.
 
-  Note: The observation matrix `h` contains the regression coefficients
-  directly. This means the regression contribution to the observation is
-  βᵀ · x where x is the latent coefficient state. To incorporate time‑varying
-  regressors `X_t`, multiply the design vector by the latent state outside of
-  this component.
-
   Given a coefficient state vector `state` of shape `{n}` and a
   design vector `regressors` of the same length, this function returns
-  the scalar contribution `βᵀ·x` as a 0‑dimensional tensor.  This is
-  useful when working with time‑varying regressors, where the
-  regression coefficients evolve according to a random walk (modeled
-  by `BstsNx.Components.regression/2`) but the regressor values
-  themselves change at each time step.  You can use this function
-  within the observation model to compute the regression part of the
-  predicted observation.
+  the scalar contribution `βᵀ·x` as a 0‑dimensional tensor.
 
   ## Examples
 

@@ -1,8 +1,9 @@
 # Components and Composition
 
 BSTS models are built from components such as local level, trend, and
-regression. BstsNx represents components as maps with keys `:f`, `:q`, and
-`:h`, which can be composed into a larger state-space model.
+regression. BstsNx represents local level/trend/seasonal components as maps
+with keys `:f`, `:q`, and `:h`, which can be composed into a larger
+state-space model. Regression is built as a `%BstsNx.ModelSpec{}`.
 
 ## Local level
 
@@ -19,12 +20,19 @@ component.h  # [[1.0]]
 component = BstsNx.Components.local_linear_trend(0.1, 0.01)
 ```
 
-## Regression component
+## Regression model spec
 
 ```elixir
-betas = Nx.tensor([0.5, -0.2])
-sigma = Nx.eye(2) |> Nx.multiply(0.01)
-component = BstsNx.Components.regression(betas, sigma)
+regressors = Nx.tensor([
+  [1.0, 0.5],
+  [0.8, 1.2],
+  [1.1, 0.9]
+])
+
+spec = BstsNx.Components.regression(regressors,
+  var_beta: 0.01,
+  obs_var: 1.0
+)
 ```
 
 ## Compose components
@@ -35,8 +43,8 @@ trend = BstsNx.Components.local_linear_trend(0.1, 0.01)
 model = BstsNx.StateSpace.compose(level, trend)
 ```
 
-## Time-varying regressors
+## Time-varying regression contribution
 
-The regression component models coefficient evolution. To use time‑varying
-regressors `X_t`, compute `βᵀ·X_t` at each time step, e.g. with
+Regression specs model coefficient evolution with time-varying observation
+rows. To compute a direct per-step contribution `βᵀ·X_t`, use
 `BstsNx.Components.predict_with_regressors/2`.

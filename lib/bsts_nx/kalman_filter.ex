@@ -24,6 +24,7 @@ defmodule BstsNx.KalmanFilter do
   import BstsNx.Utils, only: [to_tensor: 1]
   # Require Nx.Defn for compiled implementations
   require Nx.Defn
+  require Logger
 
   @doc """
   Runs a Kalman filter over a sequence of observations.
@@ -155,7 +156,14 @@ defmodule BstsNx.KalmanFilter do
                 end
               else
                 # Solve S * X = H * P_pred for X; the result has shape (m x n)'
-                k_t = Nx.LinAlg.solve(s, mul_or_dot(h_i, p_pred))
+                rhs =
+                  if Nx.rank(p_pred) == 0 do
+                    Nx.multiply(h_i, p_pred)
+                  else
+                    mul_or_dot(h_i, p_pred)
+                  end
+
+                k_t = safe_solve(s, rhs)
                 transpose(k_t)
               end
 
@@ -480,6 +488,86 @@ defmodule BstsNx.KalmanFilter do
   end
 
   defp missing_observation?(_), do: false
+
+  # Robust linear solve for Kalman gain computation.
+  # Falls back to jitter and pseudo-inverse for singular/ill-conditioned systems.
+  defp safe_solve(a, b) do
+    result =
+      try do
+        Nx.LinAlg.solve(a, b)
+      rescue
+        _ -> :failed
+      end
+
+    case result do
+      :failed ->
+        solve_with_jitter(a, b)
+
+      tensor ->
+        if has_non_finite?(tensor) do
+          solve_with_jitter(a, b)
+        else
+          tensor
+        end
+    end
+  end
+
+  defp solve_with_jitter(a, b) do
+    dim = Nx.axis_size(a, 0)
+    a_sym = Nx.multiply(Nx.add(a, transpose(a)), 0.5)
+
+    Enum.reduce_while([1.0e-8, 1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3], nil, fn jitter_scale,
+                                                                                _acc ->
+      jitter = Nx.eye(dim) |> Nx.multiply(jitter_scale)
+
+      result =
+        try do
+          Nx.LinAlg.solve(Nx.add(a_sym, jitter), b)
+        rescue
+          _ -> :failed
+        end
+
+      case result do
+        :failed ->
+          {:cont, nil}
+
+        tensor ->
+          if has_non_finite?(tensor) do
+            {:cont, nil}
+          else
+            {:halt, tensor}
+          end
+      end
+    end) ||
+      pinv_fallback(a_sym, b) ||
+      (
+        Logger.warning(
+          "KalmanFilter.safe_solve: solve failed even with jitter/pinv fallback; " <>
+            "using zero gain for this update step"
+        )
+
+        Nx.broadcast(Nx.tensor(0.0), Nx.shape(b))
+      )
+  end
+
+  defp pinv_fallback(a, b) do
+    result =
+      try do
+        mul_or_dot(Nx.LinAlg.pinv(a), b)
+      rescue
+        _ -> :failed
+      end
+
+    case result do
+      :failed -> nil
+      tensor -> if has_non_finite?(tensor), do: nil, else: tensor
+    end
+  end
+
+  defp has_non_finite?(tensor) do
+    Nx.any(Nx.logical_or(Nx.is_nan(tensor), Nx.is_infinity(tensor)))
+    |> Nx.to_number() == 1
+  end
 
   # Nx 0.6 emits warnings for scalar dot paths in some Elixir/OTP combos.
   # Also avoid rank-2/rank-1 dot calls (matrix-vector and vector-matrix),

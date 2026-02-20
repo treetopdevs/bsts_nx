@@ -36,6 +36,83 @@ defmodule BstsNx.DistributionsStateSpaceAdditionalTest do
       assert Nx.shape(sample) == {3}
       assert Nx.shape(next_key) == {2}
     end
+
+    test "inv_gamma_sample is uncapped by default for heavy-tail settings" do
+      key = Nx.Random.key(123)
+
+      draws =
+        Enum.map(0..199, fn idx ->
+          keys = Nx.Random.split(key, parts: idx + 2)
+
+          subkey =
+            Nx.slice_along_axis(keys, idx, 1, axis: 0)
+            |> Nx.squeeze(axes: [0])
+
+          Distributions.inv_gamma_sample(1.0, 1.0e12, key: subkey)
+          |> Nx.to_number()
+        end)
+
+      assert Enum.any?(draws, fn v -> is_number(v) and v > 1.0e10 end)
+    end
+
+    test "inv_gamma_sample applies explicit max_value truncation when requested" do
+      key = Nx.Random.key(123)
+
+      draws =
+        Enum.map(0..49, fn idx ->
+          keys = Nx.Random.split(key, parts: idx + 2)
+
+          subkey =
+            Nx.slice_along_axis(keys, idx, 1, axis: 0)
+            |> Nx.squeeze(axes: [0])
+
+          Distributions.inv_gamma_sample(1.0, 1.0e12, key: subkey, max_value: 1.0e10)
+          |> Nx.to_number()
+        end)
+
+      assert Enum.all?(draws, fn v -> is_number(v) and v <= 1.0e10 end)
+      assert Enum.any?(draws, &(&1 == 1.0e10))
+    end
+
+    test "inv_gamma_sample_with_key aligns with split-key behavior and returns next key" do
+      base_key = Nx.Random.key(44)
+      split = Nx.Random.split(base_key, parts: 2)
+      expected_next_key = split_key_at(split, 1)
+
+      expected =
+        Distributions.inv_gamma_sample(3.0, 2.0, key: base_key)
+        |> Nx.to_number()
+
+      {actual_t, next_key} = Distributions.inv_gamma_sample_with_key(3.0, 2.0, base_key)
+      actual = Nx.to_number(actual_t)
+
+      assert_in_delta actual, expected, 1.0e-12
+      assert Nx.to_flat_list(next_key) == Nx.to_flat_list(expected_next_key)
+    end
+
+    test "inv_gamma_sample_with_key empirical moments are close to theory" do
+      alpha = 4.0
+      beta = 3.0
+      n = 4_000
+      key0 = Nx.Random.key(777)
+
+      {draws, _final_key} =
+        Enum.map_reduce(1..n, key0, fn _, key_acc ->
+          {draw, key_next} = Distributions.inv_gamma_sample_with_key(alpha, beta, key_acc)
+          {Nx.to_number(draw), key_next}
+        end)
+
+      mean = Enum.sum(draws) / n
+      var = variance(draws, mean)
+
+      # Inv-Gamma(alpha, beta) with alpha > 2:
+      # mean = beta / (alpha - 1), var = beta^2 / ((alpha - 1)^2 * (alpha - 2))
+      expected_mean = beta / (alpha - 1.0)
+      expected_var = beta * beta / ((alpha - 1.0) * (alpha - 1.0) * (alpha - 2.0))
+
+      assert_in_delta mean, expected_mean, 0.08
+      assert_in_delta var, expected_var, 0.15
+    end
   end
 
   describe "StateSpace" do
@@ -59,5 +136,19 @@ defmodule BstsNx.DistributionsStateSpaceAdditionalTest do
         StateSpace.compose(c1, c2)
       end
     end
+  end
+
+  defp split_key_at(keys, idx) do
+    Nx.slice_along_axis(keys, idx, 1, axis: 0)
+    |> Nx.squeeze(axes: [0])
+  end
+
+  defp variance(samples, mean) do
+    samples
+    |> Enum.reduce(0.0, fn x, acc ->
+      d = x - mean
+      acc + d * d
+    end)
+    |> Kernel./(max(length(samples), 1))
   end
 end

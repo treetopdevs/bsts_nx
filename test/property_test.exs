@@ -317,17 +317,19 @@ defmodule BstsNxPropertyTest do
       end
     end
 
-    property "regression component shape matches number of regressors" do
+    property "regression constructor returns ModelSpec with matching dimensions" do
       check all(
               dim <- StreamData.integer(1..5),
+              t_len <- StreamData.integer(2..12),
               max_runs: 20
             ) do
-        betas = Nx.broadcast(0.1, {dim})
-        sigma = Nx.eye(dim) |> Nx.multiply(0.01)
-        c = Components.regression(betas, sigma)
-        assert Nx.shape(c.f) == {dim, dim}
-        assert Nx.shape(c.q) == {dim, dim}
-        assert Nx.shape(c.h) == {1, dim}
+        regressors = Nx.broadcast(0.1, {t_len, dim})
+        spec = Components.regression(regressors, var_beta: 0.01, obs_var: 1.0)
+        assert spec.__struct__ == BstsNx.ModelSpec
+        assert Nx.shape(spec.f) == {dim, dim}
+        assert is_list(spec.h)
+        assert length(spec.h) == t_len
+        assert Nx.shape(hd(spec.h)) == {1, dim}
       end
     end
   end

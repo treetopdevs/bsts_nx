@@ -100,4 +100,33 @@ defmodule BstsNx.KalmanFilterMultivariateObservationTest do
     assert length(filtered) == 3
     assert length(predicted) == 3
   end
+
+  test "singular innovation covariance uses robust solve path without raising" do
+    # Duplicate measurement rows with R=0 produce singular S.
+    obs = [Nx.tensor([1.0, 1.0])]
+    h = Nx.tensor([[1.0], [1.0]])
+    r = Nx.tensor([[0.0, 0.0], [0.0, 0.0]])
+
+    {filtered, predicted} = KalmanFilter.filter_with_pred(obs, 1.0, h, 1.0, r, 0.0, 1.0)
+
+    assert length(filtered) == 1
+    assert length(predicted) == 1
+
+    Enum.each(filtered, fn {x, p} ->
+      x_vals = Nx.to_flat_list(x)
+      p_vals = Nx.to_flat_list(p)
+      assert x_vals != []
+      assert p_vals != []
+
+      Enum.each(x_vals, fn x_val ->
+        assert is_number(x_val)
+        assert x_val == x_val
+      end)
+
+      Enum.each(p_vals, fn p_val ->
+        assert is_number(p_val)
+        assert p_val == p_val
+      end)
+    end)
+  end
 end

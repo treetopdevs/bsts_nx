@@ -53,8 +53,8 @@ defmodule BstsNx.Smoother do
     sps = Nx.broadcast(Nx.tensor(0.0), {t})
     # Set the last element to the filtered value (smoother boundary condition)
     last_idx = t - 1
-    sxs = Nx.put_slice(sxs, [last_idx], Nx.reshape(xs[last_idx], {1}))
-    sps = Nx.put_slice(sps, [last_idx], Nx.reshape(ps[last_idx], {1}))
+    sxs = Nx.put_slice(sxs, [last_idx], Nx.reshape(take_scalar_at(xs, last_idx), {1}))
+    sps = Nx.put_slice(sps, [last_idx], Nx.reshape(take_scalar_at(ps, last_idx), {1}))
 
     # Backward pass: iterate from t-2 down to 0
     # Use an ascending counter k from 0..(t-2) and compute i = t - 2 - k
@@ -66,8 +66,8 @@ defmodule BstsNx.Smoother do
              q_in = q},
             k < num_steps do
         i = last_idx - 1 - k
-        x_filt = xs_in[i]
-        p_filt = ps_in[i]
+        x_filt = take_scalar_at(xs_in, i)
+        p_filt = take_scalar_at(ps_in, i)
         # Recompute predicted state/cov at i+1 from filtered at i
         x_pred_next = f_in * x_filt
         p_pred_next = f_in * p_filt * f_in + q_in
@@ -77,8 +77,8 @@ defmodule BstsNx.Smoother do
         safe_pred = Nx.select(near_zero_p, 1.0, p_pred_next)
         c = Nx.select(near_zero_p, 0.0, p_filt * f_in / safe_pred)
         # Smoothed state from previously stored smooth_{i+1}
-        x_smooth_next = sxs_acc[i + 1]
-        p_smooth_next = sps_acc[i + 1]
+        x_smooth_next = take_scalar_at(sxs_acc, i + 1)
+        p_smooth_next = take_scalar_at(sps_acc, i + 1)
         x_smooth = x_filt + c * (x_smooth_next - x_pred_next)
         p_smooth = p_filt + c * (p_smooth_next - p_pred_next) * c
         sxs_new = Nx.put_slice(sxs_acc, [i], Nx.reshape(x_smooth, {1}))
@@ -140,8 +140,8 @@ defmodule BstsNx.Smoother do
 
     # Set the last element to the filtered value (smoother boundary condition)
     last_idx = t - 1
-    sxs = Nx.put_slice(sxs, [last_idx], Nx.reshape(xs[last_idx], {1}))
-    sps = Nx.put_slice(sps, [last_idx], Nx.reshape(ps[last_idx], {1}))
+    sxs = Nx.put_slice(sxs, [last_idx], Nx.reshape(take_scalar_at(xs, last_idx), {1}))
+    sps = Nx.put_slice(sps, [last_idx], Nx.reshape(take_scalar_at(ps, last_idx), {1}))
 
     # Backward pass: iterate from t-2 down to 0
     num_steps = t - 1
@@ -151,8 +151,8 @@ defmodule BstsNx.Smoother do
              q_in = q, lag1_acc = lag1},
             k < num_steps do
         i = last_idx - 1 - k
-        x_filt = xs_in[i]
-        p_filt = ps_in[i]
+        x_filt = take_scalar_at(xs_in, i)
+        p_filt = take_scalar_at(ps_in, i)
         # Recompute predicted state/cov at i+1 from filtered at i
         x_pred_next = f_in * x_filt
         p_pred_next = f_in * p_filt * f_in + q_in
@@ -161,8 +161,8 @@ defmodule BstsNx.Smoother do
         safe_pred = Nx.select(near_zero_p, 1.0, p_pred_next)
         c = Nx.select(near_zero_p, 0.0, p_filt * f_in / safe_pred)
         # Smoothed state from previously stored smooth_{i+1}
-        x_smooth_next = sxs_acc[i + 1]
-        p_smooth_next = sps_acc[i + 1]
+        x_smooth_next = take_scalar_at(sxs_acc, i + 1)
+        p_smooth_next = take_scalar_at(sps_acc, i + 1)
         x_smooth = x_filt + c * (x_smooth_next - x_pred_next)
         p_smooth = p_filt + c * (p_smooth_next - p_pred_next) * c
         sxs_new = Nx.put_slice(sxs_acc, [i], Nx.reshape(x_smooth, {1}))
@@ -174,6 +174,10 @@ defmodule BstsNx.Smoother do
       end
 
     {sxs_out, sps_out, lag1_out}
+  end
+
+  Nx.Defn.defnp take_scalar_at(vec, idx) do
+    Nx.slice(vec, [idx], [1]) |> Nx.squeeze()
   end
 
   @doc """
@@ -344,12 +348,12 @@ defmodule BstsNx.Smoother do
           # first t keys for noise, last key for next_key
           noise_samples =
             Enum.map(0..(t - 1), fn idx ->
-              subkey = keys_tensor[idx]
+              subkey = split_key_at(keys_tensor, idx)
               {sample, _unused} = Nx.Random.normal(subkey, 0.0, 1.0, shape: state_shape)
               sample
             end)
 
-          next_key = keys_tensor[t]
+          next_key = split_key_at(keys_tensor, t)
           {noise_samples, next_key}
 
         true ->
@@ -360,12 +364,12 @@ defmodule BstsNx.Smoother do
 
           noise_samples =
             Enum.map(0..(t - 1), fn idx ->
-              subkey = keys_tensor[idx]
+              subkey = split_key_at(keys_tensor, idx)
               {sample, _unused} = Nx.Random.normal(subkey, 0.0, 1.0, shape: state_shape)
               sample
             end)
 
-          next_key = keys_tensor[t]
+          next_key = split_key_at(keys_tensor, t)
           {noise_samples, next_key}
       end
 
@@ -461,6 +465,11 @@ defmodule BstsNx.Smoother do
     # Convert array to list in time order
     sampled_states = Enum.map(0..(t - 1), fn i -> :array.get(i, states_arr) end)
     {sampled_states, key_out}
+  end
+
+  defp split_key_at(keys, idx) do
+    Nx.slice_along_axis(keys, idx, 1, axis: 0)
+    |> Nx.squeeze(axes: [0])
   end
 
   # Computes the smoother gain C_k = P_filt * F^T * P_pred^{-1}.

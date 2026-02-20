@@ -291,7 +291,7 @@ defmodule BstsNx.BCT.ARForecaster do
     keys = Nx.Random.split(key, parts: num_samples)
 
     Enum.map(0..(num_samples - 1), fn idx ->
-      simulate_single_path(fit_result, horizon, keys[idx])
+      simulate_single_path(fit_result, horizon, split_key_at(keys, idx))
     end)
   end
 
@@ -304,7 +304,7 @@ defmodule BstsNx.BCT.ARForecaster do
     {_window, draws} =
       Enum.reduce(0..(horizon - 1), {initial_window, []}, fn step, {window, acc} ->
         mean = ar_mean(window, fit_result.coefficients)
-        {z, _} = Distributions.normal_sample(step_keys[step])
+        {z, _} = Distributions.normal_sample(split_key_at(step_keys, step))
         draw = mean + Nx.to_number(z) * fit_result.innovation_sd
         next_window = window |> tl() |> Kernel.++([draw])
         {next_window, [draw | acc]}
@@ -321,6 +321,11 @@ defmodule BstsNx.BCT.ARForecaster do
   defp left_pad(values, desired_length) do
     missing = desired_length - length(values)
     if missing > 0, do: List.duplicate(0.0, missing) ++ values, else: values
+  end
+
+  defp split_key_at(keys, idx) do
+    Nx.slice_along_axis(keys, idx, 1, axis: 0)
+    |> Nx.squeeze(axes: [0])
   end
 
   defp summarize_paths(paths, alpha) do

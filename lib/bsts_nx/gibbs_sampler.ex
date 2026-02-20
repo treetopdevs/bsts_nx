@@ -43,8 +43,8 @@ defmodule BstsNx.GibbsSampler do
   process and observation variances.
 
   * `observations` – list of scalar observations `y_t`. Missing values may
-    be expressed as `nil`. These are supported but are excluded from the
-    observation variance update, and a warning is logged.
+    be expressed as `nil` or NaN (number/tensor). These are supported but
+    are excluded from the observation variance update, and a warning is logged.
   * `num_samples` – number of Gibbs iterations to run.
   * `initial_state` – prior mean for the latent state at time 0.
   * `initial_cov` – prior variance for the latent state at time 0.
@@ -174,7 +174,7 @@ defmodule BstsNx.GibbsSampler do
             opts |> Keyword.delete(:key) |> Keyword.delete(:seed) |> Keyword.delete(:seeds)
 
           Enum.map(0..(num_chains - 1), fn idx ->
-            Keyword.put(opts_clean, :key, keys[idx])
+            Keyword.put(opts_clean, :key, split_key_at(keys, idx))
           end)
 
         true ->
@@ -231,7 +231,8 @@ defmodule BstsNx.GibbsSampler do
   regression models where Fourier predictions serve as the time-varying
   regressor.
 
-  * `observations` – list of scalar observations. Missing values should be `nil`.
+  * `observations` – list of scalar observations. Missing values may be `nil`
+    or NaN (number/tensor).
   * `f` – scalar state transition parameter.
   * `h` – observation coefficient. Either a scalar (broadcast to all steps) or
     a 1-D tensor of length `t`.
@@ -243,7 +244,7 @@ defmodule BstsNx.GibbsSampler do
   Returns a list of sample maps identical in shape to `sample/7`.
   """
   @spec sample_general(
-          [number | nil],
+          [number | nil | Nx.t()],
           number | Nx.t(),
           number | Nx.t(),
           pos_integer(),
@@ -252,9 +253,9 @@ defmodule BstsNx.GibbsSampler do
   def sample_general(observations, f, h, num_samples, opts \\ []) do
     validate_positive!(:num_samples, num_samples)
 
-    if Enum.any?(observations, &is_nil/1) do
+    if Enum.any?(observations, &missing_observation?/1) do
       Logger.warning(
-        "GibbsSampler received nil observations; missing values are skipped in the observation variance update"
+        "GibbsSampler received missing observations (nil/NaN); missing values are skipped in the observation variance update"
       )
     end
 
@@ -365,7 +366,8 @@ defmodule BstsNx.GibbsSampler do
 
   ## Arguments
 
-    * `observations` — list of scalar observations. Missing values as `nil`.
+    * `observations` — list of scalar observations. Missing values as `nil`
+      or NaN (number/tensor).
     * `spec` — a `%BstsNx.ModelSpec{}` defining the model.
     * `num_samples` — number of post-burn-in, post-thinning samples.
 
@@ -385,14 +387,14 @@ defmodule BstsNx.GibbsSampler do
     * `:q_matrix` — the resampled diagonal Q matrix
     * `:obs_var` — the resampled observation variance (scalar tensor)
   """
-  @spec sample_structured([number | nil], ModelSpec.t(), pos_integer(), keyword()) ::
+  @spec sample_structured([number | nil | Nx.t()], ModelSpec.t(), pos_integer(), keyword()) ::
           [structured_result()]
   def sample_structured(observations, %ModelSpec{} = spec, num_samples, opts \\ []) do
     validate_positive!(:num_samples, num_samples)
 
-    if Enum.any?(observations, &is_nil/1) do
+    if Enum.any?(observations, &missing_observation?/1) do
       Logger.warning(
-        "GibbsSampler.sample_structured received nil observations; " <>
+        "GibbsSampler.sample_structured received missing observations (nil/NaN); " <>
           "missing values are skipped in the observation variance update"
       )
     end
@@ -461,9 +463,9 @@ defmodule BstsNx.GibbsSampler do
         # 9. Resample observation variance
         shape_r = spec.obs_prior_shape + t_obs / 2
         scale_r = spec.obs_prior_scale + obs_ss / 2
-        keys_r = Nx.Random.split(key_after_q, parts: 2)
-        r_sample = BstsNx.Distributions.inv_gamma_sample(shape_r, scale_r, key: keys_r[0])
-        next_key = keys_r[1]
+
+        {r_sample, next_key} =
+          BstsNx.Distributions.inv_gamma_sample_with_key(shape_r, scale_r, key_after_q)
 
         acc2 =
           if iter > burn_in and rem(iter - burn_in, thin) == 0 do
@@ -510,7 +512,7 @@ defmodule BstsNx.GibbsSampler do
   A list of chains, where each chain is a list of `structured_result` maps.
   """
   @spec sample_structured_chains(
-          [number | nil],
+          [number | nil | Nx.t()],
           ModelSpec.t(),
           pos_integer(),
           pos_integer(),
@@ -547,7 +549,7 @@ defmodule BstsNx.GibbsSampler do
             opts |> Keyword.delete(:key) |> Keyword.delete(:seed) |> Keyword.delete(:seeds)
 
           Enum.map(0..(num_chains - 1), fn idx ->
-            Keyword.put(opts_clean, :key, keys[idx])
+            Keyword.put(opts_clean, :key, split_key_at(keys, idx))
           end)
 
         true ->
@@ -605,30 +607,33 @@ defmodule BstsNx.GibbsSampler do
   defp process_residuals_structured(sampled_states, f_t, q_specs) do
     # sampled_states is a list of state tensors (vectors for multi-dim)
     t = length(sampled_states)
+    state_dim = Nx.axis_size(f_t, 0)
 
     if t < 2 do
       Map.new(q_specs, fn qs -> {qs.dim_index, 0.0} end)
     else
-      # Compute residuals: e_t = x_t - F * x_{t-1}
-      residuals =
-        sampled_states
-        |> Enum.chunk_every(2, 1, :discard)
-        |> Enum.map(fn [x_prev, x_curr] ->
-          predicted = Nx.dot(f_t, x_prev)
-          Nx.subtract(x_curr, predicted)
+      initial_ss = Map.new(0..(state_dim - 1), fn d -> {d, 0.0} end)
+
+      {final_ss, _prev_state} =
+        Enum.reduce(sampled_states, {initial_ss, nil}, fn x_curr, {ss_map, prev_state} ->
+          if prev_state == nil do
+            {ss_map, x_curr}
+          else
+            predicted = Nx.dot(f_t, prev_state)
+            residual = Nx.subtract(x_curr, predicted) |> Nx.to_flat_list()
+
+            updated_ss =
+              Enum.with_index(residual)
+              |> Enum.reduce(ss_map, fn {val, d}, acc ->
+                Map.update!(acc, d, &(&1 + val * val))
+              end)
+
+            {updated_ss, x_curr}
+          end
         end)
 
-      # Sum of squares per dimension
       Map.new(q_specs, fn qs ->
-        d = qs.dim_index
-
-        ss =
-          Enum.reduce(residuals, 0.0, fn e_t, acc ->
-            val = e_t |> Nx.flatten() |> then(&Nx.to_number(&1[d]))
-            acc + val * val
-          end)
-
-        {d, ss}
+        {qs.dim_index, Map.get(final_ss, qs.dim_index, 0.0)}
       end)
     end
   end
@@ -636,47 +641,34 @@ defmodule BstsNx.GibbsSampler do
   # Computes observation sum of squares with multi-dimensional state support.
   # h_list is a list of per-timestep observation tensors.
   defp obs_residuals_structured(observations, sampled_states, h_list) do
-    residuals =
-      observations
-      |> Enum.zip(sampled_states)
-      |> Enum.zip(h_list)
-      |> Enum.flat_map(fn {{y, x_t}, h_t} ->
-        case y do
-          nil ->
-            []
-
-          _ ->
-            y_val = if is_number(y), do: y, else: Nx.to_number(y)
-            h_row = structured_h_row(h_t)
-            pred = Nx.to_number(Nx.dot(h_row, Nx.flatten(x_t)))
-            diff = y_val - pred
-            [diff * diff]
-        end
-      end)
-
-    t_obs = Enum.count(observations, &(!is_nil(&1)))
-    {Enum.sum(residuals), t_obs}
+    observations
+    |> Enum.zip(sampled_states)
+    |> Enum.zip(h_list)
+    |> Enum.reduce({0.0, 0}, fn {{y, x_t}, h_t}, {acc_ss, acc_count} ->
+      if missing_observation?(y) do
+        {acc_ss, acc_count}
+      else
+        y_val = observation_to_number(y)
+        h_row = structured_h_row(h_t)
+        pred = Nx.to_number(Nx.dot(h_row, Nx.flatten(x_t)))
+        diff = y_val - pred
+        {acc_ss + diff * diff, acc_count + 1}
+      end
+    end)
   end
 
   # Resamples each Q diagonal entry from its inverse-gamma posterior.
   # Returns {list_of_{dim_index, new_value}, next_key}.
   defp resample_q_components(q_specs, per_dim_ss, t, key) do
     num_diffs = max(t - 1, 0)
-    num_q = length(q_specs)
-    keys = Nx.Random.split(key, parts: num_q + 1)
 
-    new_vals =
-      q_specs
-      |> Enum.with_index()
-      |> Enum.map(fn {qs, idx} ->
-        ss = Map.get(per_dim_ss, qs.dim_index, 0.0)
-        shape = qs.prior_shape + num_diffs / 2
-        scale = qs.prior_scale + ss / 2
-        sample = BstsNx.Distributions.inv_gamma_sample(shape, scale, key: keys[idx])
-        {qs.dim_index, Nx.to_number(sample)}
-      end)
-
-    {new_vals, keys[num_q]}
+    Enum.map_reduce(q_specs, key, fn qs, key_acc ->
+      ss = Map.get(per_dim_ss, qs.dim_index, 0.0)
+      shape = qs.prior_shape + num_diffs / 2
+      scale = qs.prior_scale + ss / 2
+      {sample, key_next} = BstsNx.Distributions.inv_gamma_sample_with_key(shape, scale, key_acc)
+      {{qs.dim_index, Nx.to_number(sample)}, key_next}
+    end)
   end
 
   # Updates the diagonal entries of Q matrix after resampling.
@@ -757,6 +749,24 @@ defmodule BstsNx.GibbsSampler do
     end
   end
 
+  defp split_key_at(keys, idx) do
+    Nx.slice_along_axis(keys, idx, 1, axis: 0)
+    |> Nx.squeeze(axes: [0])
+  end
+
+  defp missing_observation?(nil), do: true
+  defp missing_observation?(:nan), do: true
+
+  defp missing_observation?(%Nx.Tensor{} = t) do
+    Nx.any(Nx.is_nan(t)) |> Nx.to_number() == 1
+  end
+
+  defp missing_observation?(v) when is_float(v), do: v != v
+  defp missing_observation?(_), do: false
+
+  defp observation_to_number(%Nx.Tensor{} = v), do: Nx.to_number(v)
+  defp observation_to_number(v) when is_number(v), do: v * 1.0
+
   # -- Input validation helpers ------------------------------------------------
 
   defp validate_positive!(_name, value) when is_integer(value) and value > 0, do: :ok
@@ -809,29 +819,36 @@ defmodule BstsNx.GibbsSampler do
 
   # Process sum of squares with explicit transition parameter f
   defp process_sum_of_squares(x_list, f_val) do
-    diffs =
-      x_list
-      |> Enum.chunk_every(2, 1, :discard)
-      |> Enum.map(fn [x_prev, x_curr] -> :math.pow(x_curr - f_val * x_prev, 2) end)
+    {ss, count, _prev} =
+      Enum.reduce(x_list, {0.0, 0, nil}, fn x_curr, {acc_ss, acc_count, prev} ->
+        if prev == nil do
+          {acc_ss, acc_count, x_curr}
+        else
+          diff = x_curr - f_val * prev
+          {acc_ss + diff * diff, acc_count + 1, x_curr}
+        end
+      end)
 
-    {Enum.sum(diffs), length(diffs)}
+    {ss, count}
   end
 
   # Observation sum of squares with time-varying h
   defp obs_sum_of_squares(observations, x_list, h_vals) do
-    residuals =
+    {ss, count} =
       observations
       |> Enum.zip(x_list)
       |> Enum.zip(h_vals)
-      |> Enum.flat_map(fn {{y, x_t}, h_i} ->
-        case y do
-          nil -> []
-          %Nx.Tensor{} -> [:math.pow(Nx.to_number(y) - h_i * x_t, 2)]
-          _ -> [:math.pow(y - h_i * x_t, 2)]
+      |> Enum.reduce({0.0, 0}, fn {{y, x_t}, h_i}, {acc_ss, acc_count} ->
+        if missing_observation?(y) do
+          {acc_ss, acc_count}
+        else
+          y_val = observation_to_number(y)
+          diff = y_val - h_i * x_t
+          {acc_ss + diff * diff, acc_count + 1}
         end
       end)
 
-    {Enum.sum(residuals), Enum.count(observations, &(!is_nil(&1)))}
+    {ss, count}
   end
 
   # Resample process and observation variances from inverse-gamma posteriors
@@ -847,10 +864,13 @@ defmodule BstsNx.GibbsSampler do
     shape_r = prior_shape + t_steps / 2
     scale_r = prior_scale + obs_ss / 2
 
-    keys_split = Nx.Random.split(key, parts: 3)
-    q_sample = BstsNx.Distributions.inv_gamma_sample(shape_q, scale_q, key: keys_split[0])
-    r_sample = BstsNx.Distributions.inv_gamma_sample(shape_r, scale_r, key: keys_split[1])
-    {q_sample, r_sample, keys_split[2]}
+    {q_sample, key_after_q} =
+      BstsNx.Distributions.inv_gamma_sample_with_key(shape_q, scale_q, key)
+
+    {r_sample, next_key} =
+      BstsNx.Distributions.inv_gamma_sample_with_key(shape_r, scale_r, key_after_q)
+
+    {q_sample, r_sample, next_key}
   end
 
   # Convert h to a list of float values for residual computation.

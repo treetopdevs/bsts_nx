@@ -30,16 +30,22 @@ defmodule BstsNxComponentsReproducibilityTest do
     end
 
     test "regression component produces identity F and betas in H" do
+      regressors = Nx.tensor([[1.0, 0.5], [0.8, 1.2], [1.1, 0.9]])
+      spec = Components.regression(regressors, var_beta: 0.01, obs_var: 1.0)
+      assert spec.__struct__ == BstsNx.ModelSpec
+      assert Nx.shape(spec.f) == {2, 2}
+      assert is_list(spec.h)
+      assert length(spec.h) == 3
+      assert Nx.shape(hd(spec.h)) == {1, 2}
+    end
+
+    test "legacy regression(betas, sigma) raises migration error" do
       betas = Nx.tensor([0.5, -0.2])
       sigma = Nx.eye(2) |> Nx.multiply(0.01)
-      comp = Components.regression(betas, sigma)
-      assert Nx.shape(comp.f) == {2, 2}
-      # F should be identity
-      assert to_number(comp.f[0][0]) == 1.0
-      assert to_number(comp.f[1][1]) == 1.0
-      # H contains betas
-      assert_in_delta(to_number(comp.h[0][0]), 0.5, 1.0e-6)
-      assert_in_delta(to_number(comp.h[0][1]), -0.2, 1.0e-6)
+
+      assert_raise ArgumentError, ~r/now expects \(regressors, opts\)/, fn ->
+        Components.regression(betas, sigma)
+      end
     end
   end
 

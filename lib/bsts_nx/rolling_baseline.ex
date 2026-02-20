@@ -383,7 +383,7 @@ defmodule BstsNx.RollingBaseline do
 
       sum =
         Enum.reduce(samples, 0.0, fn sample, s ->
-          val = sample.q_matrix |> Nx.take_diagonal() |> then(&Nx.to_number(&1[dim]))
+          val = diagonal_value_at(sample.q_matrix, dim)
           s + val
         end)
 
@@ -433,8 +433,16 @@ defmodule BstsNx.RollingBaseline do
   # Extracts the process variance chain for a specific Q diagonal dimension.
   defp extract_process_var_chain(samples, dim) when is_integer(dim) do
     Enum.map(samples, fn sample ->
-      sample.q_matrix |> Nx.take_diagonal() |> then(&Nx.to_number(&1[dim]))
+      diagonal_value_at(sample.q_matrix, dim)
     end)
+  end
+
+  defp diagonal_value_at(q_matrix, dim) do
+    diag = Nx.take_diagonal(q_matrix)
+
+    Nx.take(diag, Nx.tensor([dim]))
+    |> Nx.squeeze()
+    |> Nx.to_number()
   end
 
   defp summarize_process_r_hat([]), do: :nan

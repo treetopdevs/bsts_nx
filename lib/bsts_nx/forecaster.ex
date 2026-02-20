@@ -314,24 +314,28 @@ defmodule BstsNx.Forecaster do
       q_diag = Nx.take_diagonal(q_matrix)
       q_sds = Nx.sqrt(Nx.max(q_diag, Nx.tensor(0.0)))
 
-      step_keys = Nx.Random.split(keys[idx], parts: horizon)
+      sample_key = split_key_at(keys, idx)
+      step_keys = Nx.Random.split(sample_key, parts: horizon)
 
       # Iterate h_list directly to avoid O(n²) Enum.at access
       {_, trajectory} =
         h_list
         |> Enum.with_index()
         |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_t, step}, {state, acc} ->
-          sk = Nx.Random.split(step_keys[step], parts: 2)
+          step_key = split_key_at(step_keys, step)
+          sk = Nx.Random.split(step_key, parts: 2)
+          key_state = split_key_at(sk, 0)
+          key_obs = split_key_at(sk, 1)
 
           # Process noise
-          {z_state, _} = Nx.Random.normal(sk[0], 0.0, 1.0, shape: {n_state})
+          {z_state, _} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {n_state})
           noise = Nx.multiply(z_state, q_sds)
           next_state = Nx.add(Nx.dot(spec.f, state), noise)
 
           # Observation with per-step H
           h_row = if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
           y_mean = Nx.to_number(Nx.dot(h_row, next_state))
-          {z_obs, _} = Nx.Random.normal(sk[1], 0.0, 1.0)
+          {z_obs, _} = Nx.Random.normal(key_obs, 0.0, 1.0)
           y = y_mean + Nx.to_number(z_obs) * obs_sd
 
           {next_state, [y | acc]}
@@ -351,9 +355,12 @@ defmodule BstsNx.Forecaster do
       sd_q = :math.sqrt(max(q, 0.0))
       sd_r = :math.sqrt(max(r, 0.0))
 
-      sk = Nx.Random.split(keys[idx], parts: 2)
-      {proc_noise, _} = Nx.Random.normal(sk[0], 0.0, 1.0, shape: {horizon})
-      {obs_noise, _} = Nx.Random.normal(sk[1], 0.0, 1.0, shape: {horizon})
+      sample_key = split_key_at(keys, idx)
+      sk = Nx.Random.split(sample_key, parts: 2)
+      key_process = split_key_at(sk, 0)
+      key_obs = split_key_at(sk, 1)
+      {proc_noise, _} = Nx.Random.normal(key_process, 0.0, 1.0, shape: {horizon})
+      {obs_noise, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {horizon})
 
       proc_list = Nx.to_flat_list(proc_noise)
       obs_list = Nx.to_flat_list(obs_noise)
@@ -449,6 +456,11 @@ defmodule BstsNx.Forecaster do
     |> Nx.flatten()
     |> Nx.to_flat_list()
     |> Enum.map(&(&1 + 0.0))
+  end
+
+  defp split_key_at(keys, idx) do
+    Nx.slice_along_axis(keys, idx, 1, axis: 0)
+    |> Nx.squeeze(axes: [0])
   end
 
   # Observation coercion delegated to ModelBuilder.coerce_obs/1

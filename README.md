@@ -46,6 +46,18 @@ length(samples)
 #=> 50
 ```
 
+### Regression model spec (structured)
+
+```elixir
+regressors = Nx.tensor([
+  [1.0, 0.5],
+  [0.8, 1.2],
+  [1.1, 0.9]
+])
+
+spec = BstsNx.Components.regression(regressors, var_beta: 0.01, obs_var: 1.0)
+```
+
 ### Causal Impact
 
 ```elixir
@@ -66,9 +78,9 @@ summary.cumulative_effect.mean
 
 ## Missing observations
 
-`BstsNx.KalmanFilter` supports missing observations as `nil` (or `NaN` for the compiled defn).
-When used in the Gibbs sampler, missing observations are skipped when updating the observation
-variance and a warning is logged.
+`BstsNx.KalmanFilter` supports missing observations as `nil` or `NaN`.
+When used in the Gibbs sampler, missing observations (`nil`/`NaN`) are skipped when updating
+the observation variance and a warning is logged.
 
 ## EXLA acceleration (optional)
 

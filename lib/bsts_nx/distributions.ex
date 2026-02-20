@@ -25,18 +25,20 @@ defmodule BstsNx.Distributions do
   Draws a sample from the inverse–gamma distribution with shape parameter
   `alpha` and scale parameter `beta`.
 
-  Both `alpha` and `beta` may be numbers, lists or `Nx.Tensor`s.  For
+  Both `alpha` and `beta` may be numbers, lists or `Nx.Tensor`s. For
   tensors or lists, the shapes of `alpha` and `beta` must match exactly;
-  no implicit broadcasting is performed.  An optional keyword list can be
-  provided as a third argument to control the random seed.
+  no implicit broadcasting is performed.
 
-  Supported option:
+  Supported options:
 
-    * `:key` – an `Nx.Random` PRNG key used to seed Erlang's `:rand` generator
-      for reproducible sampling.  When supplied, the key is converted into
-      three 32‑bit integers and used to seed `:rand.exsss`.  Note that
-      the key is **not** returned by this function; callers should manage
-      key splitting externally if deterministic sequences are required.
+    * `:key` – an `Nx.Random` PRNG key for deterministic sampling. This API
+      preserves backward compatibility and returns only the sample. For
+      functional PRNG flows that also return the next key, prefer
+      `inv_gamma_sample_with_key/4`.
+    * `:max_value` – optional upper cap for samples. Defaults to `:infinity`
+      (no truncation, statistically correct inverse-gamma draw). Passing a
+      finite positive number truncates the sampled value and changes the
+      implied posterior target.
 
   ## Examples
 
@@ -49,53 +51,41 @@ defmodule BstsNx.Distributions do
   """
   @spec inv_gamma_sample(number | list | Nx.t(), number | list | Nx.t(), keyword()) :: Nx.t()
   def inv_gamma_sample(alpha, beta, opts \\ []) do
-    a = to_tensor(alpha)
-    b = to_tensor(beta)
-    # Ensure shapes match
-    unless Nx.shape(a) == Nx.shape(b) do
-      raise ArgumentError, "alpha and beta must have the same shape; broadcasting not supported"
+    {a, b, max_value} = prepare_inv_gamma_inputs(alpha, beta, opts)
+
+    case Keyword.get(opts, :key) do
+      nil ->
+        rand_state = :rand.seed_s(:exsss, :erlang.unique_integer([:positive]))
+        sample_with_rand_state(a, b, max_value, rand_state)
+
+      key ->
+        {sample, _next_key} = sample_with_key(a, b, max_value, key)
+        sample
+    end
+  end
+
+  @doc """
+  Draws an inverse-gamma sample and returns `{sample, next_key}`.
+
+  This is the preferred API for deterministic, functional PRNG workflows.
+  The next key is produced deterministically from the input key via
+  `Nx.Random.split/2`.
+  """
+  @spec inv_gamma_sample_with_key(
+          number | list | Nx.t(),
+          number | list | Nx.t(),
+          Nx.t(),
+          keyword()
+        ) ::
+          {Nx.t(), Nx.t()}
+  def inv_gamma_sample_with_key(alpha, beta, key, opts \\ []) do
+    if Keyword.has_key?(opts, :key) do
+      raise ArgumentError,
+            "pass the PRNG key as the third argument to inv_gamma_sample_with_key/4"
     end
 
-    # Create explicit random state without mutating the process dictionary.
-    # This avoids interference when inv_gamma_sample is called concurrently
-    # within the same process.
-    rand_state =
-      case Keyword.get(opts, :key) do
-        nil ->
-          :rand.seed_s(:exsss, :erlang.unique_integer([:positive]))
-
-        key ->
-          ints = Nx.to_flat_list(key)
-
-          case ints do
-            [_i1, _i2] ->
-              {a58, b58, c58} = derive_exsss_seed(ints)
-              :rand.seed_s(:exsss, {a58, b58, c58})
-
-            _ ->
-              raise ArgumentError,
-                    "Expected Nx.Random key with shape {2}, got: #{inspect(ints)}"
-          end
-      end
-
-    # Flatten to list for iteration
-    a_list = Nx.to_flat_list(a)
-    b_list = Nx.to_flat_list(b)
-
-    {samples, _final_rand_state} =
-      Enum.zip(a_list, b_list)
-      |> Enum.map_reduce(rand_state, fn {alpha_i, beta_i}, rs ->
-        # Draw gamma(α, 1) and invert; clamp to avoid division by zero on underflow.
-        # Cap the result to prevent numerically unstable variance values (>1e10)
-        # from corrupting downstream Kalman filter/smoother matrix operations.
-        {gamma, rs2} = gamma_sample(alpha_i, 1.0, rs)
-        gamma_safe = max(gamma, 1.0e-300)
-        sample = beta_i / gamma_safe
-        {min(sample, 1.0e10), rs2}
-      end)
-
-    # Reshape back to original shape
-    Nx.tensor(samples) |> Nx.reshape(Nx.shape(a))
+    {a, b, max_value} = prepare_inv_gamma_inputs(alpha, beta, opts)
+    sample_with_key(a, b, max_value, key)
   end
 
   @doc """
@@ -113,8 +103,8 @@ defmodule BstsNx.Distributions do
     stddev = Keyword.get(opts, :stddev, 1.0)
     # split key for sample
     keys = Nx.Random.split(key, parts: 2)
-    key1 = keys[0]
-    key2 = keys[1]
+    key1 = split_key_at(keys, 0)
+    key2 = split_key_at(keys, 1)
     {sample, _unused} = Nx.Random.normal(key1, mean, stddev)
     {sample, key2}
   end
@@ -134,8 +124,8 @@ defmodule BstsNx.Distributions do
     dim = Nx.axis_size(mean, 0)
     # Split key for noise vector and return key
     keys = Nx.Random.split(key, parts: 2)
-    key_draw = keys[0]
-    next_key = keys[1]
+    key_draw = split_key_at(keys, 0)
+    next_key = split_key_at(keys, 1)
     # Draw standard normal vector of dimension dim
     {noise, _unused} = Nx.Random.normal(key_draw, 0.0, 1.0, shape: {dim})
     # Compute Cholesky; add jitter if needed.
@@ -145,6 +135,97 @@ defmodule BstsNx.Distributions do
 
     sample = Nx.add(mean, Nx.dot(chol, noise))
     {sample, next_key}
+  end
+
+  defp prepare_inv_gamma_inputs(alpha, beta, opts) do
+    a = to_tensor(alpha)
+    b = to_tensor(beta)
+    max_value = opts |> Keyword.get(:max_value, :infinity) |> parse_max_value()
+
+    unless Nx.shape(a) == Nx.shape(b) do
+      raise ArgumentError, "alpha and beta must have the same shape; broadcasting not supported"
+    end
+
+    {a, b, max_value}
+  end
+
+  defp sample_with_rand_state(a, b, max_value, rand_state) do
+    a_list = Nx.to_flat_list(a)
+    b_list = Nx.to_flat_list(b)
+
+    {samples, _final_rand_state} =
+      Enum.zip(a_list, b_list)
+      |> Enum.map_reduce(rand_state, fn {alpha_i, beta_i}, rs ->
+        {sample, rs2} = inv_gamma_draw(alpha_i, beta_i, max_value, rs)
+        {sample, rs2}
+      end)
+
+    Nx.tensor(samples) |> Nx.reshape(Nx.shape(a))
+  end
+
+  defp sample_with_key(a, b, max_value, key) do
+    validate_prng_key!(key)
+    a_list = Nx.to_flat_list(a)
+    b_list = Nx.to_flat_list(b)
+    num_draws = length(a_list)
+    split_keys = Nx.Random.split(key, parts: num_draws + 1)
+
+    samples =
+      Enum.zip(a_list, b_list)
+      |> Enum.with_index()
+      |> Enum.map(fn {{alpha_i, beta_i}, idx} ->
+        subkey = split_key_at(split_keys, idx)
+        rand_state = rand_state_from_key(subkey)
+        {sample, _rs2} = inv_gamma_draw(alpha_i, beta_i, max_value, rand_state)
+        sample
+      end)
+
+    sample_tensor = Nx.tensor(samples) |> Nx.reshape(Nx.shape(a))
+    next_key = split_key_at(split_keys, num_draws)
+    {sample_tensor, next_key}
+  end
+
+  defp inv_gamma_draw(alpha_i, beta_i, max_value, rand_state) do
+    # Draw gamma(α, 1) and invert; clamp gamma to avoid division by zero on underflow.
+    {gamma, rs2} = gamma_sample(alpha_i, 1.0, rand_state)
+    gamma_safe = max(gamma, 1.0e-300)
+    sample = maybe_cap(beta_i / gamma_safe, max_value)
+    {sample, rs2}
+  end
+
+  defp validate_prng_key!(key) do
+    case Nx.to_flat_list(key) do
+      [_i1, _i2] ->
+        :ok
+
+      ints ->
+        raise ArgumentError, "Expected Nx.Random key with shape {2}, got: #{inspect(ints)}"
+    end
+  end
+
+  defp rand_state_from_key(key) do
+    ints = Nx.to_flat_list(key)
+    {a58, b58, c58} = derive_exsss_seed(ints)
+    :rand.seed_s(:exsss, {a58, b58, c58})
+  end
+
+  defp split_key_at(keys, idx) do
+    Nx.slice_along_axis(keys, idx, 1, axis: 0)
+    |> Nx.squeeze(axes: [0])
+  end
+
+  defp maybe_cap(sample, :infinity), do: sample
+  defp maybe_cap(sample, max_value), do: min(sample, max_value)
+
+  defp parse_max_value(:infinity), do: :infinity
+
+  defp parse_max_value(v) when is_number(v) and v > 0 do
+    v * 1.0
+  end
+
+  defp parse_max_value(v) do
+    raise ArgumentError,
+          "max_value must be :infinity or a positive number, got: #{inspect(v)}"
   end
 
   # Marsaglia and Tsang's method for Gamma(alpha, scale) sampling.

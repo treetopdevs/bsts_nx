@@ -240,7 +240,8 @@ defmodule BstsNx.Applications.DemandForecaster do
 
     trajectories =
       Enum.with_index(samples, fn sample, idx ->
-        forward_simulate_demand(sample, spec, future_h, horizon, keys[idx])
+        sample_key = split_key_at(keys, idx)
+        forward_simulate_demand(sample, spec, future_h, horizon, sample_key)
       end)
 
     result = aggregate(trajectories, horizon, alpha)
@@ -334,16 +335,19 @@ defmodule BstsNx.Applications.DemandForecaster do
       h_list
       |> Enum.with_index()
       |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_t, step}, {state, acc} ->
-        sk = Nx.Random.split(step_keys[step], parts: 2)
+        step_key = split_key_at(step_keys, step)
+        sk = Nx.Random.split(step_key, parts: 2)
+        key_state = split_key_at(sk, 0)
+        key_obs = split_key_at(sk, 1)
 
-        {z_state, _} = Nx.Random.normal(sk[0], 0.0, 1.0, shape: {n_state})
+        {z_state, _} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {n_state})
         noise = Nx.multiply(z_state, q_sds)
         next_state = Nx.add(Nx.dot(spec.f, state), noise)
 
         h_row = if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
         y_mean = Nx.to_number(Nx.dot(h_row, next_state))
 
-        {z_obs, _} = Nx.Random.normal(sk[1], 0.0, 1.0)
+        {z_obs, _} = Nx.Random.normal(key_obs, 0.0, 1.0)
         y = y_mean + Nx.to_number(z_obs) * obs_sd
 
         {next_state, [y | acc]}
@@ -401,6 +405,11 @@ defmodule BstsNx.Applications.DemandForecaster do
       horizon: horizon,
       alpha: alpha
     }
+  end
+
+  defp split_key_at(keys, idx) do
+    Nx.slice_along_axis(keys, idx, 1, axis: 0)
+    |> Nx.squeeze(axes: [0])
   end
 
   defp ensure_tensor(v), do: ModelBuilder.ensure_tensor(v)

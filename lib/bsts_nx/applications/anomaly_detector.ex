@@ -349,8 +349,8 @@ defmodule BstsNx.Applications.AnomalyDetector do
     obs_tensor = Nx.tensor(obs_list, type: {:f, 32})
     {xs, ps} = KalmanFilter.filter_defn(obs_tensor, f, h, q, r, x0, p0)
 
-    final_x = xs[t - 1]
-    final_p = ps[t - 1]
+    final_x = take_scalar_at(xs, t - 1)
+    final_p = take_scalar_at(ps, t - 1)
 
     %{
       method: :filter,
@@ -484,6 +484,10 @@ defmodule BstsNx.Applications.AnomalyDetector do
 
   defp normal_cdf(z) do
     0.5 * (1.0 + :math.erf(z / :math.sqrt(2.0)))
+  end
+
+  defp take_scalar_at(vec, idx) do
+    Nx.slice(vec, [idx], [1]) |> Nx.squeeze()
   end
 
   # Observation coercion delegated to ModelBuilder.coerce_obs/1

@@ -140,7 +140,7 @@ defmodule BstsNx.CausalImpact do
         q = Nx.to_number(sample.process_var)
         r = Nx.to_number(sample.obs_var)
         # generate counterfactual by forward simulation (random walk with observation noise)
-        cf = generate_counterfactual(init_val, q, r, n_post, cf_keys[idx])
+        cf = generate_counterfactual(init_val, q, r, n_post, split_key_at(cf_keys, idx))
         # compute point effects as difference between actual post data and counterfactual
         point_effects =
           Enum.zip(post_data, cf)
@@ -267,7 +267,7 @@ defmodule BstsNx.CausalImpact do
             q_mat,
             r,
             n_post,
-            cf_keys[idx]
+            split_key_at(cf_keys, idx)
           )
 
         point_effects =
@@ -675,8 +675,10 @@ defmodule BstsNx.CausalImpact do
     # and observation streams share no common ancestor from a single split,
     # consistent with the per-step splitting in generate_structured_counterfactual.
     keys = Nx.Random.split(key, parts: 3)
-    {process_noise, _} = Nx.Random.normal(keys[0], 0.0, 1.0, shape: {n_steps})
-    {obs_noise, _} = Nx.Random.normal(keys[1], 0.0, 1.0, shape: {n_steps})
+    key_process = split_key_at(keys, 0)
+    key_obs = split_key_at(keys, 1)
+    {process_noise, _} = Nx.Random.normal(key_process, 0.0, 1.0, shape: {n_steps})
+    {obs_noise, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {n_steps})
 
     process_noise_list = Nx.to_flat_list(process_noise)
     obs_noise_list = Nx.to_flat_list(obs_noise)
@@ -716,12 +718,14 @@ defmodule BstsNx.CausalImpact do
       post_h
       |> Enum.with_index()
       |> Enum.reduce({Nx.flatten(final_state), [], keys}, fn {h_t, step}, {prev_state, acc, ks} ->
-        subkey = ks[step]
+        subkey = split_key_at(ks, step)
         sub_keys = Nx.Random.split(subkey, parts: 2)
+        key_state = split_key_at(sub_keys, 0)
+        key_obs = split_key_at(sub_keys, 1)
 
         # Process noise: sample N(0, I) then scale by sqrt(Q_diag)
         # Zero-variance dimensions get exactly zero noise
-        {z_state, _} = Nx.Random.normal(sub_keys[0], 0.0, 1.0, shape: {state_dim})
+        {z_state, _} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {state_dim})
         process_noise = Nx.multiply(z_state, q_sds)
 
         # State transition: x_{t+1} = F * x_t + w_t
@@ -731,7 +735,7 @@ defmodule BstsNx.CausalImpact do
         h_row = if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
         predicted_y = Nx.to_number(Nx.dot(h_row, next_state))
 
-        {z_obs, _} = Nx.Random.normal(sub_keys[1], 0.0, 1.0)
+        {z_obs, _} = Nx.Random.normal(key_obs, 0.0, 1.0)
         cf_obs = predicted_y + Nx.to_number(z_obs) * obs_sd
 
         {next_state, [cf_obs | acc], ks}
@@ -772,7 +776,7 @@ defmodule BstsNx.CausalImpact do
 
           # Slice the time axis then split into a list of per-step tensors
           sliced = Nx.slice_along_axis(t, post_start_0based, n_post, axis: 0)
-          Enum.map(0..(n_post - 1), fn i -> sliced[i] end)
+          Enum.map(0..(n_post - 1), fn i -> take_time_slice_at(sliced, i) end)
         else
           List.duplicate(t, n_post)
         end
@@ -791,4 +795,14 @@ defmodule BstsNx.CausalImpact do
 
   defp to_number(%Nx.Tensor{} = t), do: Nx.to_number(t)
   defp to_number(x) when is_number(x), do: x + 0.0
+
+  defp split_key_at(keys, idx) do
+    Nx.slice_along_axis(keys, idx, 1, axis: 0)
+    |> Nx.squeeze(axes: [0])
+  end
+
+  defp take_time_slice_at(tensor, idx) do
+    Nx.slice_along_axis(tensor, idx, 1, axis: 0)
+    |> Nx.squeeze(axes: [0])
+  end
 end
