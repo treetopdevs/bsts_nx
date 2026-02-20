@@ -324,7 +324,7 @@ defmodule BstsNxPropertyTest do
             ) do
         betas = Nx.broadcast(0.1, {dim})
         sigma = Nx.eye(dim) |> Nx.multiply(0.01)
-        c = Components.regression(betas, sigma)
+        c = apply(Components, :regression, [betas, sigma])
         assert Nx.shape(c.f) == {dim, dim}
         assert Nx.shape(c.q) == {dim, dim}
         assert Nx.shape(c.h) == {1, dim}

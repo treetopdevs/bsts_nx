@@ -76,6 +76,11 @@ defmodule BstsNx.Components do
   @doc """
   Constructs a regression component for one or more regressors.
 
+  **Deprecated:** This function sets H = beta values (static observation matrix),
+  which is not the standard regression formulation.  The correct formulation
+  uses H = regressor values (time-varying).  Use `regression_spec/2` with
+  the structured sampler instead.
+
   Given a vector of regression coefficients `betas` and a matrix of
   design covariances `sigma_betas`, this component models the latent
   coefficients as a random walk with innovation variance `sigma_betas`.
@@ -95,6 +100,7 @@ defmodule BstsNx.Components do
       iex> Nx.shape(c.f)
       {2, 2}
   """
+  @deprecated "Use regression_spec/2 with the structured sampler instead"
   @spec regression(Nx.t(), Nx.t()) :: %{f: Nx.t(), q: Nx.t(), h: Nx.t()}
   def regression(betas, sigma_betas) do
     # ensure betas is a vector tensor

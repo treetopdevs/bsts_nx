@@ -30,13 +30,17 @@ defmodule BstsNx.Distributions do
   no implicit broadcasting is performed.  An optional keyword list can be
   provided as a third argument to control the random seed.
 
-  Supported option:
+  Supported options:
 
     * `:key` – an `Nx.Random` PRNG key used to seed Erlang's `:rand` generator
       for reproducible sampling.  When supplied, the key is converted into
       three 32‑bit integers and used to seed `:rand.exsss`.  Note that
       the key is **not** returned by this function; callers should manage
       key splitting externally if deterministic sequences are required.
+
+    * `:max_value` – optional upper bound for samples.  When set to a number,
+      each sample is clamped to `min(sample, max_value)`.  Defaults to
+      `:infinity` (no clamping).
 
   ## Examples
 
@@ -59,6 +63,8 @@ defmodule BstsNx.Distributions do
     # Create explicit random state without mutating the process dictionary.
     # This avoids interference when inv_gamma_sample is called concurrently
     # within the same process.
+    max_value = Keyword.get(opts, :max_value, :infinity)
+
     rand_state =
       case Keyword.get(opts, :key) do
         nil ->
@@ -86,12 +92,11 @@ defmodule BstsNx.Distributions do
       Enum.zip(a_list, b_list)
       |> Enum.map_reduce(rand_state, fn {alpha_i, beta_i}, rs ->
         # Draw gamma(α, 1) and invert; clamp to avoid division by zero on underflow.
-        # Cap the result to prevent numerically unstable variance values (>1e10)
-        # from corrupting downstream Kalman filter/smoother matrix operations.
         {gamma, rs2} = gamma_sample(alpha_i, 1.0, rs)
         gamma_safe = max(gamma, 1.0e-300)
         sample = beta_i / gamma_safe
-        {min(sample, 1.0e10), rs2}
+        capped = if max_value == :infinity, do: sample, else: min(sample, max_value)
+        {capped, rs2}
       end)
 
     # Reshape back to original shape

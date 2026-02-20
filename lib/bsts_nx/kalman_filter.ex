@@ -21,7 +21,7 @@ defmodule BstsNx.KalmanFilter do
   """
 
   import Nx, only: [dot: 2, transpose: 1, add: 2, subtract: 2]
-  import BstsNx.Utils, only: [to_tensor: 1]
+  import BstsNx.Utils, only: [to_tensor: 1, safe_solve: 2, missing_observation?: 1]
   # Require Nx.Defn for compiled implementations
   require Nx.Defn
 
@@ -155,7 +155,7 @@ defmodule BstsNx.KalmanFilter do
                 end
               else
                 # Solve S * X = H * P_pred for X; the result has shape (m x n)'
-                k_t = Nx.LinAlg.solve(s, mul_or_dot(h_i, p_pred))
+                k_t = safe_solve(s, mul_or_dot(h_i, p_pred))
                 transpose(k_t)
               end
 
@@ -471,15 +471,6 @@ defmodule BstsNx.KalmanFilter do
         length(list)
     end
   end
-
-  # Detects missing observations: nil values or NaN tensors
-  defp missing_observation?(nil), do: true
-
-  defp missing_observation?(%Nx.Tensor{} = t) do
-    Nx.any(Nx.is_nan(t)) |> Nx.to_number() == 1
-  end
-
-  defp missing_observation?(_), do: false
 
   # Nx 0.6 emits warnings for scalar dot paths in some Elixir/OTP combos.
   # Also avoid rank-2/rank-1 dot calls (matrix-vector and vector-matrix),

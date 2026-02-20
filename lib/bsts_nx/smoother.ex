@@ -13,7 +13,7 @@ defmodule BstsNx.Smoother do
   """
 
   import Nx, only: [dot: 2, transpose: 1, subtract: 2, add: 2]
-  import BstsNx.Utils, only: [to_tensor: 1]
+  import BstsNx.Utils, only: [to_tensor: 1, safe_solve: 2, has_non_finite?: 1]
   require Nx.Defn
   require Logger
 
@@ -491,90 +491,37 @@ defmodule BstsNx.Smoother do
     end
   end
 
-  # Attempts `Nx.LinAlg.solve(a, b)` with progressive diagonal jitter
-  # when the system matrix is near-singular. Returns a zero matrix matching
-  # the expected solution shape when all retries fail.
-  defp safe_solve(a, b) do
-    result =
-      try do
-        Nx.LinAlg.solve(a, b)
-      rescue
-        _ -> :failed
-      end
+  # Matrix-covariance Cholesky used by simulation smoothing.
+  # Symmetrizes the covariance and tries a nearest-PSD projection before
+  # degrading to zero process noise.
+  defp safe_cholesky_or_zero(cov, label) do
+    cov_sym = symmetrize(cov)
 
-    case result do
-      :failed ->
-        solve_with_jitter(a, b)
+    try do
+      BstsNx.Utils.safe_cholesky(cov_sym)
+    rescue
+      _ ->
+        case project_to_psd_cholesky(cov_sym) do
+          {:ok, chol} ->
+            Logger.warning(
+              "Simulation smoother: #{label} not positive-definite; " <>
+                "projecting to nearest PSD covariance"
+            )
 
-      tensor ->
-        if has_non_finite?(tensor) do
-          solve_with_jitter(a, b)
-        else
-          tensor
+            chol
+
+          :error ->
+            Logger.warning(
+              "Simulation smoother: #{label} not positive-definite even after PSD projection; " <>
+                "using zero process noise for this step"
+            )
+
+            Nx.broadcast(Nx.tensor(0.0), Nx.shape(cov_sym))
         end
     end
   end
 
-  defp has_non_finite?(tensor) do
-    Nx.any(Nx.logical_or(Nx.is_nan(tensor), Nx.is_infinity(tensor)))
-    |> Nx.to_number() == 1
-  end
-
-  defp solve_with_jitter(a, b) do
-    dim = Nx.shape(a) |> elem(0)
-    a_sym = Nx.multiply(Nx.add(a, transpose(a)), 0.5)
-
-    Enum.reduce_while([1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3], nil, fn jitter_scale, _acc ->
-      jitter = Nx.eye(dim) |> Nx.multiply(jitter_scale)
-
-      result =
-        try do
-          Nx.LinAlg.solve(Nx.add(a_sym, jitter), b)
-        rescue
-          _ -> :failed
-        end
-
-      case result do
-        :failed ->
-          {:cont, nil}
-
-        tensor ->
-          if has_non_finite?(tensor) do
-            {:cont, nil}
-          else
-            {:halt, tensor}
-          end
-      end
-    end) ||
-      pinv_fallback(a_sym, b) ||
-      (
-        Logger.warning(
-          "Smoother.safe_solve: solve failed even with max jitter 1e-3; " <>
-            "falling back to zero gain (smoothing skipped for this step)"
-        )
-
-        Nx.broadcast(Nx.tensor(0.0), Nx.shape(b))
-      )
-  end
-
-  # Final linear solve fallback for singular systems.
-  # Uses Moore-Penrose pseudoinverse to retain as much gain information as possible.
-  defp pinv_fallback(a, b) do
-    result =
-      try do
-        compat_dot(Nx.LinAlg.pinv(a), b)
-      rescue
-        _ -> :failed
-      end
-
-    case result do
-      :failed ->
-        nil
-
-      tensor ->
-        if has_non_finite?(tensor), do: nil, else: tensor
-    end
-  end
+  defp symmetrize(t), do: Nx.multiply(Nx.add(t, transpose(t)), 0.5)
 
   # Nx 0.6 emits range warnings for some dot rank combinations on newer
   # Elixir versions. Use explicit multiply/sum forms for common low-rank
@@ -612,38 +559,6 @@ defmodule BstsNx.Smoother do
         dot(a, b)
     end
   end
-
-  # Matrix-covariance Cholesky used by simulation smoothing.
-  # Symmetrizes the covariance and tries a nearest-PSD projection before
-  # degrading to zero process noise.
-  defp safe_cholesky_or_zero(cov, label) do
-    cov_sym = symmetrize(cov)
-
-    try do
-      BstsNx.Utils.safe_cholesky(cov_sym)
-    rescue
-      _ ->
-        case project_to_psd_cholesky(cov_sym) do
-          {:ok, chol} ->
-            Logger.warning(
-              "Simulation smoother: #{label} not positive-definite; " <>
-                "projecting to nearest PSD covariance"
-            )
-
-            chol
-
-          :error ->
-            Logger.warning(
-              "Simulation smoother: #{label} not positive-definite even after PSD projection; " <>
-                "using zero process noise for this step"
-            )
-
-            Nx.broadcast(Nx.tensor(0.0), Nx.shape(cov_sym))
-        end
-    end
-  end
-
-  defp symmetrize(t), do: Nx.multiply(Nx.add(t, transpose(t)), 0.5)
 
   defp project_to_psd_cholesky(cov_sym) do
     projected =

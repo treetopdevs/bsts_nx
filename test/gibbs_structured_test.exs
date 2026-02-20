@@ -318,7 +318,7 @@ defmodule BstsNx.GibbsStructuredTest do
         end)
 
       assert length(samples) == 3
-      assert log =~ "missing values are skipped"
+      assert log =~ "missing observations"
 
       Enum.each(samples, fn s ->
         assert length(s.states) == 5

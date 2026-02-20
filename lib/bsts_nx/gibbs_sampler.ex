@@ -25,7 +25,7 @@ defmodule BstsNx.GibbsSampler do
 
   alias BstsNx.KalmanFilter
   alias BstsNx.ModelSpec
-  import BstsNx.Utils, only: [to_tensor: 1]
+  import BstsNx.Utils, only: [to_tensor: 1, missing_observation?: 1]
   require Logger
 
   @type sample_result :: %{
@@ -252,9 +252,9 @@ defmodule BstsNx.GibbsSampler do
   def sample_general(observations, f, h, num_samples, opts \\ []) do
     validate_positive!(:num_samples, num_samples)
 
-    if Enum.any?(observations, &is_nil/1) do
+    if Enum.any?(observations, &missing_observation?/1) do
       Logger.warning(
-        "GibbsSampler received nil observations; missing values are skipped in the observation variance update"
+        "GibbsSampler received missing observations (nil or NaN); these are skipped in the observation variance update"
       )
     end
 
@@ -390,10 +390,10 @@ defmodule BstsNx.GibbsSampler do
   def sample_structured(observations, %ModelSpec{} = spec, num_samples, opts \\ []) do
     validate_positive!(:num_samples, num_samples)
 
-    if Enum.any?(observations, &is_nil/1) do
+    if Enum.any?(observations, &missing_observation?/1) do
       Logger.warning(
-        "GibbsSampler.sample_structured received nil observations; " <>
-          "missing values are skipped in the observation variance update"
+        "GibbsSampler.sample_structured received missing observations (nil or NaN); " <>
+          "these are skipped in the observation variance update"
       )
     end
 
@@ -641,20 +641,18 @@ defmodule BstsNx.GibbsSampler do
       |> Enum.zip(sampled_states)
       |> Enum.zip(h_list)
       |> Enum.flat_map(fn {{y, x_t}, h_t} ->
-        case y do
-          nil ->
-            []
-
-          _ ->
-            y_val = if is_number(y), do: y, else: Nx.to_number(y)
-            h_row = structured_h_row(h_t)
-            pred = Nx.to_number(Nx.dot(h_row, Nx.flatten(x_t)))
-            diff = y_val - pred
-            [diff * diff]
+        if missing_observation?(y) do
+          []
+        else
+          y_val = if is_number(y), do: y, else: Nx.to_number(y)
+          h_row = structured_h_row(h_t)
+          pred = Nx.to_number(Nx.dot(h_row, Nx.flatten(x_t)))
+          diff = y_val - pred
+          [diff * diff]
         end
       end)
 
-    t_obs = Enum.count(observations, &(!is_nil(&1)))
+    t_obs = Enum.count(observations, &(not missing_observation?(&1)))
     {Enum.sum(residuals), t_obs}
   end
 
@@ -824,14 +822,15 @@ defmodule BstsNx.GibbsSampler do
       |> Enum.zip(x_list)
       |> Enum.zip(h_vals)
       |> Enum.flat_map(fn {{y, x_t}, h_i} ->
-        case y do
-          nil -> []
-          %Nx.Tensor{} -> [:math.pow(Nx.to_number(y) - h_i * x_t, 2)]
-          _ -> [:math.pow(y - h_i * x_t, 2)]
+        if missing_observation?(y) do
+          []
+        else
+          y_val = if is_number(y), do: y, else: Nx.to_number(y)
+          [:math.pow(y_val - h_i * x_t, 2)]
         end
       end)
 
-    {Enum.sum(residuals), Enum.count(observations, &(!is_nil(&1)))}
+    {Enum.sum(residuals), Enum.count(observations, &(not missing_observation?(&1)))}
   end
 
   # Resample process and observation variances from inverse-gamma posteriors

@@ -32,7 +32,7 @@ defmodule BstsNxComponentsReproducibilityTest do
     test "regression component produces identity F and betas in H" do
       betas = Nx.tensor([0.5, -0.2])
       sigma = Nx.eye(2) |> Nx.multiply(0.01)
-      comp = Components.regression(betas, sigma)
+      comp = apply(Components, :regression, [betas, sigma])
       assert Nx.shape(comp.f) == {2, 2}
       # F should be identity
       assert to_number(comp.f[0][0]) == 1.0
