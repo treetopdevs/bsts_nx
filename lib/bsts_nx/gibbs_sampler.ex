@@ -25,7 +25,7 @@ defmodule BstsNx.GibbsSampler do
 
   alias BstsNx.KalmanFilter
   alias BstsNx.ModelSpec
-  import BstsNx.Utils, only: [to_tensor: 1]
+  import BstsNx.Utils, only: [to_tensor: 1, missing_observation?: 1]
   require Logger
 
   @type sample_result :: %{
@@ -753,16 +753,6 @@ defmodule BstsNx.GibbsSampler do
     Nx.slice_along_axis(keys, idx, 1, axis: 0)
     |> Nx.squeeze(axes: [0])
   end
-
-  defp missing_observation?(nil), do: true
-  defp missing_observation?(:nan), do: true
-
-  defp missing_observation?(%Nx.Tensor{} = t) do
-    Nx.any(Nx.is_nan(t)) |> Nx.to_number() == 1
-  end
-
-  defp missing_observation?(v) when is_float(v), do: v != v
-  defp missing_observation?(_), do: false
 
   defp observation_to_number(%Nx.Tensor{} = v), do: Nx.to_number(v)
   defp observation_to_number(v) when is_number(v), do: v * 1.0

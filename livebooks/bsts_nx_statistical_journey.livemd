@@ -16,36 +16,20 @@ Everything is reproducible and seeded.
 ## 1) Setup
 
 ```elixir
-candidate_roots =
-  [
-    System.get_env("BSTS_NX_PATH"),
-    File.cwd!(),
-    Path.expand("..", File.cwd!()),
-    Path.expand("../..", File.cwd!())
-  ]
-  |> Enum.reject(&is_nil/1)
-  |> Enum.uniq()
+project_root =
+  cond do
+    File.exists?("mix.exs") ->
+      File.cwd!()
 
-local_root =
-  Enum.find(candidate_roots, fn dir ->
-    mix_file = Path.join(dir, "mix.exs")
+    File.exists?(Path.expand("../mix.exs", File.cwd!())) ->
+      Path.expand("..", File.cwd!())
 
-    File.exists?(mix_file) and
-      case File.read(mix_file) do
-        {:ok, content} -> Regex.match?(~r/app:\s*:bsts_nx/, content)
-        _ -> false
-      end
-  end)
-
-bsts_dep =
-  if local_root do
-    {:bsts_nx, path: local_root}
-  else
-    {:bsts_nx, github: "Cleveland-Software-LLC/bsts_elixir"}
+    true ->
+      raise "Could not find mix.exs. Open this Livebook from inside the bsts_nx repository."
   end
 
 Mix.install([
-  bsts_dep,
+  {:bsts_nx, path: project_root},
   {:kino_vega_lite, "~> 0.1.13"}
 ])
 

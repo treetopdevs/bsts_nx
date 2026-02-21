@@ -1,0 +1,73 @@
+defmodule BstsNxUtilsSafeSolveTest do
+  use ExUnit.Case
+  alias BstsNx.Utils
+
+  describe "safe_solve/2" do
+    test "solves a well-conditioned 2x2 system" do
+      a = Nx.tensor([[2.0, 1.0], [1.0, 3.0]])
+      b = Nx.tensor([[5.0], [7.0]])
+      x = Utils.safe_solve(a, b)
+      # A * x should equal b
+      result = Nx.dot(a, x)
+      assert_in_delta Nx.to_number(result[0][0]), 5.0, 1.0e-4
+      assert_in_delta Nx.to_number(result[1][0]), 7.0, 1.0e-4
+    end
+
+    test "returns finite result for singular matrix" do
+      a = Nx.tensor([[1.0, 2.0], [2.0, 4.0]])
+      b = Nx.tensor([[3.0], [6.0]])
+      x = Utils.safe_solve(a, b)
+      assert not Utils.has_non_finite?(x)
+    end
+
+    test "returns finite result for near-singular matrix" do
+      a = Nx.tensor([[1.0, 2.0], [2.0, 4.0 + 1.0e-12]])
+      b = Nx.tensor([[3.0], [6.0]])
+      x = Utils.safe_solve(a, b)
+      assert not Utils.has_non_finite?(x)
+    end
+  end
+
+  describe "has_non_finite?/1" do
+    test "returns false for finite tensor" do
+      assert not Utils.has_non_finite?(Nx.tensor([1.0, 2.0, 3.0]))
+    end
+
+    test "returns true for tensor with NaN" do
+      nan_tensor = Nx.stack([Nx.tensor(1.0), Nx.Constants.nan(), Nx.tensor(3.0)])
+      assert Utils.has_non_finite?(nan_tensor)
+    end
+
+    test "returns true for tensor with Inf" do
+      inf_tensor = Nx.stack([Nx.tensor(1.0), Nx.Constants.infinity(), Nx.tensor(3.0)])
+      assert Utils.has_non_finite?(inf_tensor)
+    end
+  end
+
+  describe "missing_observation?/1" do
+    test "nil is missing" do
+      assert Utils.missing_observation?(nil)
+    end
+
+    test ":nan atom is missing" do
+      assert Utils.missing_observation?(:nan)
+    end
+
+    test "NaN tensor is missing" do
+      assert Utils.missing_observation?(Nx.Constants.nan())
+    end
+
+    test "NaN float is missing" do
+      nan = Nx.to_number(Nx.Constants.nan())
+      assert Utils.missing_observation?(nan)
+    end
+
+    test "normal number is not missing" do
+      refute Utils.missing_observation?(1.0)
+    end
+
+    test "normal tensor is not missing" do
+      refute Utils.missing_observation?(Nx.tensor(1.0))
+    end
+  end
+end

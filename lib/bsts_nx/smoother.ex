@@ -13,7 +13,7 @@ defmodule BstsNx.Smoother do
   """
 
   import Nx, only: [dot: 2, transpose: 1, subtract: 2, add: 2]
-  import BstsNx.Utils, only: [to_tensor: 1]
+  import BstsNx.Utils, only: [to_tensor: 1, safe_solve: 2, has_non_finite?: 1]
   require Nx.Defn
   require Logger
 
@@ -497,91 +497,6 @@ defmodule BstsNx.Smoother do
       else
         safe_solve(p_pred_next, rhs) |> transpose()
       end
-    end
-  end
-
-  # Attempts `Nx.LinAlg.solve(a, b)` with progressive diagonal jitter
-  # when the system matrix is near-singular. Returns a zero matrix matching
-  # the expected solution shape when all retries fail.
-  defp safe_solve(a, b) do
-    result =
-      try do
-        Nx.LinAlg.solve(a, b)
-      rescue
-        _ -> :failed
-      end
-
-    case result do
-      :failed ->
-        solve_with_jitter(a, b)
-
-      tensor ->
-        if has_non_finite?(tensor) do
-          solve_with_jitter(a, b)
-        else
-          tensor
-        end
-    end
-  end
-
-  defp has_non_finite?(tensor) do
-    Nx.any(Nx.logical_or(Nx.is_nan(tensor), Nx.is_infinity(tensor)))
-    |> Nx.to_number() == 1
-  end
-
-  defp solve_with_jitter(a, b) do
-    dim = Nx.shape(a) |> elem(0)
-    a_sym = Nx.multiply(Nx.add(a, transpose(a)), 0.5)
-
-    Enum.reduce_while([1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3], nil, fn jitter_scale, _acc ->
-      jitter = Nx.eye(dim) |> Nx.multiply(jitter_scale)
-
-      result =
-        try do
-          Nx.LinAlg.solve(Nx.add(a_sym, jitter), b)
-        rescue
-          _ -> :failed
-        end
-
-      case result do
-        :failed ->
-          {:cont, nil}
-
-        tensor ->
-          if has_non_finite?(tensor) do
-            {:cont, nil}
-          else
-            {:halt, tensor}
-          end
-      end
-    end) ||
-      pinv_fallback(a_sym, b) ||
-      (
-        Logger.warning(
-          "Smoother.safe_solve: solve failed even with max jitter 1e-3; " <>
-            "falling back to zero gain (smoothing skipped for this step)"
-        )
-
-        Nx.broadcast(Nx.tensor(0.0), Nx.shape(b))
-      )
-  end
-
-  # Final linear solve fallback for singular systems.
-  # Uses Moore-Penrose pseudoinverse to retain as much gain information as possible.
-  defp pinv_fallback(a, b) do
-    result =
-      try do
-        compat_dot(Nx.LinAlg.pinv(a), b)
-      rescue
-        _ -> :failed
-      end
-
-    case result do
-      :failed ->
-        nil
-
-      tensor ->
-        if has_non_finite?(tensor), do: nil, else: tensor
     end
   end
 

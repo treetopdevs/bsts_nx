@@ -1,6 +1,7 @@
 defmodule BstsNx.Utils do
   @moduledoc false
   import Bitwise
+  require Logger
 
   @doc """
   Converts numbers or lists into Nx tensors; leaves tensors unchanged.
@@ -69,6 +70,153 @@ defmodule BstsNx.Utils do
       end
     end) ||
       raise ArgumentError, "Cholesky factorisation failed even with jitter up to 1e-3"
+  end
+
+  @doc """
+  Returns `true` if the observation should be treated as missing.
+
+  Missing observations are `nil`, the atom `:nan`, tensors containing NaN,
+  or float NaN values.
+  """
+  @spec missing_observation?(any()) :: boolean()
+  def missing_observation?(nil), do: true
+  def missing_observation?(:nan), do: true
+
+  def missing_observation?(%Nx.Tensor{} = t) do
+    Nx.any(Nx.is_nan(t)) |> Nx.to_number() == 1
+  end
+
+  def missing_observation?(v) when is_float(v), do: v != v
+  def missing_observation?(_), do: false
+
+  @doc """
+  Solves the linear system `a * x = b` with progressive diagonal jitter
+  when `a` is near-singular. Falls back to pseudoinverse then zero matrix.
+
+  Returns a tensor matching the shape of `b`.
+  """
+  @spec safe_solve(Nx.t(), Nx.t()) :: Nx.t()
+  def safe_solve(a, b) do
+    result =
+      try do
+        Nx.LinAlg.solve(a, b)
+      rescue
+        _ -> :failed
+      end
+
+    case result do
+      :failed ->
+        solve_with_jitter(a, b)
+
+      tensor ->
+        if has_non_finite?(tensor) do
+          solve_with_jitter(a, b)
+        else
+          tensor
+        end
+    end
+  end
+
+  @doc """
+  Returns `true` if the tensor contains any NaN or Inf values.
+  """
+  @spec has_non_finite?(Nx.t()) :: boolean()
+  def has_non_finite?(tensor) do
+    Nx.any(Nx.logical_or(Nx.is_nan(tensor), Nx.is_infinity(tensor)))
+    |> Nx.to_number() == 1
+  end
+
+  defp solve_with_jitter(a, b) do
+    dim = Nx.axis_size(a, 0)
+    a_sym = Nx.multiply(Nx.add(a, Nx.transpose(a)), 0.5)
+
+    Enum.reduce_while(
+      [1.0e-8, 1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3],
+      nil,
+      fn jitter_scale, _acc ->
+        jitter = Nx.eye(dim) |> Nx.multiply(jitter_scale)
+
+        result =
+          try do
+            Nx.LinAlg.solve(Nx.add(a_sym, jitter), b)
+          rescue
+            _ -> :failed
+          end
+
+        case result do
+          :failed ->
+            {:cont, nil}
+
+          tensor ->
+            if has_non_finite?(tensor) do
+              {:cont, nil}
+            else
+              {:halt, tensor}
+            end
+        end
+      end
+    ) ||
+      pinv_fallback(a_sym, b) ||
+      (
+        Logger.warning(
+          "Utils.safe_solve: solve failed even with max jitter 1e-3; " <>
+            "falling back to zero matrix"
+        )
+
+        Nx.broadcast(Nx.tensor(0.0), Nx.shape(b))
+      )
+  end
+
+  defp pinv_fallback(a, b) do
+    result =
+      try do
+        compat_dot(Nx.LinAlg.pinv(a), b)
+      rescue
+        _ -> :failed
+      end
+
+    case result do
+      :failed ->
+        nil
+
+      tensor ->
+        if has_non_finite?(tensor), do: nil, else: tensor
+    end
+  end
+
+  # Rank-safe dot for Nx 0.6 compatibility
+  defp compat_dot(a, b) do
+    case {Nx.rank(a), Nx.rank(b)} do
+      {0, 0} ->
+        Nx.multiply(a, b)
+
+      {2, 1} ->
+        b_row = Nx.reshape(b, {1, Nx.axis_size(b, 0)})
+        Nx.multiply(a, b_row) |> Nx.sum(axes: [1])
+
+      {2, 2} ->
+        {m, n} = Nx.shape(a)
+        {n_b, p} = Nx.shape(b)
+
+        if n != n_b do
+          raise ArgumentError,
+                "incompatible matrix shapes for multiplication: #{inspect(Nx.shape(a))} and #{inspect(Nx.shape(b))}"
+        end
+
+        a_expanded = Nx.reshape(a, {m, n, 1})
+        b_expanded = Nx.reshape(b, {1, n, p})
+        Nx.multiply(a_expanded, b_expanded) |> Nx.sum(axes: [1])
+
+      {1, 2} ->
+        a_col = Nx.reshape(a, {Nx.axis_size(a, 0), 1})
+        Nx.multiply(a_col, b) |> Nx.sum(axes: [0])
+
+      {1, 1} ->
+        Nx.multiply(a, b) |> Nx.sum()
+
+      _ ->
+        Nx.dot(a, b)
+    end
   end
 
   @doc """
