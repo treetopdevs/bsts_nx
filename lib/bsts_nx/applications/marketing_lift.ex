@@ -105,6 +105,9 @@ defmodule BstsNx.Applications.MarketingLift do
     * `:control_series` - list of control time series (same length as
       `observations`) that are correlated with the response but unaffected
       by the campaign. These become regression covariates.
+    * `:control_selection` - optional control-series selection before
+      composing the regression component. Set to `true` for default Pearson
+      screening, or pass options for `BstsNx.CovariateSelection.select/3`.
     * `:alpha` - significance level (default: 0.05)
     * `:num_samples` - posterior MCMC draws (default: 200)
     * `:seed` - PRNG seed for reproducibility
@@ -213,9 +216,17 @@ defmodule BstsNx.Applications.MarketingLift do
 
   # -- Private implementation --
 
-  defp build_analysis_opts(observations, _campaign, opts) do
+  defp build_analysis_opts(observations, campaign, opts) do
     controls = Keyword.get(opts, :control_series)
-    ModelBuilder.build_opts_with_controls(observations, controls, opts)
+
+    opts_with_selection_window =
+      Keyword.put_new(
+        opts,
+        :control_selection_pre_period,
+        {campaign.baseline_start, campaign.baseline_end}
+      )
+
+    ModelBuilder.build_opts_with_controls(observations, controls, opts_with_selection_window)
   end
 
   defp build_campaign_result(campaign, analysis, observations) do

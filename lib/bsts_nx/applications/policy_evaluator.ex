@@ -100,6 +100,9 @@ defmodule BstsNx.Applications.PolicyEvaluator do
 
     * `:post_period_end` - end index of post-period (default: end of series)
     * `:seasonality` - seasonal periods for the outcome metric
+    * `:control_selection` - optional control-series selection before
+      composing the regression component. Set to `true` for default Pearson
+      screening, or pass options for `BstsNx.CovariateSelection.select/3`.
     * `:alpha` - significance level (default: 0.05)
     * `:num_samples` - posterior MCMC draws (default: 200)
     * `:seed` - PRNG seed
@@ -141,7 +144,7 @@ defmodule BstsNx.Applications.PolicyEvaluator do
       post_period: {effective_post_start, post_end}
     }
 
-    analysis_opts = build_opts(observations, intervention, opts)
+    analysis_opts = build_opts(observations, intervention, opts, {pre_start, pre_end})
     analysis = InterventionAnalysis.analyze(observations, config, analysis_opts)
 
     n_pre = pre_end - pre_start + 1
@@ -278,9 +281,13 @@ defmodule BstsNx.Applications.PolicyEvaluator do
 
   # -- Private implementation --
 
-  defp build_opts(observations, intervention, opts) do
+  defp build_opts(observations, intervention, opts, pre_period) do
     controls = Map.get(intervention, :control_series)
-    ModelBuilder.build_opts_with_controls(observations, controls, opts)
+
+    opts_with_selection_window =
+      Keyword.put_new(opts, :control_selection_pre_period, pre_period)
+
+    ModelBuilder.build_opts_with_controls(observations, controls, opts_with_selection_window)
   end
 
   defp build_report(intervention, effect, analysis, n_pre, n_post, alpha) do

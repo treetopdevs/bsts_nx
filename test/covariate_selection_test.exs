@@ -284,4 +284,85 @@ defmodule BstsNx.CovariateSelectionTest do
       assert Nx.shape(result.selected_matrix) == {3, 1}
     end
   end
+
+  describe "select_spike_slab/3" do
+    test "works via select/3 method dispatch" do
+      target = Nx.tensor([1.0, 2.0, 3.0, 4.0, 5.0])
+
+      candidates =
+        Nx.tensor([
+          [1.0, 0.2],
+          [2.0, -0.1],
+          [3.0, 0.1],
+          [4.0, -0.2],
+          [5.0, 0.0]
+        ])
+
+      result =
+        CovariateSelection.select(target, candidates,
+          method: :spike_and_slab,
+          num_samples: 50,
+          burn_in: 50,
+          seed: 123
+        )
+
+      assert result.method == :spike_and_slab
+      assert is_list(result.pip)
+      assert is_list(result.posterior_mean_beta)
+      assert length(result.pip) == 2
+    end
+
+    test "recovers sparse signal with high PIP for true regressors" do
+      :rand.seed(:exsss, {900, 901, 902})
+
+      n = 220
+      p = 100
+      true_idxs = [5, 23, 77]
+      true_betas = %{5 => 4.0, 23 => -3.5, 77 => 3.0}
+      noise_sd = 0.5
+
+      x_rows =
+        Enum.map(1..n, fn _ ->
+          Enum.map(1..p, fn _ -> :rand.normal() end)
+        end)
+
+      target =
+        Enum.map(x_rows, fn row ->
+          signal =
+            Enum.reduce(true_idxs, 0.0, fn j, acc ->
+              acc + Map.fetch!(true_betas, j) * Enum.at(row, j)
+            end)
+
+          signal + :rand.normal() * noise_sd
+        end)
+
+      result =
+        CovariateSelection.select_spike_slab(Nx.tensor(target), Nx.tensor(x_rows),
+          num_samples: 350,
+          burn_in: 350,
+          thin: 1,
+          seed: 42,
+          prior_inclusion: 0.03,
+          spike_sd: 0.03,
+          slab_sd: 1.5,
+          pip_threshold: 0.5
+        )
+
+      pip_map = Map.new(result.pip)
+
+      Enum.each(true_idxs, fn j ->
+        assert pip_map[j] > 0.95,
+               "true regressor #{j} should have high PIP; got #{pip_map[j]}"
+      end)
+
+      max_noise_pip =
+        result.pip
+        |> Enum.reject(fn {j, _pip} -> j in true_idxs end)
+        |> Enum.map(fn {_j, pip} -> pip end)
+        |> Enum.max()
+
+      assert max_noise_pip < 0.25,
+             "noise regressors should have low PIP; max was #{max_noise_pip}"
+    end
+  end
 end

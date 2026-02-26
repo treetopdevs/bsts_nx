@@ -16,24 +16,14 @@ Everything is reproducible and seeded.
 ## 1) Setup
 
 ```elixir
-project_root =
-  cond do
-    File.exists?("mix.exs") ->
-      File.cwd!()
-
-    File.exists?(Path.expand("../mix.exs", File.cwd!())) ->
-      Path.expand("..", File.cwd!())
-
-    true ->
-      raise "Could not find mix.exs. Open this Livebook from inside the bsts_nx repository."
-  end
+project_root = "/Users/nicholas/develop/bsts_nx"
 
 Mix.install([
   {:bsts_nx, path: project_root},
   {:kino_vega_lite, "~> 0.1.13"}
 ])
 
-IO.puts("Loaded bsts_nx from: #{inspect(local_root || :github)}")
+IO.puts("Loaded bsts_nx from: #{inspect(project_root || :github)}")
 
 alias BstsNx.{
   CausalImpact,

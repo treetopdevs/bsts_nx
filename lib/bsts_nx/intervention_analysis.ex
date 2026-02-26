@@ -86,6 +86,11 @@ defmodule BstsNx.InterventionAnalysis do
       observations) that are correlated with the response but unaffected
       by the intervention. These become regression covariates in a composed
       model via `ModelBuilder.build_opts_with_controls/3`.
+    * `:control_selection` - optional control-series selection before model
+      composition. Set to `true` for default Pearson screening, or pass a
+      keyword list forwarded to `BstsNx.CovariateSelection.select/3`.
+    * `:control_selection_pre_period` - optional `{start, end}` window used
+      for control selection. Defaults to `pre_period`.
     * `:alpha` - significance level for credible intervals and significance
       testing (default: 0.05)
     * `:num_samples` - number of posterior MCMC samples (default: 200)
@@ -164,7 +169,16 @@ defmodule BstsNx.InterventionAnalysis do
           opts
 
         controls ->
-          merged = ModelBuilder.build_opts_with_controls(observations, controls, opts)
+          opts_with_selection_window =
+            Keyword.put_new(opts, :control_selection_pre_period, pre_period)
+
+          merged =
+            ModelBuilder.build_opts_with_controls(
+              observations,
+              controls,
+              opts_with_selection_window
+            )
+
           # Preserve method and alpha from original opts
           merged
           |> Keyword.put(:method, method)

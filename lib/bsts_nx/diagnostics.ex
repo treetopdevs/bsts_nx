@@ -1,14 +1,20 @@
 defmodule BstsNx.Diagnostics do
   require Logger
+  alias BstsNx.Utils
 
   @moduledoc """
   Diagnostic statistics for assessing convergence of MCMC chains.
 
   This module provides functions to compute the Gelman–Rubin R̂ statistic
-  and the effective sample size (ESS) for parameters sampled by the
-  Gibbs sampler.  These metrics help evaluate whether Markov chains
-  have converged to the target distribution and how many samples are
-  effectively independent.
+  and the effective sample size (ESS) for parameters sampled by the Gibbs
+  sampler. It also provides single-chain diagnostics:
+
+    * split R̂ (`split_r_hat/1`)
+    * Geweke Z-score (`geweke_z/2`)
+    * highest posterior density interval (`hpd_interval/2`)
+
+  These metrics help evaluate whether Markov chains have converged to the
+  target distribution and how many samples are effectively independent.
 
   The functions expect a list of chains, where each chain is a list of
   sampled values for a single scalar parameter.  For example, to
@@ -162,6 +168,147 @@ defmodule BstsNx.Diagnostics do
     end
   end
 
+  @doc """
+  Computes Geweke's convergence Z-score for a single chain.
+
+  Compares the mean of the first part of the chain to the mean of the
+  last part, using spectral-density-adjusted standard errors (Bartlett
+  window estimate at frequency zero).
+
+  ## Options
+
+    * `:first_frac` - fraction of samples for the first window (default: 0.1)
+    * `:last_frac` - fraction of samples for the last window (default: 0.5)
+    * `:max_lag` - truncation lag for spectral variance estimate
+      (default: `trunc(sqrt(window_n))`)
+
+  Returns a Z-score (float) or `:nan` when windows are too short or
+  non-finite.
+  """
+  @spec geweke_z([number()], keyword()) :: float() | :nan
+  def geweke_z(chain, opts \\ []) when is_list(chain) do
+    n = length(chain)
+    first_frac = Keyword.get(opts, :first_frac, 0.1)
+    last_frac = Keyword.get(opts, :last_frac, 0.5)
+    max_lag_opt = Keyword.get(opts, :max_lag)
+
+    if n < 20 do
+      :nan
+    else
+      validate_fraction!(:first_frac, first_frac)
+      validate_fraction!(:last_frac, last_frac)
+
+      if first_frac + last_frac >= 1.0 do
+        raise ArgumentError,
+              "first_frac + last_frac must be < 1.0, got #{first_frac + last_frac}"
+      end
+
+      n_first = max(trunc(Float.floor(n * first_frac)), 2)
+      n_last = max(trunc(Float.floor(n * last_frac)), 2)
+
+      if n_first + n_last > n do
+        :nan
+      else
+        first = Enum.take(chain, n_first)
+        last = Enum.drop(chain, n - n_last)
+
+        m_first = Enum.sum(first) / n_first
+        m_last = Enum.sum(last) / n_last
+
+        max_lag_first = max_lag_for_window(max_lag_opt, n_first)
+        max_lag_last = max_lag_for_window(max_lag_opt, n_last)
+
+        s0_first = spectral_density_zero(first, max_lag_first)
+        s0_last = spectral_density_zero(last, max_lag_last)
+
+        cond do
+          s0_first <= 0.0 or s0_last <= 0.0 ->
+            :nan
+
+          true ->
+            denom = :math.sqrt(s0_first / n_first + s0_last / n_last)
+            if denom <= 1.0e-15, do: :nan, else: (m_first - m_last) / denom
+        end
+      end
+    end
+  end
+
+  @doc """
+  Returns whether a Geweke test passes at significance level `:alpha`.
+
+  A pass means `|z| <= z_(1 - alpha/2)`.
+
+  ## Options
+
+    * `:alpha` - two-sided significance level (default: 0.05)
+
+  All options accepted by `geweke_z/2` are also accepted.
+  """
+  @spec geweke_pass?([number()], keyword()) :: boolean() | :nan
+  def geweke_pass?(chain, opts \\ []) do
+    alpha = Keyword.get(opts, :alpha, 0.05)
+
+    if not is_number(alpha) or alpha <= 0.0 or alpha >= 1.0 do
+      raise ArgumentError, "alpha must be in (0, 1), got: #{inspect(alpha)}"
+    end
+
+    case geweke_z(chain, opts) do
+      :nan -> :nan
+      z -> abs(z) <= Utils.z_score(alpha)
+    end
+  end
+
+  @doc """
+  Computes a highest posterior density (HPD) interval from scalar samples.
+
+  Uses the shortest interval containing at least `level` posterior mass.
+  Returns `{lower, upper}` or `:nan` for empty input.
+  """
+  @spec hpd_interval([number()], float()) :: {float(), float()} | :nan
+  def hpd_interval(samples, level \\ 0.95)
+
+  def hpd_interval([], _level), do: :nan
+
+  def hpd_interval(samples, level) when is_list(samples) do
+    if not is_number(level) or level <= 0.0 or level >= 1.0 do
+      raise ArgumentError, "level must be in (0, 1), got: #{inspect(level)}"
+    end
+
+    sorted = Enum.sort(samples)
+    n = length(sorted)
+
+    if n == 1 do
+      v = hd(sorted)
+      {v, v}
+    else
+      window = max(trunc(Float.ceil(level * n)), 1)
+
+      if window >= n do
+        {hd(sorted), List.last(sorted)}
+      else
+        {best_low, best_high, _best_width} =
+          Enum.reduce(0..(n - window), nil, fn i, best ->
+            low = Enum.at(sorted, i)
+            high = Enum.at(sorted, i + window - 1)
+            width = high - low
+
+            case best do
+              nil ->
+                {low, high, width}
+
+              {_, _, best_width} when width < best_width ->
+                {low, high, width}
+
+              _ ->
+                best
+            end
+          end)
+
+        {best_low, best_high}
+      end
+    end
+  end
+
   # -- Shared helper -----------------------------------------------------------
 
   # Computes between-chain variance B, within-chain variance W, and the
@@ -209,6 +356,53 @@ defmodule BstsNx.Diagnostics do
         var_hat = (n - 1) / n * w + b / n
         {m, n, w, b, var_hat}
       end
+    end
+  end
+
+  defp validate_fraction!(name, value) do
+    if not is_number(value) or value <= 0.0 or value >= 1.0 do
+      raise ArgumentError, "#{name} must be in (0, 1), got: #{inspect(value)}"
+    end
+  end
+
+  defp max_lag_for_window(nil, n), do: max(trunc(:math.sqrt(n)), 1)
+  defp max_lag_for_window(max_lag, _n) when is_integer(max_lag) and max_lag >= 0, do: max_lag
+
+  defp max_lag_for_window(max_lag, _n) do
+    raise ArgumentError, "max_lag must be a non-negative integer, got: #{inspect(max_lag)}"
+  end
+
+  # Bartlett-window spectral density estimate at frequency zero.
+  defp spectral_density_zero(samples, max_lag) do
+    n = length(samples)
+    mean = Enum.sum(samples) / n
+    centered = :array.from_list(Enum.map(samples, &(&1 - mean)))
+
+    gamma = fn lag ->
+      Enum.reduce(0..(n - lag - 1), 0.0, fn i, acc ->
+        acc + :array.get(i, centered) * :array.get(i + lag, centered)
+      end) / n
+    end
+
+    gamma_0 = gamma.(0)
+
+    if gamma_0 <= 0.0 do
+      0.0
+    else
+      used_lag = min(max_lag, n - 1)
+
+      gamma_sum =
+        if used_lag <= 0 do
+          0.0
+        else
+          Enum.reduce(1..used_lag, 0.0, fn lag, acc ->
+            weight = 1.0 - lag / (used_lag + 1)
+            acc + 2.0 * weight * gamma.(lag)
+          end)
+        end
+
+      s0 = gamma_0 + gamma_sum
+      if s0 > 0.0, do: s0, else: 0.0
     end
   end
 end

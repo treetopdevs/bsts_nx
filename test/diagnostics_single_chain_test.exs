@@ -90,4 +90,49 @@ defmodule BstsNx.DiagnosticsSingleChainTest do
       assert_in_delta(split_result, manual_result, 1.0e-10)
     end
   end
+
+  describe "geweke_z/2 and geweke_pass?/2" do
+    test "returns :nan for short chains" do
+      assert Diagnostics.geweke_z([1.0, 2.0, 3.0]) == :nan
+      assert Diagnostics.geweke_pass?([1.0, 2.0, 3.0]) == :nan
+    end
+
+    test "returns near-zero z for stationary chain" do
+      :rand.seed(:exsss, {60, 61, 62})
+      chain = Enum.map(1..400, fn _ -> :rand.normal() end)
+
+      z = Diagnostics.geweke_z(chain)
+      assert is_float(z)
+      assert abs(z) < 2.0, "Geweke z #{z} should be in a non-significant range"
+      assert Diagnostics.geweke_pass?(chain)
+    end
+
+    test "detects mean shift non-stationarity" do
+      :rand.seed(:exsss, {70, 71, 72})
+      first = Enum.map(1..200, fn _ -> :rand.normal() end)
+      last = Enum.map(1..200, fn _ -> :rand.normal() + 2.5 end)
+      chain = first ++ last
+
+      z = Diagnostics.geweke_z(chain)
+      assert is_float(z)
+      assert abs(z) > 2.0, "Geweke z #{z} should flag non-stationarity"
+      refute Diagnostics.geweke_pass?(chain)
+    end
+  end
+
+  describe "hpd_interval/2" do
+    test "returns :nan for empty samples" do
+      assert Diagnostics.hpd_interval([]) == :nan
+    end
+
+    test "returns narrow interval around center for Gaussian samples" do
+      :rand.seed(:exsss, {80, 81, 82})
+      samples = Enum.map(1..2_000, fn _ -> :rand.normal() end)
+      {lower, upper} = Diagnostics.hpd_interval(samples, 0.95)
+      width = upper - lower
+
+      assert lower < 0.0 and upper > 0.0
+      assert width > 3.0 and width < 4.5
+    end
+  end
 end

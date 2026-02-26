@@ -190,6 +190,29 @@ defmodule BstsNx.InterventionAnalysisTest do
       # Trend (2) + seasonal (6 for period 7) + 1 regressor = 9
       assert Nx.axis_size(result.model_spec.f, 0) == 9
     end
+
+    test "control_selection screens controls before composing the model" do
+      control_signal = Enum.map(1..35, &(&1 * 1.0))
+      control_constant = List.duplicate(10.0, 35)
+      pre = Enum.map(1..28, fn i -> Enum.at(control_signal, i - 1) + 0.05 * :math.sin(i) end)
+      post = Enum.map(29..35, fn i -> Enum.at(control_signal, i - 1) + 10.0 end)
+      obs = pre ++ post
+
+      result =
+        InterventionAnalysis.analyze(
+          obs,
+          %{pre_period: {1, 28}, post_period: {29, 35}},
+          control_series: [control_signal, control_constant],
+          control_selection: [threshold: 0.7, max_controls: 1],
+          num_samples: 10,
+          burn_in: 5,
+          seed: 42
+        )
+
+      assert result.model_spec != nil
+      # Trend (2) + 1 selected regressor = 3
+      assert Nx.axis_size(result.model_spec.f, 0) == 3
+    end
   end
 
   describe "validation" do

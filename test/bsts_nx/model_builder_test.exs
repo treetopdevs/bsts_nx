@@ -142,6 +142,39 @@ defmodule BstsNx.ModelBuilderTest do
         ModelBuilder.build_opts_with_controls([1.0, 2.0, 3.0], [[1.0, 2.0]], seed: 42)
       end
     end
+
+    test "control_selection can choose a subset of controls" do
+      obs = [1.0, 2.0, 3.0, 4.0, 20.0, 21.0]
+      control_signal = [1.0, 2.0, 3.0, 4.0, 5.0, 6.0]
+      control_constant = [10.0, 10.0, 10.0, 10.0, 0.0, 1.0]
+
+      result =
+        ModelBuilder.build_opts_with_controls(obs, [control_signal, control_constant],
+          control_selection: [threshold: 0.8, max_controls: 1],
+          control_selection_pre_period: {1, 4}
+        )
+
+      spec = result[:model_spec]
+      assert %BstsNx.ModelSpec{} = spec
+      # Trend (2) + 1 selected regressor = 3 state dims
+      assert Nx.axis_size(spec.f, 0) == 3
+    end
+
+    test "control_selection can drop controls and keep seasonal structure" do
+      obs = [1.0, 2.0, 3.0, 4.0]
+      controls = [[5.0, 5.0, 5.0, 5.0]]
+
+      result =
+        ModelBuilder.build_opts_with_controls(obs, controls,
+          seasonality: 3,
+          control_selection: [threshold: 0.9]
+        )
+
+      spec = result[:model_spec]
+      assert %BstsNx.ModelSpec{} = spec
+      # Trend (2) + seasonal (2 for period 3) with no retained controls.
+      assert Nx.axis_size(spec.f, 0) == 4
+    end
   end
 
   describe "build_future_h/3" do
