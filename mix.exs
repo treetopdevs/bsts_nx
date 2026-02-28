@@ -13,7 +13,7 @@ defmodule BstsNx.MixProject do
     [
       app: :bsts_nx,
       version: "0.1.0",
-      elixir: "~> 1.14",
+      elixir: "~> 1.19",
       name: "BstsNx",
       description: description(),
       package: package(),
@@ -32,8 +32,9 @@ defmodule BstsNx.MixProject do
   defp deps do
     [
       # Nx provides numerical computing primitives used throughout the library.
-      {:nx, "~> 0.9"},
-      {:exla, "~> 0.9", optional: true},
+      {:nx, "~> 0.11.0"},
+      {:exla, "~> 0.11.0", optional: true},
+      {:xla, "~> 0.10.0", optional: true},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:stream_data, "~> 1.0", only: [:test, :dev]}
     ]

@@ -33,6 +33,9 @@ _Story beat:_ 08:00 AM. The war room opens, and we load the tooling before touch
 project_root = "/Users/nicholas/develop/bsts_nx"
 
 Mix.install([
+  {:nx, "~> 0.11.0"},
+  {:exla, "~> 0.11.0"},
+  {:xla, "~> 0.10.0"},
   {:bsts_nx, path: project_root},
   {:kino_vega_lite, "~> 0.1.13"}
 ])

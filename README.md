@@ -17,6 +17,23 @@ def deps do
 end
 ```
 
+`bsts_nx` targets the latest Nx stack and requires:
+
+- `nx ~> 0.11`
+- `exla ~> 0.11` (optional)
+- `xla ~> 0.10` (optional)
+
+If your app or `Mix.install/2` script pins `nx` to `0.6.x` (or any `< 0.11`),
+dependency resolution will fail. Upgrade the full graph to Nx 0.11.
+
+For `Mix.install/2`, keep everything in a single call and avoid pinning an older Nx:
+
+```elixir
+Mix.install([
+  {:bsts_nx, "~> 0.1"}
+])
+```
+
 ## Quick start
 
 ### Kalman filter (local-level model)
