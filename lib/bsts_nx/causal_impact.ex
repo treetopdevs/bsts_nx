@@ -729,11 +729,11 @@ defmodule BstsNx.CausalImpact do
         process_noise = Nx.multiply(z_state, q_sds)
 
         # State transition: x_{t+1} = F * x_t + w_t
-        next_state = Nx.add(Nx.dot(f, prev_state), process_noise)
+        next_state = Nx.add(compat_dot(f, prev_state), process_noise)
 
         # Observation: y_t = H_t * x_t + v_t (using per-step H)
         h_row = if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
-        predicted_y = Nx.to_number(Nx.dot(h_row, next_state))
+        predicted_y = Nx.to_number(compat_dot(h_row, next_state))
 
         {z_obs, _} = Nx.Random.normal(key_obs, 0.0, 1.0)
         cf_obs = predicted_y + Nx.to_number(z_obs) * obs_sd
@@ -780,6 +780,42 @@ defmodule BstsNx.CausalImpact do
         else
           List.duplicate(t, n_post)
         end
+    end
+  end
+
+  # Nx 0.6 emits range warnings for some dot rank combinations on newer
+  # Elixir runtimes. Handle common low-rank products explicitly.
+  defp compat_dot(a, b) do
+    case {Nx.rank(a), Nx.rank(b)} do
+      {0, 0} ->
+        Nx.multiply(a, b)
+
+      {2, 1} ->
+        b_row = Nx.reshape(b, {1, Nx.axis_size(b, 0)})
+        Nx.multiply(a, b_row) |> Nx.sum(axes: [1])
+
+      {2, 2} ->
+        {m, n} = Nx.shape(a)
+        {n_b, p} = Nx.shape(b)
+
+        if n != n_b do
+          raise ArgumentError,
+                "incompatible matrix shapes for multiplication: #{inspect(Nx.shape(a))} and #{inspect(Nx.shape(b))}"
+        end
+
+        a_expanded = Nx.reshape(a, {m, n, 1})
+        b_expanded = Nx.reshape(b, {1, n, p})
+        Nx.multiply(a_expanded, b_expanded) |> Nx.sum(axes: [1])
+
+      {1, 2} ->
+        a_col = Nx.reshape(a, {Nx.axis_size(a, 0), 1})
+        Nx.multiply(a_col, b) |> Nx.sum(axes: [0])
+
+      {1, 1} ->
+        Nx.multiply(a, b) |> Nx.sum()
+
+      _ ->
+        Nx.dot(a, b)
     end
   end
 

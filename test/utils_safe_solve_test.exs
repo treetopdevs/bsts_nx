@@ -8,7 +8,7 @@ defmodule BstsNxUtilsSafeSolveTest do
       b = Nx.tensor([[5.0], [7.0]])
       x = Utils.safe_solve(a, b)
       # A * x should equal b
-      result = Nx.dot(a, x)
+      result = Nx.multiply(a, Nx.transpose(x)) |> Nx.sum(axes: [1]) |> Nx.reshape({2, 1})
       assert_in_delta Nx.to_number(result[0][0]), 5.0, 1.0e-4
       assert_in_delta Nx.to_number(result[1][0]), 7.0, 1.0e-4
     end
@@ -24,6 +24,25 @@ defmodule BstsNxUtilsSafeSolveTest do
       a = Nx.tensor([[1.0, 2.0], [2.0, 4.0 + 1.0e-12]])
       b = Nx.tensor([[3.0], [6.0]])
       x = Utils.safe_solve(a, b)
+      assert not Utils.has_non_finite?(x)
+    end
+
+    test "solves 1x1 systems without LinAlg.solve fallback path" do
+      a = Nx.tensor([[2.0]])
+      b = Nx.tensor([[6.0], [10.0]])
+      x = Utils.safe_solve(a, b)
+
+      assert Nx.shape(x) == {2, 1}
+      assert_in_delta Nx.to_number(x[0][0]), 3.0, 1.0e-6
+      assert_in_delta Nx.to_number(x[1][0]), 5.0, 1.0e-6
+    end
+
+    test "handles near-zero scalar denominator with jitter and keeps result finite" do
+      a = Nx.tensor(0.0)
+      b = Nx.tensor([1.0, -2.0, 3.0])
+      x = Utils.safe_solve(a, b)
+
+      assert Nx.shape(x) == {3}
       assert not Utils.has_non_finite?(x)
     end
   end

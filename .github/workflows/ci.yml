@@ -6,6 +6,13 @@ on:
       - main
       - master
   pull_request:
+  workflow_dispatch:
+    inputs:
+      run_r_parity:
+        description: "Run R parity integration test job"
+        required: false
+        default: false
+        type: boolean
 
 jobs:
   test:
@@ -22,6 +29,8 @@ jobs:
             otp: "26"
           - elixir: "1.18"
             otp: "27"
+          - elixir: "1.19"
+            otp: "28"
 
     env:
       MIX_ENV: test
@@ -57,6 +66,46 @@ jobs:
 
       - name: Run tests
         run: mix test --exclude external
+
+  test_exla:
+    name: Test EXLA (Elixir 1.19 / OTP 28)
+    runs-on: ubuntu-latest
+
+    env:
+      MIX_ENV: test
+      BSTS_NX_TEST_BACKEND: exla
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Elixir + OTP
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.19"
+          otp-version: "28"
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: ${{ runner.os }}-mix-exla-1.19-28-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-exla-1.19-28-
+
+      - name: Install Hex/Rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Fetch dependencies
+        run: mix deps.get
+
+      - name: Compile
+        run: mix compile
+
+      - name: Run EXLA smoke tests
+        run: mix test test/structured_performance_smoke_test.exs test/utils_safe_solve_test.exs
 
   quality:
     name: Quality (format + docs)
@@ -96,3 +145,54 @@ jobs:
 
       - name: Build docs
         run: mix docs
+
+  r_parity:
+    name: R parity (Elixir 1.19 / OTP 28)
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    if: ${{ github.event_name == 'workflow_dispatch' && inputs.run_r_parity == true }}
+
+    env:
+      MIX_ENV: test
+      BSTS_NX_ENABLE_R_PARITY: "1"
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Elixir + OTP
+        uses: erlef/setup-beam@v1
+        with:
+          elixir-version: "1.19"
+          otp-version: "28"
+
+      - name: Setup R
+        uses: r-lib/actions/setup-r@v2
+        with:
+          r-version: "release"
+
+      - name: Install R package dependencies
+        run: |
+          Rscript -e "install.packages('bsts', repos = 'https://cloud.r-project.org')"
+
+      - name: Cache deps
+        uses: actions/cache@v4
+        with:
+          path: deps
+          key: ${{ runner.os }}-mix-r-parity-1.19-28-${{ hashFiles('**/mix.lock') }}
+          restore-keys: |
+            ${{ runner.os }}-mix-r-parity-1.19-28-
+
+      - name: Install Hex/Rebar
+        run: |
+          mix local.hex --force
+          mix local.rebar --force
+
+      - name: Fetch dependencies
+        run: mix deps.get
+
+      - name: Compile
+        run: mix compile
+
+      - name: Run R parity integration
+        run: mix test test/r_parity_test.exs

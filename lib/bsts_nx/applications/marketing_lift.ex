@@ -108,6 +108,10 @@ defmodule BstsNx.Applications.MarketingLift do
     * `:control_selection` - optional control-series selection before
       composing the regression component. Set to `true` for default Pearson
       screening, or pass options for `BstsNx.CovariateSelection.select/3`.
+    * `:control_regression_mode` - `:dynamic` (default) or `:spike_and_slab`
+      for in-loop Bayesian variable selection with a g-prior.
+    * `:control_regression_opts` - keyword options forwarded to
+      `Components.regression_spec/2` when controls are present.
     * `:alpha` - significance level (default: 0.05)
     * `:num_samples` - posterior MCMC draws (default: 200)
     * `:seed` - PRNG seed for reproducibility

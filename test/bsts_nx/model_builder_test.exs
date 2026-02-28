@@ -175,6 +175,25 @@ defmodule BstsNx.ModelBuilderTest do
       # Trend (2) + seasonal (2 for period 3) with no retained controls.
       assert Nx.axis_size(spec.f, 0) == 4
     end
+
+    test "control_regression_mode uses in-loop spike-and-slab metadata" do
+      obs = [1.0, 2.0, 3.0, 4.0]
+      controls = [[1.0, 2.0, 3.0, 4.0], [4.0, 3.0, 2.0, 1.0]]
+
+      result =
+        ModelBuilder.build_opts_with_controls(obs, controls,
+          control_regression_mode: :spike_and_slab,
+          control_regression_opts: [prior_inclusion: 0.2, g: 4.0]
+        )
+
+      spec = result[:model_spec]
+      assert %BstsNx.ModelSpec{} = spec
+      assert spec.regression.mode == :spike_and_slab
+      assert spec.regression.prior_inclusion == 0.2
+      assert spec.regression.g == 4.0
+      # Trend q_specs only (level + slope); regression variances are not in q_specs.
+      assert length(spec.q_specs) == 2
+    end
   end
 
   describe "build_future_h/3" do

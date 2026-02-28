@@ -4,6 +4,7 @@ defmodule BstsNx.RParityTest do
   alias BstsNx.GibbsSampler
 
   @moduletag :external
+  @moduletag timeout: 360_000
 
   @r_parity_skip_reason (
                           enabled? =
@@ -74,25 +75,57 @@ defmodule BstsNx.RParityTest do
     suppressPackageStartupMessages(library(bsts))
 
     y <- as.numeric(strsplit(Sys.getenv("Y_CSV"), ",")[[1]])
-    state.spec <- AddLocalLevel(list(), y)
-    model <- bsts(y, state.specification = state.spec, niter = 2000, ping = 0, seed = 2024)
+    obs.prior <- SdPrior(sigma.guess = 1.2, sample.size = 2.0, initial.value = 1.0)
+    level.prior <- SdPrior(sigma.guess = 1.2, sample.size = 2.0, initial.value = 1.0)
+    initial.state.prior <- NormalPrior(mu = y[1], sigma = sqrt(10.0), initial.value = y[1])
+
+    state.spec <- AddLocalLevel(
+      list(),
+      y,
+      sigma.prior = level.prior,
+      initial.state.prior = initial.state.prior
+    )
+
+    model <- bsts(
+      y,
+      state.specification = state.spec,
+      prior = obs.prior,
+      niter = 2000,
+      ping = 0,
+      seed = 2024
+    )
     burn <- 1001
 
     sigma_obs <- as.numeric(model$sigma.obs)
     sigma_obs <- sigma_obs[burn:length(sigma_obs)]
 
+    as_draw_vector <- function(v) {
+      if (is.null(v)) return(NULL)
+
+      if (is.matrix(v)) {
+        if (ncol(v) < 1) return(NULL)
+        return(as.numeric(v[, 1]))
+      }
+
+      if (length(v) > 1) return(as.numeric(v))
+      NULL
+    }
+
     extract_level_sigma <- function(m) {
+      for (nm in c("sigma.level", "sigma.trend", "sigma.state")) {
+        v <- as_draw_vector(m[[nm]])
+        if (!is.null(v)) return(v)
+      }
+
       comp <- m$state.specification[[1]]
 
       for (nm in c("sigma.draws", "sigma", "sigma.level", "sigma_level")) {
-        v <- comp[[nm]]
-        if (!is.null(v) && length(v) > 1) return(as.numeric(v))
+        v <- as_draw_vector(comp[[nm]])
+        if (!is.null(v)) return(v)
       }
 
-      if (!is.null(m$state.sigma)) {
-        v <- m$state.sigma[, 1]
-        if (length(v) > 1) return(as.numeric(v))
-      }
+      v <- as_draw_vector(m$state.sigma)
+      if (!is.null(v)) return(v)
 
       stop("Unable to extract local-level sigma draws from bsts object")
     }

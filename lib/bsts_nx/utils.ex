@@ -97,22 +97,28 @@ defmodule BstsNx.Utils do
   """
   @spec safe_solve(Nx.t(), Nx.t()) :: Nx.t()
   def safe_solve(a, b) do
-    result =
-      try do
-        Nx.LinAlg.solve(a, b)
-      rescue
-        _ -> :failed
-      end
+    case scalar_or_1x1_solve(a, b) do
+      {:ok, tensor} ->
+        tensor
 
-    case result do
-      :failed ->
-        solve_with_jitter(a, b)
+      :not_applicable ->
+        result =
+          try do
+            linalg_solve_compat(a, b)
+          rescue
+            _ -> :failed
+          end
 
-      tensor ->
-        if has_non_finite?(tensor) do
-          solve_with_jitter(a, b)
-        else
-          tensor
+        case result do
+          :failed ->
+            solve_with_jitter(a, b)
+
+          tensor ->
+            if has_non_finite?(tensor) do
+              solve_with_jitter(a, b)
+            else
+              tensor
+            end
         end
     end
   end
@@ -122,44 +128,133 @@ defmodule BstsNx.Utils do
   """
   @spec has_non_finite?(Nx.t()) :: boolean()
   def has_non_finite?(tensor) do
-    Nx.any(Nx.logical_or(Nx.is_nan(tensor), Nx.is_infinity(tensor)))
-    |> Nx.to_number() == 1
+    tensor
+    |> Nx.to_flat_list()
+    |> Enum.any?(fn
+      :nan -> true
+      :infinity -> true
+      :neg_infinity -> true
+      v when is_float(v) -> v != v
+      _ -> false
+    end)
   end
 
   defp solve_with_jitter(a, b) do
     dim = Nx.axis_size(a, 0)
     a_sym = Nx.multiply(Nx.add(a, Nx.transpose(a)), 0.5)
 
-    Enum.reduce_while(
-      [1.0e-8, 1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3],
-      nil,
-      fn jitter_scale, _acc ->
-        jitter = Nx.eye(dim) |> Nx.multiply(jitter_scale)
+    if dim == 1 do
+      scalar_divide_with_jitter(Nx.to_number(Nx.squeeze(a_sym)), b)
+    else
+      Enum.reduce_while(
+        [1.0e-8, 1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3],
+        nil,
+        fn jitter_scale, _acc ->
+          jitter = Nx.eye(dim) |> Nx.multiply(jitter_scale)
 
-        result =
-          try do
-            Nx.LinAlg.solve(Nx.add(a_sym, jitter), b)
-          rescue
-            _ -> :failed
-          end
-
-        case result do
-          :failed ->
-            {:cont, nil}
-
-          tensor ->
-            if has_non_finite?(tensor) do
-              {:cont, nil}
-            else
-              {:halt, tensor}
+          result =
+            try do
+              linalg_solve_compat(Nx.add(a_sym, jitter), b)
+            rescue
+              _ -> :failed
             end
+
+          case result do
+            :failed ->
+              {:cont, nil}
+
+            tensor ->
+              if has_non_finite?(tensor) do
+                {:cont, nil}
+              else
+                {:halt, tensor}
+              end
+          end
+        end
+      ) ||
+        pinv_fallback(a_sym, b) ||
+        (
+          Logger.warning(
+            "Utils.safe_solve: solve failed even with max jitter 1e-3; " <>
+              "falling back to zero matrix"
+          )
+
+          Nx.broadcast(Nx.tensor(0.0), Nx.shape(b))
+        )
+    end
+  end
+
+  # Nx 0.6's non-batched solve path emits an Elixir range warning on newer
+  # runtimes. Solving as a single-item batch avoids that path with identical
+  # numerical output for rank-2 systems.
+  defp linalg_solve_compat(a, b) do
+    solve_fn = fn ->
+      if Nx.rank(a) == 2 and Nx.rank(b) in [1, 2] do
+        Nx.LinAlg.solve(Nx.new_axis(a, 0), Nx.new_axis(b, 0))
+        |> Nx.squeeze(axes: [0])
+      else
+        Nx.LinAlg.solve(a, b)
+      end
+    end
+
+    # Elixir >= 1.15: capture internal Nx range diagnostics so they do not
+    # spam runtime output. Skip this on EXLA, where wrapping solve in
+    # Code.with_diagnostics can be unstable on some environments.
+    if function_exported?(Code, :with_diagnostics, 1) and
+         not match?({EXLA.Backend, _}, Nx.default_backend()) do
+      {result, _diagnostics} = apply(Code, :with_diagnostics, [solve_fn])
+      result
+    else
+      solve_fn.()
+    end
+  end
+
+  defp scalar_or_1x1_solve(a, b) do
+    cond do
+      Nx.rank(a) == 0 ->
+        {:ok, scalar_divide_with_jitter(Nx.to_number(a), b)}
+
+      Nx.rank(a) == 2 and Nx.shape(a) == {1, 1} ->
+        {:ok, scalar_divide_with_jitter(Nx.to_number(Nx.squeeze(a)), b)}
+
+      true ->
+        :not_applicable
+    end
+  end
+
+  defp scalar_divide_with_jitter(denom, b) do
+    if abs(denom) >= 1.0e-15 do
+      direct = Nx.divide(b, denom)
+
+      if has_non_finite?(direct) do
+        scalar_divide_with_jitter_fallback(denom, b)
+      else
+        direct
+      end
+    else
+      scalar_divide_with_jitter_fallback(denom, b)
+    end
+  end
+
+  defp scalar_divide_with_jitter_fallback(denom, b) do
+    Enum.reduce_while([1.0e-8, 1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3], nil, fn jitter, _acc ->
+      adjusted = denom + jitter
+
+      if abs(adjusted) < 1.0e-15 do
+        {:cont, nil}
+      else
+        candidate = Nx.divide(b, adjusted)
+
+        if has_non_finite?(candidate) do
+          {:cont, nil}
+        else
+          {:halt, candidate}
         end
       end
-    ) ||
-      pinv_fallback(a_sym, b) ||
+    end) ||
       (
         Logger.warning(
-          "Utils.safe_solve: solve failed even with max jitter 1e-3; " <>
+          "Utils.safe_solve: scalar solve failed even with max jitter 1e-3; " <>
             "falling back to zero matrix"
         )
 

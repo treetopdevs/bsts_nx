@@ -21,7 +21,11 @@ defmodule BstsNx.ModelBuilder do
     :seed,
     :seasonality,
     :model_spec,
-    :method
+    :method,
+    :regression_mode,
+    :regression_opts,
+    :control_regression_mode,
+    :control_regression_opts
   ]
 
   @doc """
@@ -37,6 +41,10 @@ defmodule BstsNx.ModelBuilder do
     * `:regressors` - a `{T, p}` Nx tensor of regressor values (one row per
       observation, one column per covariate). When provided, produces a composed
       model with trend + optional seasonal + regression components.
+    * `:regression_mode` - `:dynamic` (default) or `:spike_and_slab` when
+      building the regression component.
+    * `:regression_opts` - keyword options forwarded to
+      `Components.regression_spec/2`.
 
   ## Examples
 
@@ -63,14 +71,14 @@ defmodule BstsNx.ModelBuilder do
 
           {nil, reg} ->
             trend = default_trend_spec(observations)
-            reg_spec = Components.regression_spec(ensure_tensor(reg))
+            reg_spec = Components.regression_spec(ensure_tensor(reg), regression_spec_opts(opts))
             {Components.compose_specs(trend, reg_spec), :structured}
 
           {spec, nil} ->
             {spec, :structured}
 
           {spec, reg} ->
-            reg_spec = Components.regression_spec(ensure_tensor(reg))
+            reg_spec = Components.regression_spec(ensure_tensor(reg), regression_spec_opts(opts))
             {Components.compose_specs(spec, reg_spec), :structured}
         end
     end
@@ -98,6 +106,11 @@ defmodule BstsNx.ModelBuilder do
     * `:control_selection_pre_period` - optional `{start, end}` (1-based
       inclusive) window used to fit control selection. Defaults to the full
       series when omitted.
+    * `:control_regression_mode` - `:dynamic` (default) or `:spike_and_slab`.
+      In `:spike_and_slab` mode, coefficients are sampled in-loop with
+      Zellner's g-prior.
+    * `:control_regression_opts` - keyword options forwarded to
+      `Components.regression_spec/2` (for example `prior_inclusion`, `g`).
 
   Returns a keyword list suitable for passing to `InterventionAnalysis.analyze/3`.
   """
@@ -134,14 +147,21 @@ defmodule BstsNx.ModelBuilder do
           base_spec
 
         {%ModelSpec{} = base_spec, %Nx.Tensor{} = selected_regressors} ->
+          reg_spec =
+            Components.regression_spec(
+              selected_regressors,
+              control_regression_spec_opts(opts)
+            )
+
           # Preserve explicit model_spec precedence while still adding controls.
-          Components.compose_specs(base_spec, Components.regression_spec(selected_regressors))
+          Components.compose_specs(base_spec, reg_spec)
 
         {nil, selected_regressors} ->
           build_opts =
             opts
             |> Keyword.take([:seasonality])
             |> maybe_put_regressors(selected_regressors)
+            |> put_control_regression_config(opts)
 
           case build_spec(observations, build_opts) do
             {nil, :scalar} -> nil
@@ -357,6 +377,42 @@ defmodule BstsNx.ModelBuilder do
   defp safe_divide(_, 0), do: 0.0
   defp safe_divide(_, d) when d == 0.0, do: 0.0
   defp safe_divide(n, d), do: n / d
+
+  defp regression_spec_opts(opts) do
+    mode = Keyword.get(opts, :regression_mode, :dynamic)
+    extra_opts = Keyword.get(opts, :regression_opts, [])
+    validate_keyword_opts!(:regression_opts, extra_opts)
+    [mode: mode] ++ extra_opts
+  end
+
+  defp control_regression_spec_opts(opts) do
+    mode =
+      Keyword.get(opts, :control_regression_mode, Keyword.get(opts, :regression_mode, :dynamic))
+
+    extra_opts =
+      Keyword.get(opts, :control_regression_opts, Keyword.get(opts, :regression_opts, []))
+
+    validate_keyword_opts!(:control_regression_opts, extra_opts)
+    [mode: mode] ++ extra_opts
+  end
+
+  defp put_control_regression_config(build_opts, source_opts) do
+    spec_opts = control_regression_spec_opts(source_opts)
+    {mode, reg_opts} = Keyword.pop(spec_opts, :mode, :dynamic)
+    build_opts |> Keyword.put(:regression_mode, mode) |> Keyword.put(:regression_opts, reg_opts)
+  end
+
+  defp validate_keyword_opts!(_name, []), do: :ok
+
+  defp validate_keyword_opts!(name, opts) when is_list(opts) do
+    if not Keyword.keyword?(opts) do
+      raise ArgumentError, "#{name} must be a keyword list, got: #{inspect(opts)}"
+    end
+  end
+
+  defp validate_keyword_opts!(name, opts) do
+    raise ArgumentError, "#{name} must be a keyword list, got: #{inspect(opts)}"
+  end
 
   defp maybe_put_regressors(opts, nil), do: opts
   defp maybe_put_regressors(opts, regressors), do: Keyword.put(opts, :regressors, regressors)

@@ -233,6 +233,135 @@ defmodule BstsNx.GibbsStructuredTest do
       assert abs(beta2_est - true_beta2) < 3.0,
              "β₂ estimate #{beta2_est} should be near #{true_beta2}"
     end
+
+    test "supports spike-and-slab regression mode metadata" do
+      x = Nx.tensor([[1.0, 0.0], [0.0, 1.0], [1.0, 1.0]])
+
+      spec =
+        Components.regression_spec(x,
+          mode: :spike_and_slab,
+          prior_inclusion: 0.2,
+          g: 10.0
+        )
+
+      assert spec.regression.mode == :spike_and_slab
+      assert spec.regression.start_dim == 0
+      assert spec.regression.num_dims == 2
+      assert spec.regression.prior_inclusion == 0.2
+      assert spec.regression.g == 10.0
+      assert spec.q_specs == []
+    end
+
+    test "in-loop spike-and-slab returns regression beta and gamma samples" do
+      :rand.seed(:exsss, {510, 511, 512})
+      n = 60
+
+      x_rows =
+        Enum.map(1..n, fn _ ->
+          [:rand.normal(), :rand.normal(), :rand.normal()]
+        end)
+
+      beta_true = [2.5, 0.0, -2.0]
+
+      obs =
+        Enum.map(x_rows, fn row ->
+          Enum.zip(beta_true, row)
+          |> Enum.reduce(0.0, fn {b, x}, acc -> acc + b * x end)
+          |> Kernel.+(:rand.normal() * 0.4)
+        end)
+
+      regressors = Nx.tensor(x_rows)
+      level = Components.local_level_spec(process_var: 0.05, obs_var: 1.0, initial_state: 0.0)
+
+      reg =
+        Components.regression_spec(regressors,
+          mode: :spike_and_slab,
+          prior_inclusion: 0.3,
+          g: n
+        )
+
+      spec = Components.compose_specs(level, reg)
+
+      samples =
+        GibbsSampler.sample_structured(obs, spec, 30, burn_in: 30, seed: 4242)
+
+      assert length(samples) == 30
+
+      Enum.each(samples, fn sample ->
+        assert is_list(sample.regression_gamma)
+        assert length(sample.regression_gamma) == 3
+        assert %Nx.Tensor{} = sample.regression_beta
+        assert Nx.shape(sample.q_matrix) == {4, 4}
+        # Regression block is static (Q = 0 for those dimensions)
+        assert Nx.to_number(sample.q_matrix[1][1]) == 0.0
+        assert Nx.to_number(sample.q_matrix[2][2]) == 0.0
+        assert Nx.to_number(sample.q_matrix[3][3]) == 0.0
+      end)
+    end
+
+    @tag :external
+    @tag timeout: 180_000
+    test "in-loop spike-and-slab recovers sparse signals with high PIP" do
+      :rand.seed(:exsss, {520, 521, 522})
+      n = 160
+      p = 100
+      true_idxs = [5, 23, 77]
+      true_betas = %{5 => 4.0, 23 => -3.5, 77 => 3.0}
+
+      x_rows =
+        Enum.map(1..n, fn _ ->
+          Enum.map(1..p, fn _ -> :rand.normal() end)
+        end)
+
+      obs =
+        Enum.map(x_rows, fn row ->
+          signal =
+            Enum.reduce(true_idxs, 0.0, fn j, acc ->
+              acc + Map.fetch!(true_betas, j) * Enum.at(row, j)
+            end)
+
+          signal + :rand.normal() * 0.5
+        end)
+
+      regressors = Nx.tensor(x_rows)
+      level = Components.local_level_spec(process_var: 0.05, obs_var: 1.0, initial_state: 0.0)
+
+      reg =
+        Components.regression_spec(regressors,
+          mode: :spike_and_slab,
+          prior_inclusion: 0.03,
+          g: n
+        )
+
+      spec = Components.compose_specs(level, reg)
+
+      samples =
+        GibbsSampler.sample_structured(obs, spec, 50, burn_in: 50, seed: 424_242)
+
+      counts =
+        Enum.reduce(samples, List.duplicate(0, p), fn sample, acc ->
+          Enum.zip_with([acc, sample.regression_gamma], fn [a, g] -> a + g end)
+        end)
+
+      pip =
+        counts
+        |> Enum.with_index()
+        |> Map.new(fn {cnt, idx} -> {idx, cnt / length(samples)} end)
+
+      Enum.each(true_idxs, fn j ->
+        assert pip[j] > 0.95,
+               "true regressor #{j} should have high PIP; got #{pip[j]}"
+      end)
+
+      max_noise_pip =
+        pip
+        |> Enum.reject(fn {j, _pip_j} -> j in true_idxs end)
+        |> Enum.map(&elem(&1, 1))
+        |> Enum.max()
+
+      assert max_noise_pip < 0.25,
+             "noise regressors should have low PIP; max was #{max_noise_pip}"
+    end
   end
 
   # ── Composed Model ──────────────────────────────────────────────────────
@@ -258,6 +387,19 @@ defmodule BstsNx.GibbsStructuredTest do
       # H should be time-varying (list) since regression is time-varying
       assert is_list(combined.h)
       assert length(combined.h) == 3
+    end
+
+    test "shifts spike-and-slab regression metadata when composing" do
+      x = Nx.tensor([[1.0], [2.0], [3.0]])
+      s1 = Components.local_linear_trend_spec()
+      s2 = Components.regression_spec(x, mode: :spike_and_slab, g: 3.0)
+
+      combined = Components.compose_specs(s1, s2)
+
+      assert combined.regression.mode == :spike_and_slab
+      # local_linear_trend has 2 state dimensions, so regression starts at 2
+      assert combined.regression.start_dim == 2
+      assert combined.regression.num_dims == 1
     end
 
     test "composes two static-H specs" do

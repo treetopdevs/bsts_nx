@@ -352,7 +352,9 @@ defmodule BstsNx.GibbsSampler do
           states: [Nx.t()],
           state_covs: [Nx.t()],
           q_matrix: Nx.t(),
-          obs_var: Nx.t()
+          obs_var: Nx.t(),
+          regression_beta: Nx.t() | nil,
+          regression_gamma: [0 | 1] | nil
         }
 
   @doc """
@@ -424,67 +426,36 @@ defmodule BstsNx.GibbsSampler do
     # Normalize H to a per-timestep list for residual computation
     h_list = normalize_h_for_structured(spec.h, t)
 
-    {_, _, samples_acc, _key_acc} =
-      Enum.reduce(1..total_iters, {q_matrix, r_var, [], key}, fn iter, {q_prev, r_prev, acc, k} ->
-        # 1. Kalman filter
-        {filtered, predicted} =
-          KalmanFilter.filter_with_pred(
-            observations,
-            spec.f,
-            spec.h,
-            q_prev,
-            r_prev,
-            spec.x0,
-            spec.p0
-          )
+    case spec.regression do
+      %{mode: :spike_and_slab} = regression ->
+        sample_structured_spike_slab(
+          observations,
+          spec,
+          regression,
+          q_matrix,
+          r_var,
+          h_list,
+          num_samples,
+          burn_in,
+          thin,
+          key,
+          total_iters
+        )
 
-        # 2. RTS smoother
-        smoothed = BstsNx.Smoother.rts(filtered, predicted, spec.f)
-
-        # 3. Carter-Kohn simulation smoother
-        {sampled_states, new_key} =
-          BstsNx.Smoother.simulate_with_key(smoothed, filtered, predicted, spec.f, key: k)
-
-        # 4. Extract filtered covariances
-        {_means, covs} = Enum.unzip(filtered)
-
-        # 5. Process residuals: e_t = x_t - F * x_{t-1}
-        per_dim_ss = process_residuals_structured(sampled_states, spec.f, spec.q_specs)
-
-        # 6. Observation residuals: SS_obs = Σ (y_t - H_t · x_t)²
-        {obs_ss, t_obs} = obs_residuals_structured(observations, sampled_states, h_list)
-
-        # 7. Resample each Q diagonal entry independently
-        {q_new, key_after_q} = resample_q_components(spec.q_specs, per_dim_ss, t, new_key)
-
-        # 8. Rebuild Q matrix
-        q_matrix_new = rebuild_q(q_prev, q_new)
-
-        # 9. Resample observation variance
-        shape_r = spec.obs_prior_shape + t_obs / 2
-        scale_r = spec.obs_prior_scale + obs_ss / 2
-
-        {r_sample, next_key} =
-          BstsNx.Distributions.inv_gamma_sample_with_key(shape_r, scale_r, key_after_q)
-
-        acc2 =
-          if iter > burn_in and rem(iter - burn_in, thin) == 0 do
-            sample_map = %{
-              states: sampled_states,
-              state_covs: covs,
-              q_matrix: q_matrix_new,
-              obs_var: r_sample
-            }
-
-            [sample_map | acc]
-          else
-            acc
-          end
-
-        {q_matrix_new, r_sample, acc2, next_key}
-      end)
-
-    Enum.reverse(samples_acc)
+      _ ->
+        sample_structured_standard(
+          observations,
+          spec,
+          q_matrix,
+          r_var,
+          h_list,
+          burn_in,
+          thin,
+          key,
+          total_iters,
+          t
+        )
+    end
   end
 
   @doc """
@@ -590,6 +561,726 @@ defmodule BstsNx.GibbsSampler do
 
   # -- Structured sampler helpers ----------------------------------------------
 
+  defp sample_structured_standard(
+         observations,
+         spec,
+         q_matrix,
+         r_var,
+         h_list,
+         burn_in,
+         thin,
+         key,
+         total_iters,
+         t
+       ) do
+    {_, _, samples_acc, _key_acc} =
+      Enum.reduce(1..total_iters, {q_matrix, r_var, [], key}, fn iter, {q_prev, r_prev, acc, k} ->
+        # 1. Kalman filter
+        {filtered, predicted} =
+          KalmanFilter.filter_with_pred(
+            observations,
+            spec.f,
+            spec.h,
+            q_prev,
+            r_prev,
+            spec.x0,
+            spec.p0
+          )
+
+        # 2. RTS smoother
+        smoothed = BstsNx.Smoother.rts(filtered, predicted, spec.f)
+
+        # 3. Carter-Kohn simulation smoother
+        {sampled_states, new_key} =
+          BstsNx.Smoother.simulate_with_key(smoothed, filtered, predicted, spec.f, key: k)
+
+        # 4. Extract filtered covariances
+        {_means, covs} = Enum.unzip(filtered)
+
+        # 5. Process residuals: e_t = x_t - F * x_{t-1}
+        per_dim_ss = process_residuals_structured(sampled_states, spec.f, spec.q_specs)
+
+        # 6. Observation residuals: SS_obs = Σ (y_t - H_t · x_t)²
+        {obs_ss, t_obs} = obs_residuals_structured(observations, sampled_states, h_list)
+
+        # 7. Resample each Q diagonal entry independently
+        {q_new, key_after_q} = resample_q_components(spec.q_specs, per_dim_ss, t, new_key)
+
+        # 8. Rebuild Q matrix
+        q_matrix_new = rebuild_q(q_prev, q_new)
+
+        # 9. Resample observation variance
+        shape_r = spec.obs_prior_shape + t_obs / 2
+        scale_r = spec.obs_prior_scale + obs_ss / 2
+
+        {r_sample, next_key} =
+          BstsNx.Distributions.inv_gamma_sample_with_key(shape_r, scale_r, key_after_q)
+
+        acc2 =
+          if iter > burn_in and rem(iter - burn_in, thin) == 0 do
+            sample_map = %{
+              states: sampled_states,
+              state_covs: covs,
+              q_matrix: q_matrix_new,
+              obs_var: r_sample,
+              regression_beta: nil,
+              regression_gamma: nil
+            }
+
+            [sample_map | acc]
+          else
+            acc
+          end
+
+        {q_matrix_new, r_sample, acc2, next_key}
+      end)
+
+    Enum.reverse(samples_acc)
+  end
+
+  defp sample_structured_spike_slab(
+         observations,
+         spec,
+         regression,
+         q_matrix,
+         r_var,
+         h_list,
+         _num_samples,
+         burn_in,
+         thin,
+         key,
+         total_iters
+       ) do
+    t = length(observations)
+
+    ctx = prepare_spike_slab_context(spec, regression, h_list)
+    q_struct0 = submatrix(q_matrix, ctx.struct_full_indices, ctx.struct_full_indices)
+
+    beta0 = slice_vector(spec.x0, ctx.reg_full_indices)
+    {y_obs_init, x_obs_init} = observed_regression_pairs(observations, ctx.x_rows)
+    gamma0 = init_gamma_from_data(y_obs_init, x_obs_init, ctx.prior_inclusion, ctx.reg_dim)
+
+    {_, _, _, _, samples_acc, _key_acc} =
+      Enum.reduce(
+        1..total_iters,
+        {q_struct0, r_var, beta0, gamma0, [], key},
+        fn iter, {q_struct_prev, r_prev, beta_prev, gamma_prev, acc, key_prev} ->
+          y_adjusted = adjust_observations_for_regression(observations, ctx.x_rows, beta_prev)
+
+          {sampled_struct_states, struct_covs, q_struct_new, key_after_struct} =
+            if ctx.struct_dim == 0 do
+              {List.duplicate(Nx.tensor([]), t), List.duplicate(Nx.tensor([[]]), t),
+               q_struct_prev, key_prev}
+            else
+              {filtered, predicted} =
+                KalmanFilter.filter_with_pred(
+                  y_adjusted,
+                  ctx.f_struct,
+                  ctx.h_struct_list,
+                  q_struct_prev,
+                  r_prev,
+                  ctx.x0_struct,
+                  ctx.p0_struct
+                )
+
+              smoothed = BstsNx.Smoother.rts(filtered, predicted, ctx.f_struct)
+
+              {sampled_states, key_after_smooth} =
+                BstsNx.Smoother.simulate_with_key(
+                  smoothed,
+                  filtered,
+                  predicted,
+                  ctx.f_struct,
+                  key: key_prev
+                )
+
+              {_means, covs} = Enum.unzip(filtered)
+
+              per_dim_ss =
+                process_residuals_structured(sampled_states, ctx.f_struct, ctx.q_specs_struct)
+
+              {q_new_vals, key_after_q} =
+                resample_q_components(ctx.q_specs_struct, per_dim_ss, t, key_after_smooth)
+
+              {sampled_states, covs, rebuild_q(q_struct_prev, q_new_vals), key_after_q}
+            end
+
+          {y_reg_obs, x_reg_obs} =
+            regression_residual_pairs(
+              observations,
+              sampled_struct_states,
+              ctx.h_struct_rows,
+              ctx.x_rows
+            )
+
+          sigma2 = max(Nx.to_number(r_prev), 1.0e-12)
+
+          {gamma_new, key_after_gamma} =
+            resample_gamma_g_prior(
+              gamma_prev,
+              y_reg_obs,
+              x_reg_obs,
+              sigma2,
+              ctx.prior_inclusion,
+              ctx.g_prior,
+              key_after_struct
+            )
+
+          {beta_new, beta_cov, key_after_beta} =
+            sample_beta_g_prior(
+              gamma_new,
+              y_reg_obs,
+              x_reg_obs,
+              sigma2,
+              ctx.g_prior,
+              key_after_gamma
+            )
+
+          {obs_ss, t_obs} =
+            obs_residuals_spike_slab(
+              observations,
+              sampled_struct_states,
+              ctx.h_struct_rows,
+              ctx.x_rows,
+              beta_new
+            )
+
+          shape_r = spec.obs_prior_shape + t_obs / 2
+          scale_r = spec.obs_prior_scale + obs_ss / 2
+
+          {r_sample, key_next} =
+            BstsNx.Distributions.inv_gamma_sample_with_key(shape_r, scale_r, key_after_beta)
+
+          q_matrix_full =
+            build_full_q_matrix(
+              ctx.state_dim,
+              ctx.struct_full_indices,
+              q_struct_new
+            )
+
+          full_states =
+            build_full_state_trajectory(
+              sampled_struct_states,
+              beta_new,
+              ctx.state_dim,
+              ctx.struct_full_indices,
+              ctx.reg_full_indices
+            )
+
+          full_covs =
+            build_full_covariances(
+              struct_covs,
+              beta_cov,
+              ctx.state_dim,
+              ctx.struct_full_indices,
+              ctx.reg_full_indices
+            )
+
+          acc2 =
+            if iter > burn_in and rem(iter - burn_in, thin) == 0 do
+              sample_map = %{
+                states: full_states,
+                state_covs: full_covs,
+                q_matrix: q_matrix_full,
+                obs_var: r_sample,
+                regression_beta: Nx.tensor(beta_new),
+                regression_gamma: gamma_new
+              }
+
+              [sample_map | acc]
+            else
+              acc
+            end
+
+          {q_struct_new, r_sample, beta_new, gamma_new, acc2, key_next}
+        end
+      )
+
+    Enum.reverse(samples_acc)
+  end
+
+  defp prepare_spike_slab_context(spec, regression, h_list) do
+    state_dim = Nx.axis_size(spec.f, 0)
+    reg_start = Map.get(regression, :start_dim, 0)
+    reg_dim = Map.get(regression, :num_dims, 0)
+
+    if not is_integer(reg_start) or not is_integer(reg_dim) or reg_dim <= 0 do
+      raise ArgumentError,
+            "invalid regression metadata for spike-and-slab: #{inspect(regression)}"
+    end
+
+    reg_end = reg_start + reg_dim - 1
+
+    if reg_start < 0 or reg_end >= state_dim do
+      raise ArgumentError,
+            "regression block [#{reg_start}, #{reg_end}] is out of bounds for state dim #{state_dim}"
+    end
+
+    reg_full_indices = Enum.to_list(reg_start..reg_end)
+    reg_set = MapSet.new(reg_full_indices)
+    struct_full_indices = Enum.reject(0..(state_dim - 1), &MapSet.member?(reg_set, &1))
+    struct_dim = length(struct_full_indices)
+
+    index_map =
+      struct_full_indices
+      |> Enum.with_index()
+      |> Map.new(fn {full_idx, local_idx} -> {full_idx, local_idx} end)
+
+    q_specs_struct =
+      spec.q_specs
+      |> Enum.reject(fn qs -> MapSet.member?(reg_set, qs.dim_index) end)
+      |> Enum.map(fn qs ->
+        local_dim = Map.fetch!(index_map, qs.dim_index)
+        %{qs | dim_index: local_dim}
+      end)
+
+    h_struct_rows =
+      if struct_dim == 0 do
+        List.duplicate([], length(h_list))
+      else
+        Enum.map(h_list, fn h_t -> extract_row_values(h_t, struct_full_indices) end)
+      end
+
+    h_struct_list =
+      Enum.map(h_struct_rows, fn row ->
+        Nx.tensor([row])
+      end)
+
+    x_rows = Enum.map(h_list, &extract_row_values(&1, reg_full_indices))
+
+    %{
+      state_dim: state_dim,
+      reg_dim: reg_dim,
+      reg_full_indices: reg_full_indices,
+      struct_dim: struct_dim,
+      struct_full_indices: struct_full_indices,
+      q_specs_struct: q_specs_struct,
+      h_struct_rows: h_struct_rows,
+      h_struct_list: h_struct_list,
+      x_rows: x_rows,
+      f_struct: submatrix(spec.f, struct_full_indices, struct_full_indices),
+      x0_struct: slice_vector(spec.x0, struct_full_indices),
+      p0_struct: submatrix(spec.p0, struct_full_indices, struct_full_indices),
+      prior_inclusion: Map.get(regression, :prior_inclusion, min(0.5, 3.0 / reg_dim)),
+      g_prior: Map.get(regression, :g, max(length(h_list), 1))
+    }
+    |> then(fn ctx ->
+      if not is_number(ctx.prior_inclusion) or ctx.prior_inclusion <= 0.0 or
+           ctx.prior_inclusion >= 1.0 do
+        raise ArgumentError,
+              "spike-and-slab prior_inclusion must be in (0, 1), got: #{inspect(ctx.prior_inclusion)}"
+      end
+
+      if not is_number(ctx.g_prior) or ctx.g_prior <= 0.0 do
+        raise ArgumentError, "spike-and-slab g must be > 0, got: #{inspect(ctx.g_prior)}"
+      end
+
+      ctx
+    end)
+  end
+
+  defp regression_residual_pairs(observations, sampled_struct_states, h_struct_rows, x_rows) do
+    observations
+    |> Enum.zip(sampled_struct_states)
+    |> Enum.zip(h_struct_rows)
+    |> Enum.zip(x_rows)
+    |> Enum.reduce({[], []}, fn {{{y, state}, h_row}, x_row}, {acc_y, acc_x} ->
+      if missing_observation?(y) do
+        {acc_y, acc_x}
+      else
+        y_val = observation_to_number(y)
+        struct_pred = dot_list(h_row, Nx.to_flat_list(state))
+        {[y_val - struct_pred | acc_y], [x_row | acc_x]}
+      end
+    end)
+    |> then(fn {ys, xs} -> {Enum.reverse(ys), Enum.reverse(xs)} end)
+  end
+
+  defp observed_regression_pairs(observations, x_rows) do
+    observations
+    |> Enum.zip(x_rows)
+    |> Enum.reduce({[], []}, fn {y, x_row}, {acc_y, acc_x} ->
+      if missing_observation?(y) do
+        {acc_y, acc_x}
+      else
+        {[observation_to_number(y) | acc_y], [x_row | acc_x]}
+      end
+    end)
+    |> then(fn {ys, xs} -> {Enum.reverse(ys), Enum.reverse(xs)} end)
+  end
+
+  defp adjust_observations_for_regression(observations, x_rows, beta) do
+    observations
+    |> Enum.zip(x_rows)
+    |> Enum.map(fn {y, x_row} ->
+      if missing_observation?(y) do
+        y
+      else
+        observation_to_number(y) - dot_list(x_row, beta)
+      end
+    end)
+  end
+
+  defp obs_residuals_spike_slab(observations, sampled_struct_states, h_struct_rows, x_rows, beta) do
+    observations
+    |> Enum.zip(sampled_struct_states)
+    |> Enum.zip(h_struct_rows)
+    |> Enum.zip(x_rows)
+    |> Enum.reduce({0.0, 0}, fn {{{y, state}, h_row}, x_row}, {acc_ss, acc_count} ->
+      if missing_observation?(y) do
+        {acc_ss, acc_count}
+      else
+        y_val = observation_to_number(y)
+        struct_pred = dot_list(h_row, Nx.to_flat_list(state))
+        reg_pred = dot_list(x_row, beta)
+        diff = y_val - struct_pred - reg_pred
+        {acc_ss + diff * diff, acc_count + 1}
+      end
+    end)
+  end
+
+  defp resample_gamma_g_prior(gamma, _y_obs, _x_obs, _sigma2, _pi, _g, key) when gamma == [] do
+    {gamma, key}
+  end
+
+  defp resample_gamma_g_prior(gamma, y_obs, x_obs_rows, sigma2, prior_inclusion, g_prior, key) do
+    if y_obs == [] do
+      {gamma, key}
+    else
+      p = length(gamma)
+      log_prior_odds = :math.log(prior_inclusion / (1.0 - prior_inclusion))
+      {u_vec, key_next} = Nx.Random.uniform(key, 0.0, 1.0, shape: {p})
+      uniforms = Nx.to_flat_list(u_vec)
+
+      gamma_new =
+        Enum.reduce(0..(p - 1), gamma, fn j, gamma_curr ->
+          gamma_off = List.replace_at(gamma_curr, j, 0)
+          gamma_on = List.replace_at(gamma_curr, j, 1)
+
+          log_ml_off = log_marginal_g_prior(y_obs, x_obs_rows, gamma_off, sigma2, g_prior)
+          log_ml_on = log_marginal_g_prior(y_obs, x_obs_rows, gamma_on, sigma2, g_prior)
+
+          prob_on = logistic(log_prior_odds + log_ml_on - log_ml_off)
+          gamma_j = if Enum.at(uniforms, j) < prob_on, do: 1, else: 0
+          List.replace_at(gamma_curr, j, gamma_j)
+        end)
+
+      {gamma_new, key_next}
+    end
+  end
+
+  defp sample_beta_g_prior(gamma, y_obs, x_obs_rows, sigma2, g_prior, key) do
+    p = length(gamma)
+    active = active_indices(gamma)
+
+    if active == [] or y_obs == [] do
+      {List.duplicate(0.0, p), Nx.broadcast(0.0, {p, p}), key}
+    else
+      x_active = select_active_columns(x_obs_rows, active)
+      x_t = Nx.tensor(x_active)
+      y_t = Nx.tensor(y_obs)
+
+      xtx = compat_dot(Nx.transpose(x_t), x_t)
+      xty = compat_dot(Nx.transpose(x_t), y_t)
+      inv_xtx = BstsNx.Utils.safe_solve(xtx, Nx.eye(length(active)))
+      beta_ols = BstsNx.Utils.safe_solve(xtx, xty)
+
+      shrink = g_prior / (1.0 + g_prior)
+      mean_active = Nx.multiply(beta_ols, shrink)
+
+      cov_active =
+        inv_xtx
+        |> Nx.multiply(shrink * max(sigma2, 1.0e-12))
+        |> symmetrize()
+
+      jitter = Nx.eye(length(active)) |> Nx.multiply(1.0e-9)
+      chol = BstsNx.Utils.safe_cholesky(Nx.add(cov_active, jitter))
+      {z, key_next} = Nx.Random.normal(key, 0.0, 1.0, shape: {length(active)})
+
+      draw_active =
+        Nx.add(mean_active, compat_dot(chol, z))
+        |> then(fn draw ->
+          if BstsNx.Utils.has_non_finite?(draw), do: mean_active, else: draw
+        end)
+        |> Nx.to_flat_list()
+
+      cov_rows = Nx.to_flat_list(cov_active) |> Enum.chunk_every(length(active))
+
+      beta_full =
+        List.duplicate(0.0, p)
+        |> put_active_values(active, draw_active)
+
+      beta_cov =
+        List.duplicate(List.duplicate(0.0, p), p)
+        |> put_active_covariance(active, cov_rows)
+        |> Nx.tensor()
+
+      {beta_full, beta_cov, key_next}
+    end
+  end
+
+  defp log_marginal_g_prior(_y_obs, _x_obs_rows, gamma, _sigma2, _g_prior) when gamma == [] do
+    0.0
+  end
+
+  defp log_marginal_g_prior(y_obs, x_obs_rows, gamma, sigma2, g_prior) do
+    active = active_indices(gamma)
+    k = length(active)
+
+    if k == 0 do
+      0.0
+    else
+      x_active = select_active_columns(x_obs_rows, active)
+      x_t = Nx.tensor(x_active)
+      y_t = Nx.tensor(y_obs)
+      xtx = compat_dot(Nx.transpose(x_t), x_t)
+      xty = compat_dot(Nx.transpose(x_t), y_t)
+      beta_ols = BstsNx.Utils.safe_solve(xtx, xty)
+      score = Nx.to_number(compat_dot(xty, beta_ols))
+      denom = 2.0 * max(sigma2, 1.0e-12) * (1.0 + g_prior)
+      -0.5 * k * :math.log(1.0 + g_prior) + g_prior * score / denom
+    end
+  end
+
+  defp init_gamma_from_data(y_obs, x_obs_rows, prior_inclusion, p) do
+    if y_obs == [] do
+      List.duplicate(0, p)
+    else
+      expected = max(round(prior_inclusion * p), 1)
+      x_cols = transpose_rows(x_obs_rows)
+
+      active =
+        x_cols
+        |> Enum.with_index()
+        |> Enum.map(fn {col, idx} -> {idx, abs(dot_list(col, y_obs))} end)
+        |> Enum.sort_by(fn {_idx, score} -> score end, :desc)
+        |> Enum.take(min(expected, p))
+        |> Enum.map(&elem(&1, 0))
+        |> MapSet.new()
+
+      Enum.map(0..(p - 1), fn idx -> if MapSet.member?(active, idx), do: 1, else: 0 end)
+    end
+  end
+
+  defp build_full_q_matrix(state_dim, struct_full_indices, q_struct) do
+    struct_map =
+      struct_full_indices
+      |> Enum.with_index()
+      |> Map.new(fn {full_idx, local_idx} -> {full_idx, local_idx} end)
+
+    q_struct_rows =
+      q_struct |> Nx.to_flat_list() |> Enum.chunk_every(max(length(struct_full_indices), 1))
+
+    rows =
+      Enum.map(0..(state_dim - 1), fn i ->
+        Enum.map(0..(state_dim - 1), fn j ->
+          i_local = Map.get(struct_map, i)
+          j_local = Map.get(struct_map, j)
+
+          if i_local != nil and j_local != nil do
+            q_struct_rows |> Enum.at(i_local) |> Enum.at(j_local)
+          else
+            0.0
+          end
+        end)
+      end)
+
+    Nx.tensor(rows)
+  end
+
+  defp build_full_state_trajectory(
+         sampled_struct_states,
+         beta,
+         state_dim,
+         struct_full_indices,
+         reg_full_indices
+       ) do
+    Enum.map(sampled_struct_states, fn struct_state ->
+      struct_vals = Nx.to_flat_list(struct_state)
+
+      List.duplicate(0.0, state_dim)
+      |> put_active_values(struct_full_indices, struct_vals)
+      |> put_active_values(reg_full_indices, beta)
+      |> Nx.tensor()
+    end)
+  end
+
+  defp build_full_covariances(
+         struct_covs,
+         beta_cov,
+         state_dim,
+         struct_full_indices,
+         reg_full_indices
+       ) do
+    struct_map =
+      struct_full_indices
+      |> Enum.with_index()
+      |> Map.new(fn {full_idx, local_idx} -> {full_idx, local_idx} end)
+
+    reg_map =
+      reg_full_indices
+      |> Enum.with_index()
+      |> Map.new(fn {full_idx, local_idx} -> {full_idx, local_idx} end)
+
+    beta_rows =
+      beta_cov |> Nx.to_flat_list() |> Enum.chunk_every(max(length(reg_full_indices), 1))
+
+    Enum.map(struct_covs, fn struct_cov ->
+      struct_rows =
+        struct_cov
+        |> Nx.to_flat_list()
+        |> Enum.chunk_every(max(length(struct_full_indices), 1))
+
+      rows =
+        Enum.map(0..(state_dim - 1), fn i ->
+          Enum.map(0..(state_dim - 1), fn j ->
+            cond do
+              Map.get(struct_map, i) != nil and Map.get(struct_map, j) != nil ->
+                i_local = Map.get(struct_map, i)
+                j_local = Map.get(struct_map, j)
+                struct_rows |> Enum.at(i_local) |> Enum.at(j_local)
+
+              Map.get(reg_map, i) != nil and Map.get(reg_map, j) != nil ->
+                i_local = Map.get(reg_map, i)
+                j_local = Map.get(reg_map, j)
+                beta_rows |> Enum.at(i_local) |> Enum.at(j_local)
+
+              true ->
+                0.0
+            end
+          end)
+        end)
+
+      Nx.tensor(rows)
+    end)
+  end
+
+  defp extract_row_values(h_t, indices) do
+    row = structured_h_row(h_t) |> Nx.to_flat_list()
+    Enum.map(indices, &Enum.at(row, &1))
+  end
+
+  defp transpose_rows([]), do: []
+
+  defp transpose_rows(rows) do
+    p = rows |> hd() |> length()
+    Enum.map(0..(p - 1), fn j -> Enum.map(rows, &Enum.at(&1, j)) end)
+  end
+
+  defp active_indices(gamma) do
+    gamma
+    |> Enum.with_index()
+    |> Enum.filter(fn {g, _idx} -> g == 1 end)
+    |> Enum.map(&elem(&1, 1))
+  end
+
+  defp select_active_columns(rows, active) do
+    Enum.map(rows, fn row -> Enum.map(active, &Enum.at(row, &1)) end)
+  end
+
+  defp put_active_values(base, indices, values) do
+    Enum.zip(indices, values)
+    |> Enum.reduce(base, fn {idx, val}, acc ->
+      List.replace_at(acc, idx, val)
+    end)
+  end
+
+  defp put_active_covariance(base_rows, active_indices, cov_rows) do
+    active_pos =
+      active_indices
+      |> Enum.with_index()
+      |> Map.new(fn {idx, pos} -> {idx, pos} end)
+
+    Enum.with_index(base_rows)
+    |> Enum.map(fn {row, i} ->
+      Enum.with_index(row)
+      |> Enum.map(fn {_v, j} ->
+        i_pos = Map.get(active_pos, i)
+        j_pos = Map.get(active_pos, j)
+
+        if i_pos != nil and j_pos != nil do
+          cov_rows |> Enum.at(i_pos) |> Enum.at(j_pos)
+        else
+          0.0
+        end
+      end)
+    end)
+  end
+
+  defp dot_list(xs, ys) do
+    Enum.zip(xs, ys)
+    |> Enum.reduce(0.0, fn {x, y}, acc -> acc + x * y end)
+  end
+
+  # Nx 0.6 emits range warnings for some dot rank combinations on newer
+  # Elixir runtimes. Handle common low-rank products explicitly.
+  defp compat_dot(a, b) do
+    case {Nx.rank(a), Nx.rank(b)} do
+      {0, 0} ->
+        Nx.multiply(a, b)
+
+      {2, 1} ->
+        b_row = Nx.reshape(b, {1, Nx.axis_size(b, 0)})
+        Nx.multiply(a, b_row) |> Nx.sum(axes: [1])
+
+      {2, 2} ->
+        {m, n} = Nx.shape(a)
+        {n_b, p} = Nx.shape(b)
+
+        if n != n_b do
+          raise ArgumentError,
+                "incompatible matrix shapes for multiplication: #{inspect(Nx.shape(a))} and #{inspect(Nx.shape(b))}"
+        end
+
+        a_expanded = Nx.reshape(a, {m, n, 1})
+        b_expanded = Nx.reshape(b, {1, n, p})
+        Nx.multiply(a_expanded, b_expanded) |> Nx.sum(axes: [1])
+
+      {1, 2} ->
+        a_col = Nx.reshape(a, {Nx.axis_size(a, 0), 1})
+        Nx.multiply(a_col, b) |> Nx.sum(axes: [0])
+
+      {1, 1} ->
+        Nx.multiply(a, b) |> Nx.sum()
+
+      _ ->
+        Nx.dot(a, b)
+    end
+  end
+
+  defp slice_vector(_tensor, []), do: []
+
+  defp slice_vector(tensor, indices) do
+    vals = tensor |> Nx.flatten() |> Nx.to_flat_list()
+    Enum.map(indices, &Enum.at(vals, &1))
+  end
+
+  defp submatrix(_tensor, [], []), do: Nx.broadcast(0.0, {0, 0})
+
+  defp submatrix(tensor, row_indices, col_indices) do
+    {rows, cols} = Nx.shape(tensor)
+
+    row_data =
+      tensor
+      |> Nx.to_flat_list()
+      |> Enum.chunk_every(cols)
+
+    _ = rows
+
+    row_indices
+    |> Enum.map(fn r ->
+      row = Enum.at(row_data, r)
+      Enum.map(col_indices, &Enum.at(row, &1))
+    end)
+    |> Nx.tensor()
+  end
+
+  defp symmetrize(matrix), do: Nx.multiply(Nx.add(matrix, Nx.transpose(matrix)), 0.5)
+
+  defp logistic(logit) when logit >= 35.0, do: 1.0
+  defp logistic(logit) when logit <= -35.0, do: 0.0
+  defp logistic(logit), do: 1.0 / (1.0 + :math.exp(-logit))
+
   # Builds the initial diagonal Q matrix from q_specs.
   defp build_initial_q(q_specs, n) do
     diag = List.duplicate(0.0, n)
@@ -619,7 +1310,7 @@ defmodule BstsNx.GibbsSampler do
           if prev_state == nil do
             {ss_map, x_curr}
           else
-            predicted = Nx.dot(f_t, prev_state)
+            predicted = compat_dot(f_t, prev_state)
             residual = Nx.subtract(x_curr, predicted) |> Nx.to_flat_list()
 
             updated_ss =
@@ -650,7 +1341,7 @@ defmodule BstsNx.GibbsSampler do
       else
         y_val = observation_to_number(y)
         h_row = structured_h_row(h_t)
-        pred = Nx.to_number(Nx.dot(h_row, Nx.flatten(x_t)))
+        pred = Nx.to_number(compat_dot(h_row, Nx.flatten(x_t)))
         diff = y_val - pred
         {acc_ss + diff * diff, acc_count + 1}
       end

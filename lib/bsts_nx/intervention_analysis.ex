@@ -91,6 +91,11 @@ defmodule BstsNx.InterventionAnalysis do
       keyword list forwarded to `BstsNx.CovariateSelection.select/3`.
     * `:control_selection_pre_period` - optional `{start, end}` window used
       for control selection. Defaults to `pre_period`.
+    * `:control_regression_mode` - `:dynamic` (default random-walk coefficients)
+      or `:spike_and_slab` (static coefficients sampled in-loop with
+      Zellner's g-prior).
+    * `:control_regression_opts` - keyword options forwarded to
+      `Components.regression_spec/2` for control regression.
     * `:alpha` - significance level for credible intervals and significance
       testing (default: 0.05)
     * `:num_samples` - number of posterior MCMC samples (default: 200)

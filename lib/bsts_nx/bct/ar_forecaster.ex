@@ -232,7 +232,7 @@ defmodule BstsNx.BCT.ARForecaster do
     b = Nx.tensor(xty, type: {:f, 64})
 
     try do
-      coeffs = a |> Nx.LinAlg.solve(b) |> Nx.to_flat_list()
+      coeffs = a |> BstsNx.Utils.safe_solve(b) |> Nx.to_flat_list()
 
       if Enum.all?(coeffs, &finite_number?/1) do
         coeffs
