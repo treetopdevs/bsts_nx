@@ -311,9 +311,9 @@ defmodule BstsNx.Forecaster do
       q_diag = Nx.take_diagonal(q_matrix)
       q_sds = Nx.sqrt(Nx.max(q_diag, Nx.tensor(0.0)))
       sample_key = Nx.tensor(sample_key_row, type: Nx.type(base_key))
-      key_pair = Nx.Random.split(sample_key, parts: 2)
-      key_state = split_key_at(key_pair, 0)
-      key_obs = split_key_at(key_pair, 1)
+      [key_state_row, key_obs_row] = Nx.Random.split(sample_key, parts: 2) |> Nx.to_list()
+      key_state = Nx.tensor(key_state_row, type: Nx.type(base_key))
+      key_obs = Nx.tensor(key_obs_row, type: Nx.type(base_key))
       {proc_noise, _} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {horizon, n_state})
       {obs_noise, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {horizon})
       proc_rows = proc_noise |> Nx.multiply(q_sds) |> Nx.to_list()
@@ -345,9 +345,9 @@ defmodule BstsNx.Forecaster do
       sd_r = :math.sqrt(max(r, 0.0))
 
       sample_key = Nx.tensor(sample_key_row, type: Nx.type(base_key))
-      key_pair = Nx.Random.split(sample_key, parts: 2)
-      key_process = split_key_at(key_pair, 0)
-      key_obs = split_key_at(key_pair, 1)
+      [key_process_row, key_obs_row] = Nx.Random.split(sample_key, parts: 2) |> Nx.to_list()
+      key_process = Nx.tensor(key_process_row, type: Nx.type(base_key))
+      key_obs = Nx.tensor(key_obs_row, type: Nx.type(base_key))
       {proc_noise, _} = Nx.Random.normal(key_process, 0.0, 1.0, shape: {horizon})
       {obs_noise, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {horizon})
 
@@ -462,11 +462,6 @@ defmodule BstsNx.Forecaster do
 
   defp h_to_row_tensor(%Nx.Tensor{} = h_t) do
     if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
-  end
-
-  defp split_key_at(keys, idx) do
-    Nx.slice_along_axis(keys, idx, 1, axis: 0)
-    |> Nx.squeeze(axes: [0])
   end
 
   # Nx.dot handles all rank combinations used here; keep scalar/scalar explicit.

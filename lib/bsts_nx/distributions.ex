@@ -127,12 +127,11 @@ defmodule BstsNx.Distributions do
   def normal_sample(key, opts \\ []) do
     mean = Keyword.get(opts, :mean, 0.0)
     stddev = Keyword.get(opts, :stddev, 1.0)
-    # split key for sample
-    keys = Nx.Random.split(key, parts: 2)
-    key1 = split_key_at(keys, 0)
-    key2 = split_key_at(keys, 1)
-    {sample, _unused} = Nx.Random.normal(key1, mean, stddev)
-    {sample, key2}
+    [key_draw_row, key_next_row] = Nx.Random.split(key, parts: 2) |> Nx.to_list()
+    key_draw = Nx.tensor(key_draw_row, type: Nx.type(key))
+    key_next = Nx.tensor(key_next_row, type: Nx.type(key))
+    {sample, _unused} = Nx.Random.normal(key_draw, mean, stddev)
+    {sample, key_next}
   end
 
   @doc """
@@ -162,9 +161,9 @@ defmodule BstsNx.Distributions do
   @spec mv_normal_sample_with_chol(Nx.t(), Nx.t(), Nx.t(), Nx.t()) :: {Nx.t(), Nx.t()}
   def mv_normal_sample_with_chol(key, mean, _cov, chol) do
     dim = Nx.axis_size(mean, 0)
-    keys = Nx.Random.split(key, parts: 2)
-    key_draw = split_key_at(keys, 0)
-    next_key = split_key_at(keys, 1)
+    [key_draw_row, key_next_row] = Nx.Random.split(key, parts: 2) |> Nx.to_list()
+    key_draw = Nx.tensor(key_draw_row, type: Nx.type(key))
+    next_key = Nx.tensor(key_next_row, type: Nx.type(key))
     {noise, _unused} = Nx.Random.normal(key_draw, 0.0, 1.0, shape: {dim})
 
     sample = Nx.add(mean, Nx.dot(chol, noise))
@@ -198,7 +197,6 @@ defmodule BstsNx.Distributions do
   end
 
   defp sample_with_key(a, b, max_value, key) do
-    ensure_valid_prng_key!(key)
     a_list = Nx.to_flat_list(a)
     b_list = Nx.to_flat_list(b)
     num_draws = length(a_list)
@@ -219,10 +217,9 @@ defmodule BstsNx.Distributions do
   end
 
   defp sample_with_key_scalar(alpha, beta, max_value, key) do
-    ensure_valid_prng_key!(key)
-    keys = Nx.Random.split(key, parts: 2)
-    draw_key = split_key_at(keys, 0)
-    next_key = split_key_at(keys, 1)
+    [draw_key_row, next_key_row] = Nx.Random.split(key, parts: 2) |> Nx.to_list()
+    draw_key = Nx.tensor(draw_key_row, type: Nx.type(key))
+    next_key = Nx.tensor(next_key_row, type: Nx.type(key))
     rand_state = rand_state_from_key(draw_key)
     {sample, _rs2} = inv_gamma_draw(alpha, beta, max_value, rand_state)
     {Nx.tensor(sample), next_key}
@@ -240,6 +237,10 @@ defmodule BstsNx.Distributions do
     ints =
       case key do
         %Nx.Tensor{} = t ->
+          if Nx.shape(t) != {2} do
+            raise ArgumentError, "Expected Nx.Random key with shape {2}, got: #{inspect(Nx.shape(t))}"
+          end
+
           Nx.to_flat_list(t)
 
         [i1, i2] when is_integer(i1) and is_integer(i2) ->
@@ -255,22 +256,8 @@ defmodule BstsNx.Distributions do
         :rand.seed_s(:exsss, {a58, b58, c58})
 
       _ ->
-        raise ArgumentError, "Expected Nx.Random key with shape {2}, got: #{inspect(ints)}"
+          raise ArgumentError, "Expected Nx.Random key with shape {2}, got: #{inspect(ints)}"
     end
-  end
-
-  defp ensure_valid_prng_key!(%Nx.Tensor{} = key) do
-    if Nx.shape(key) != {2} do
-      raise ArgumentError,
-            "Expected Nx.Random key with shape {2}, got: #{inspect(Nx.to_flat_list(key))}"
-    end
-
-    :ok
-  end
-
-  defp split_key_at(keys, idx) do
-    Nx.slice_along_axis(keys, idx, 1, axis: 0)
-    |> Nx.squeeze(axes: [0])
   end
 
   defp maybe_cap(sample, :infinity), do: sample

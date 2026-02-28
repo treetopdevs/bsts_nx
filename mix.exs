@@ -21,7 +21,8 @@ defmodule BstsNx.MixProject do
       homepage_url: "https://github.com/Cleveland-Software-LLC/bsts_elixir",
       docs: docs(),
       start_permanent: Mix.env() == :prod,
-      deps: deps()
+      deps: deps(),
+      aliases: aliases()
     ]
   end
 
@@ -153,6 +154,12 @@ defmodule BstsNx.MixProject do
         BstsNx.BCT,
         BstsNx.Synthetic
       ]
+    ]
+  end
+
+  defp aliases do
+    [
+      "bench.optimize": ["run bench/optimize_plan.exs"]
     ]
   end
 end
