@@ -306,6 +306,7 @@ defmodule BstsNx.GibbsSampler do
       Enum.reduce(1..total_iters, {process_var_t, obs_var_t, [], key}, fn iter,
                                                                           {q_prev, r_prev, acc, k} ->
         {xs, ps} = KalmanFilter.filter_defn(obs_tensor, f_t, h_tensor, q_prev, r_prev, x0, p0)
+
         {sampled_xs, new_key_smooth} =
           BstsNx.Smoother.simulate_from_filtered_defn(xs, ps, f_t, q_prev, k)
 

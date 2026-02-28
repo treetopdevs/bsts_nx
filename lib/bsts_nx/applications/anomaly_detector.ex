@@ -377,7 +377,10 @@ defmodule BstsNx.Applications.AnomalyDetector do
     preds =
       if is_list(h) do
         h_rows = h |> Enum.map(&h_to_row_tensor/1) |> Nx.stack()
-        Nx.sum(Nx.multiply(states_t, Nx.reshape(h_rows, {1, t, Nx.axis_size(h_rows, 1)})), axes: [2])
+
+        Nx.sum(Nx.multiply(states_t, Nx.reshape(h_rows, {1, t, Nx.axis_size(h_rows, 1)})),
+          axes: [2]
+        )
       else
         Nx.dot(states_t, h_to_row_tensor(h))
       end
