@@ -326,16 +326,21 @@ defmodule BstsNx.Applications.DemandForecaster do
     q_diag = Nx.take_diagonal(q_matrix)
     q_sds = Nx.sqrt(Nx.max(q_diag, Nx.tensor(0.0)))
 
-    subkey_rows = Nx.Random.split(key, parts: horizon * 2) |> Nx.to_list()
-    state_key_rows = Enum.take_every(subkey_rows, 2)
-    obs_key_rows = subkey_rows |> Enum.drop(1) |> Enum.take_every(2)
+    step_key_rows = Nx.Random.split(key, parts: horizon) |> Nx.to_list()
+
+    state_obs_rows =
+      Enum.map(step_key_rows, fn step_key_row ->
+        step_key = Nx.tensor(step_key_row, type: Nx.type(key))
+        [state_key_row, obs_key_row] = Nx.Random.split(step_key, parts: 2) |> Nx.to_list()
+        {state_key_row, obs_key_row}
+      end)
 
     # Resolve H for each future step
     h_list = resolve_future_h(spec, future_h, horizon, n_state)
 
     # Iterate h_list directly to avoid O(n²) Enum.at access
     {_, trajectory} =
-      Enum.zip(h_list, Enum.zip(state_key_rows, obs_key_rows))
+      Enum.zip(h_list, state_obs_rows)
       |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_t, {state_key_row, obs_key_row}},
                                                        {state, acc} ->
         key_state = Nx.tensor(state_key_row, type: Nx.type(key))

@@ -130,9 +130,8 @@ defmodule BstsNx.Utils do
   @spec has_non_finite?(Nx.t()) :: boolean()
   def has_non_finite?(tensor) do
     tensor
-    |> Nx.abs()
-    |> Nx.less(Nx.Constants.infinity())
-    |> Nx.logical_not()
+    |> Nx.is_nan()
+    |> Nx.logical_or(Nx.is_infinity(tensor))
     |> Nx.any()
     |> Nx.to_number()
     |> Kernel.==(1)
