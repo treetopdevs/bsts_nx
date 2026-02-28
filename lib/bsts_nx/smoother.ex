@@ -61,20 +61,21 @@ defmodule BstsNx.Smoother do
     # to avoid signed integer issues with decrementing Nx while loops
     num_steps = t - 1
 
-    {_, sxs_out, sps_out} =
-      while {k = Nx.tensor(0), sxs_acc = sxs, sps_acc = sps},
+    {_, sxs_out, sps_out, _, _, _, _} =
+      while {k = Nx.tensor(0), sxs_acc = sxs, sps_acc = sps, xs_in = xs, ps_in = ps, f_in = f,
+             q_in = q},
             k < num_steps do
         i = last_idx - 1 - k
-        x_filt = take_scalar_at(xs, i)
-        p_filt = take_scalar_at(ps, i)
+        x_filt = take_scalar_at(xs_in, i)
+        p_filt = take_scalar_at(ps_in, i)
         # Recompute predicted state/cov at i+1 from filtered at i
-        x_pred_next = f * x_filt
-        p_pred_next = f * p_filt * f + q
+        x_pred_next = f_in * x_filt
+        p_pred_next = f_in * p_filt * f_in + q_in
         # Smoothing gain: C_k = P_filt * F / P_pred_next
         # Guard against zero predicted covariance (perfect state knowledge)
         near_zero_p = Nx.abs(p_pred_next) < 1.0e-15
         safe_pred = Nx.select(near_zero_p, 1.0, p_pred_next)
-        c = Nx.select(near_zero_p, 0.0, p_filt * f / safe_pred)
+        c = Nx.select(near_zero_p, 0.0, p_filt * f_in / safe_pred)
         # Smoothed state from previously stored smooth_{i+1}
         x_smooth_next = take_scalar_at(sxs_acc, i + 1)
         p_smooth_next = take_scalar_at(sps_acc, i + 1)
@@ -82,7 +83,7 @@ defmodule BstsNx.Smoother do
         p_smooth = p_filt + c * (p_smooth_next - p_pred_next) * c
         sxs_new = Nx.put_slice(sxs_acc, [i], Nx.reshape(x_smooth, {1}))
         sps_new = Nx.put_slice(sps_acc, [i], Nx.reshape(p_smooth, {1}))
-        {k + 1, sxs_new, sps_new}
+        {k + 1, sxs_new, sps_new, xs_in, ps_in, f_in, q_in}
       end
 
     {sxs_out, sps_out}
@@ -145,19 +146,20 @@ defmodule BstsNx.Smoother do
     # Backward pass: iterate from t-2 down to 0
     num_steps = t - 1
 
-    {_, sxs_out, sps_out, lag1_out} =
-      while {k = Nx.tensor(0), sxs_acc = sxs, sps_acc = sps, lag1_acc = lag1},
+    {_, sxs_out, sps_out, _, _, _, _, lag1_out} =
+      while {k = Nx.tensor(0), sxs_acc = sxs, sps_acc = sps, xs_in = xs, ps_in = ps, f_in = f,
+             q_in = q, lag1_acc = lag1},
             k < num_steps do
         i = last_idx - 1 - k
-        x_filt = take_scalar_at(xs, i)
-        p_filt = take_scalar_at(ps, i)
+        x_filt = take_scalar_at(xs_in, i)
+        p_filt = take_scalar_at(ps_in, i)
         # Recompute predicted state/cov at i+1 from filtered at i
-        x_pred_next = f * x_filt
-        p_pred_next = f * p_filt * f + q
+        x_pred_next = f_in * x_filt
+        p_pred_next = f_in * p_filt * f_in + q_in
         # Smoothing gain: C_k = P_filt * F / P_pred_next
         near_zero_p = Nx.abs(p_pred_next) < 1.0e-15
         safe_pred = Nx.select(near_zero_p, 1.0, p_pred_next)
-        c = Nx.select(near_zero_p, 0.0, p_filt * f / safe_pred)
+        c = Nx.select(near_zero_p, 0.0, p_filt * f_in / safe_pred)
         # Smoothed state from previously stored smooth_{i+1}
         x_smooth_next = take_scalar_at(sxs_acc, i + 1)
         p_smooth_next = take_scalar_at(sps_acc, i + 1)
@@ -168,7 +170,7 @@ defmodule BstsNx.Smoother do
         # Lag-one cross-covariance: P_{i+1,i|T} = P_{i+1|T} * G_i
         lag1_val = p_smooth_next * c
         lag1_new = Nx.put_slice(lag1_acc, [i], Nx.reshape(lag1_val, {1}))
-        {k + 1, sxs_new, sps_new, lag1_new}
+        {k + 1, sxs_new, sps_new, xs_in, ps_in, f_in, q_in, lag1_new}
       end
 
     {sxs_out, sps_out, lag1_out}
@@ -240,25 +242,26 @@ defmodule BstsNx.Smoother do
 
     num_steps = t - 1
 
-    {_, states_out} =
-      while {k = Nx.tensor(0), states_acc = states},
+    {_, states_out, _, _, _, _, _} =
+      while {k = Nx.tensor(0), states_acc = states, eps_in = eps, fxs = filtered_xs,
+             fps = filtered_ps, f_in = f, q_in = q},
             k < num_steps do
         i = last_idx - 1 - k
-        x_filt = take_scalar_at(filtered_xs, i)
-        p_filt = take_scalar_at(filtered_ps, i)
-        x_pred_next = f * x_filt
-        p_pred_next = f * p_filt * f + q
+        x_filt = take_scalar_at(fxs, i)
+        p_filt = take_scalar_at(fps, i)
+        x_pred_next = f_in * x_filt
+        p_pred_next = f_in * p_filt * f_in + q_in
         near_zero_p = Nx.abs(p_pred_next) < 1.0e-15
         safe_pred = Nx.select(near_zero_p, 1.0, p_pred_next)
-        j = Nx.select(near_zero_p, 0.0, p_filt * f / safe_pred)
+        j = Nx.select(near_zero_p, 0.0, p_filt * f_in / safe_pred)
 
         x_next = take_scalar_at(states_acc, i + 1)
         mean = x_filt + j * (x_next - x_pred_next)
-        cov = (p_filt * (1.0 - j * f)) |> Nx.max(1.0e-12)
-        x_i = mean + Nx.sqrt(cov) * take_scalar_at(eps, i)
+        cov = (p_filt * (1.0 - j * f_in)) |> Nx.max(1.0e-12)
+        x_i = mean + Nx.sqrt(cov) * take_scalar_at(eps_in, i)
         states_new = Nx.put_slice(states_acc, [i], Nx.reshape(x_i, {1}))
 
-        {k + 1, states_new}
+        {k + 1, states_new, eps_in, fxs, fps, f_in, q_in}
       end
 
     {states_out, key_out}
@@ -278,25 +281,26 @@ defmodule BstsNx.Smoother do
 
     num_steps = t - 1
 
-    {_, states_out} =
-      while {k = Nx.tensor(0), states_acc = states},
+    {_, states_out, _, _, _, _, _} =
+      while {k = Nx.tensor(0), states_acc = states, eps_in = eps, fxs = filtered_xs,
+             fps = filtered_ps, f_in = f, q_in = q},
             k < num_steps do
         i = last_idx - 1 - k
-        x_filt = take_scalar_at(filtered_xs, i)
-        p_filt = take_scalar_at(filtered_ps, i)
-        x_pred_next = f * x_filt
-        p_pred_next = f * p_filt * f + q
+        x_filt = take_scalar_at(fxs, i)
+        p_filt = take_scalar_at(fps, i)
+        x_pred_next = f_in * x_filt
+        p_pred_next = f_in * p_filt * f_in + q_in
         near_zero_p = Nx.abs(p_pred_next) < 1.0e-15
         safe_pred = Nx.select(near_zero_p, 1.0, p_pred_next)
-        j = Nx.select(near_zero_p, 0.0, p_filt * f / safe_pred)
+        j = Nx.select(near_zero_p, 0.0, p_filt * f_in / safe_pred)
 
         x_next = take_scalar_at(states_acc, i + 1)
         mean = x_filt + j * (x_next - x_pred_next)
-        cov = (p_filt * (1.0 - j * f)) |> Nx.max(1.0e-12)
-        x_i = mean + Nx.sqrt(cov) * take_scalar_at(eps, i)
+        cov = (p_filt * (1.0 - j * f_in)) |> Nx.max(1.0e-12)
+        x_i = mean + Nx.sqrt(cov) * take_scalar_at(eps_in, i)
         states_new = Nx.put_slice(states_acc, [i], Nx.reshape(x_i, {1}))
 
-        {k + 1, states_new}
+        {k + 1, states_new, eps_in, fxs, fps, f_in, q_in}
       end
 
     {states_out, key_out}
