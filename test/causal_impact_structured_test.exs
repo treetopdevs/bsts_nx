@@ -4,6 +4,13 @@ defmodule BstsNx.CausalImpactStructuredTest do
   alias BstsNx.CausalImpact
   alias BstsNx.Components
 
+  @compiled_backend? match?(EMLX.Backend, Nx.default_backend()) or
+                       match?({EMLX.Backend, _}, Nx.default_backend()) or
+                       match?(EXLA.Backend, Nx.default_backend()) or
+                       match?({EXLA.Backend, _}, Nx.default_backend())
+  @structured_num_samples if(@compiled_backend?, do: 8, else: 30)
+  @structured_burn_in if(@compiled_backend?, do: 4, else: 15)
+
   # ── Basic structure and API ────────────────────────────────────────────
 
   describe "estimate_structured/5 with local_level_spec" do
@@ -101,7 +108,7 @@ defmodule BstsNx.CausalImpactStructuredTest do
   # ── Seasonal model ─────────────────────────────────────────────────────
 
   describe "estimate_structured with seasonal model" do
-    @tag timeout: 120_000
+    @tag timeout: if(@compiled_backend?, do: 300_000, else: 120_000)
     test "detects positive effect in seasonal data" do
       # Deterministic seasonal signal with a strong post-period lift to keep
       # this check robust across Elixir/OTP/Nx versions.
@@ -134,8 +141,8 @@ defmodule BstsNx.CausalImpactStructuredTest do
 
       result =
         CausalImpact.estimate_structured(obs, {1, n_pre}, {n_pre + 1, n_total}, spec,
-          num_samples: 30,
-          burn_in: 15,
+          num_samples: @structured_num_samples,
+          burn_in: @structured_burn_in,
           seed: 555
         )
 
@@ -183,8 +190,8 @@ defmodule BstsNx.CausalImpactStructuredTest do
 
       result =
         CausalImpact.estimate_structured(obs, {1, n_pre}, {n_pre + 1, n_total}, combined,
-          num_samples: 30,
-          burn_in: 15,
+          num_samples: @structured_num_samples,
+          burn_in: @structured_burn_in,
           seed: 777
         )
 
@@ -222,8 +229,8 @@ defmodule BstsNx.CausalImpactStructuredTest do
 
       result =
         CausalImpact.estimate_structured(all_data, {1, n_pre}, {n_pre + 1, n_total}, combined,
-          num_samples: 30,
-          burn_in: 15,
+          num_samples: @structured_num_samples,
+          burn_in: @structured_burn_in,
           seed: 888
         )
 

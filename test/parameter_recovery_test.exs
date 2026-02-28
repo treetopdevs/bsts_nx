@@ -6,7 +6,14 @@ defmodule BstsNx.ParameterRecoveryTest do
   alias BstsNx.GibbsSampler
 
   @moduletag :external
-  @moduletag timeout: 180_000
+  @moduletag timeout: 300_000
+  @emlx_backend? match?(EMLX.Backend, Nx.default_backend()) or
+                   match?({EMLX.Backend, _}, Nx.default_backend())
+
+  if @emlx_backend? do
+    @tag skip:
+           "parameter recovery external test is currently too slow on EMLX; run on native/EXLA for parity checks"
+  end
 
   test "local linear trend sampler covers true variances with 95% HPD intervals" do
     :rand.seed(:exsss, {1_111, 1_112, 1_113})

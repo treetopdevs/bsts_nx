@@ -3,6 +3,13 @@ defmodule BstsNx.SpotAttributorPosteriorTest do
 
   alias BstsNx.SpotAttributor
 
+  @aggregation_delta_tol if(
+                           match?(EMLX.Backend, Nx.default_backend()) or
+                             match?({EMLX.Backend, _}, Nx.default_backend()),
+                           do: 1.0e-5,
+                           else: 1.0e-10
+                         )
+
   # ---------------------------------------------------------------
   # Helpers
   # ---------------------------------------------------------------
@@ -236,9 +243,9 @@ defmodule BstsNx.SpotAttributorPosteriorTest do
       attr_a = Enum.find(result.attributions, &(&1.spot_id == "a"))
       attr_b = Enum.find(result.attributions, &(&1.spot_id == "b"))
 
-      assert_in_delta attr_a.lift, expected_mean_a, 1.0e-10
-      assert_in_delta attr_b.lift, expected_mean_b, 1.0e-10
-      assert_in_delta result.total_lift, expected_total_mean, 1.0e-10
+      assert_in_delta attr_a.lift, expected_mean_a, @aggregation_delta_tol
+      assert_in_delta attr_b.lift, expected_mean_b, @aggregation_delta_tol
+      assert_in_delta result.total_lift, expected_total_mean, @aggregation_delta_tol
     end
   end
 

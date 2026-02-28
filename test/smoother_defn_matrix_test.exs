@@ -3,6 +3,13 @@ defmodule BstsNx.SmootherDefnMatrixTest do
 
   alias BstsNx.{KalmanFilter, Smoother}
 
+  @emlx_backend? match?(EMLX.Backend, Nx.default_backend()) or
+                   match?({EMLX.Backend, _}, Nx.default_backend())
+
+  if @emlx_backend? do
+    @tag skip: "EMLX backend does not implement Nx.Backend.lu/3 required by matrix RTS defn path"
+  end
+
   test "rts_defn_matrix matches eager rts for matrix state models" do
     nan = Nx.Constants.nan() |> Nx.to_number()
     observations = [1.0, 1.4, nan, 2.1, 2.6]

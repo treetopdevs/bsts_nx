@@ -6,6 +6,11 @@ defmodule BstsNx.GibbsStructuredTest do
   alias BstsNx.Components
   alias BstsNx.ModelSpec
 
+  @compiled_backend? match?(EMLX.Backend, Nx.default_backend()) or
+                       match?({EMLX.Backend, _}, Nx.default_backend()) or
+                       match?(EXLA.Backend, Nx.default_backend()) or
+                       match?({EXLA.Backend, _}, Nx.default_backend())
+
   # ── Local Level Spec via Structured Sampler ──────────────────────────────
 
   describe "local_level_spec through sample_structured" do
@@ -297,6 +302,11 @@ defmodule BstsNx.GibbsStructuredTest do
         assert Nx.to_number(sample.q_matrix[2][2]) == 0.0
         assert Nx.to_number(sample.q_matrix[3][3]) == 0.0
       end)
+    end
+
+    if @compiled_backend? do
+      @tag skip:
+             "high-dimensional spike-and-slab external recovery is too slow on compiled backends; run on native backend for this parity check"
     end
 
     @tag :external

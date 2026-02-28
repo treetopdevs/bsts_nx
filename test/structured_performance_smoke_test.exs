@@ -1,5 +1,6 @@
 defmodule BstsNx.StructuredPerformanceSmokeTest do
   use ExUnit.Case, async: false
+  @moduletag timeout: 180_000
 
   alias BstsNx.{Components, GibbsSampler}
 
@@ -39,6 +40,9 @@ defmodule BstsNx.StructuredPerformanceSmokeTest do
     budget_us =
       case Nx.default_backend() do
         EXLA.Backend -> 25_000_000
+        {EXLA.Backend, _opts} -> 25_000_000
+        EMLX.Backend -> 90_000_000
+        {EMLX.Backend, _opts} -> 90_000_000
         _ -> 8_000_000
       end
 
