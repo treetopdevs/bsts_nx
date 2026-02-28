@@ -248,7 +248,13 @@ defmodule BstsNx.BCT.ARForecaster do
 
       true ->
         mean = Enum.sum(values) / n
-        ss = Enum.reduce(values, 0.0, fn x, acc -> d = x - mean; acc + d * d end)
+
+        ss =
+          Enum.reduce(values, 0.0, fn x, acc ->
+            d = x - mean
+            acc + d * d
+          end)
+
         :math.sqrt(ss / (n - 1))
     end
   end

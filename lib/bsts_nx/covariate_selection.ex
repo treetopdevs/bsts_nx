@@ -120,7 +120,10 @@ defmodule BstsNx.CovariateSelection do
       slab_sd = Keyword.get(opts, :slab_sd, 1.0)
       sigma_prior_shape = Keyword.get(opts, :sigma_prior_shape, 2.0)
       sigma_prior_scale = Keyword.get(opts, :sigma_prior_scale, 1.0)
-      prior_inclusion = Keyword.get(opts, :prior_inclusion, min(0.5, @default_expected_controls / p))
+
+      prior_inclusion =
+        Keyword.get(opts, :prior_inclusion, min(0.5, @default_expected_controls / p))
+
       pip_threshold = Keyword.get(opts, :pip_threshold, 0.5)
       max_controls = Keyword.get(opts, :max_controls, p)
 
@@ -215,7 +218,9 @@ defmodule BstsNx.CovariateSelection do
               if iter > burn_in and rem(iter - burn_in, thin) == 0 do
                 counts_new = Enum.zip_with([counts, gamma_new], fn [a, b] -> a + b end)
                 beta_sums_new = Enum.zip_with([beta_sums, beta_new], fn [a, b] -> a + b end)
-                {beta_new, gamma_new, sigma2_new, residual_new, counts_new, beta_sums_new, kept + 1, rng}
+
+                {beta_new, gamma_new, sigma2_new, residual_new, counts_new, beta_sums_new,
+                 kept + 1, rng}
               else
                 {beta_new, gamma_new, sigma2_new, residual_new, counts, beta_sums, kept, rng}
               end
@@ -480,10 +485,10 @@ defmodule BstsNx.CovariateSelection do
 
   defp inclusion_probability(beta_j, sigma2, prior_inclusion, spike_sd, slab_sd) do
     log_prior_ratio = :math.log(prior_inclusion / (1.0 - prior_inclusion))
-    log_sd_ratio = 0.5 * :math.log((spike_sd * spike_sd) / (slab_sd * slab_sd))
+    log_sd_ratio = 0.5 * :math.log(spike_sd * spike_sd / (slab_sd * slab_sd))
 
     quad =
-      (beta_j * beta_j) / (2.0 * max(sigma2, 1.0e-12)) *
+      beta_j * beta_j / (2.0 * max(sigma2, 1.0e-12)) *
         (1.0 / (spike_sd * spike_sd) - 1.0 / (slab_sd * slab_sd))
 
     # Stable logistic transform

@@ -322,8 +322,11 @@ defmodule BstsNx.Forecaster do
       # Iterate h_list directly to avoid O(n²) Enum.at access
       {_, trajectory} =
         Enum.zip(h_rows, Enum.zip(proc_rows, obs_vals))
-        |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_row, {proc_row, z_obs}}, {state, acc} ->
-          next_state = Nx.add(compat_dot(spec.f, state), Nx.tensor(proc_row, type: Nx.type(state)))
+        |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_row, {proc_row, z_obs}},
+                                                         {state, acc} ->
+          next_state =
+            Nx.add(compat_dot(spec.f, state), Nx.tensor(proc_row, type: Nx.type(state)))
+
           y_mean = Nx.to_number(compat_dot(h_row, next_state))
           y = y_mean + z_obs * obs_sd
           {next_state, [y | acc]}

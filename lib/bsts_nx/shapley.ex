@@ -152,7 +152,10 @@ defmodule BstsNx.ShapleyAllocator do
               Map.fetch!(factorials, s_size) *
                 Map.fetch!(factorials, n - s_size - 1) / n_fact
 
-            marginal = Map.fetch!(coalition_cache, bor(mask, player_bit)) - Map.fetch!(coalition_cache, mask)
+            marginal =
+              Map.fetch!(coalition_cache, bor(mask, player_bit)) -
+                Map.fetch!(coalition_cache, mask)
+
             acc + weight * marginal
           else
             acc
@@ -209,7 +212,8 @@ defmodule BstsNx.ShapleyAllocator do
         {perm, new_rand_state} = shuffle_list(ids, rand_state)
 
         {marginals, _coalition, _v_last} =
-          Enum.reduce(perm, {%{}, [], value_fn.([])}, fn player_id, {marg, coalition, v_without} ->
+          Enum.reduce(perm, {%{}, [], value_fn.([])}, fn player_id,
+                                                         {marg, coalition, v_without} ->
             coalition_with = sorted_insert(coalition, player_id)
             v_with = value_fn.(coalition_with)
             marginal = v_with - v_without

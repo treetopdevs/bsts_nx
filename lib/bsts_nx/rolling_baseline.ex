@@ -665,5 +665,4 @@ defmodule BstsNx.RollingBaseline do
   defp to_float(v) when is_float(v), do: v
   defp to_float(v) when is_integer(v), do: v * 1.0
   defp to_float(%Nx.Tensor{} = t), do: Nx.to_number(t)
-
 end

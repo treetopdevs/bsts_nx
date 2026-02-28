@@ -1,0 +1,15 @@
+{
+  "backend": "{Nx.BinaryBackend, []}",
+  "generated_at": "2026-02-28T17:32:40.317109Z",
+  "git_sha": "51a4d7e",
+  "scenarios": {
+    "scalar_gibbs": {
+      "elapsed_us": 3393279,
+      "num_samples": 200
+    },
+    "structured_gibbs": {
+      "elapsed_us": 38247930,
+      "num_samples": 120
+    }
+  }
+}

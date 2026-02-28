@@ -128,20 +128,19 @@ defmodule BstsNx.CausalImpact do
     seed_base = Keyword.get(opts, :seed, System.os_time())
     cf_base_key = Keyword.get(opts, :key, Nx.Random.key(seed_base))
     # Split into one key per sample for independent counterfactual draws
-    cf_key_rows = Nx.Random.split(cf_base_key, parts: length(pre_samples)) |> Nx.to_list()
+    cf_keys = Nx.Random.split(cf_base_key, parts: length(pre_samples))
 
     # Collect point effects and counterfactual predictions per sample by forward simulation
     effects =
-      Enum.zip(pre_samples, cf_key_rows)
-      |> Enum.map(fn {sample, cf_key_row} ->
+      Enum.with_index(pre_samples)
+      |> Enum.map(fn {sample, idx} ->
         # final state of pre-period
         final_state = List.last(sample.states)
         init_val = Nx.to_number(final_state)
         q = Nx.to_number(sample.process_var)
         r = Nx.to_number(sample.obs_var)
         # generate counterfactual by forward simulation (random walk with observation noise)
-        cf_key = Nx.tensor(cf_key_row, type: Nx.type(cf_base_key))
-        cf = generate_counterfactual(init_val, q, r, n_post, cf_key)
+        cf = generate_counterfactual(init_val, q, r, n_post, split_key_at(cf_keys, idx))
         # compute point effects as difference between actual post data and counterfactual
         point_effects =
           Enum.zip(post_data, cf)
@@ -247,18 +246,17 @@ defmodule BstsNx.CausalImpact do
     n_post = post_end - pre_end
     seed_base = Keyword.get(opts, :seed, System.os_time())
     cf_base_key = Keyword.get(opts, :key, Nx.Random.key(seed_base))
-    cf_key_rows = Nx.Random.split(cf_base_key, parts: length(pre_samples)) |> Nx.to_list()
+    cf_keys = Nx.Random.split(cf_base_key, parts: length(pre_samples))
 
     # Get post-period H entries for counterfactual forward simulation
     post_h = post_period_h(spec.h, pre_end, n_post)
 
     effects =
-      Enum.zip(pre_samples, cf_key_rows)
-      |> Enum.map(fn {sample, cf_key_row} ->
+      Enum.with_index(pre_samples)
+      |> Enum.map(fn {sample, idx} ->
         final_state = List.last(sample.states)
         q_mat = sample.q_matrix
         r = Nx.to_number(sample.obs_var)
-        cf_key = Nx.tensor(cf_key_row, type: Nx.type(cf_base_key))
 
         # Forward-simulate the state-space model for counterfactual
         cf =
@@ -269,7 +267,7 @@ defmodule BstsNx.CausalImpact do
             q_mat,
             r,
             n_post,
-            cf_key
+            split_key_at(cf_keys, idx)
           )
 
         point_effects =
@@ -371,7 +369,12 @@ defmodule BstsNx.CausalImpact do
             end
 
           Enum.map(0..(n_post - 1), fn idx ->
-            %{mean: Enum.at(means, idx), sd: Enum.at(sds, idx), lower: Enum.at(lowers, idx), upper: Enum.at(uppers, idx)}
+            %{
+              mean: Enum.at(means, idx),
+              sd: Enum.at(sds, idx),
+              lower: Enum.at(lowers, idx),
+              upper: Enum.at(uppers, idx)
+            }
           end)
       end
 
@@ -700,9 +703,9 @@ defmodule BstsNx.CausalImpact do
     # observation noise, and one unused.  Using 3 parts ensures process
     # and observation streams share no common ancestor from a single split,
     # consistent with the per-step splitting in generate_structured_counterfactual.
-    [key_process_row, key_obs_row] = Nx.Random.split(key, parts: 2) |> Nx.to_list()
-    key_process = Nx.tensor(key_process_row, type: Nx.type(key))
-    key_obs = Nx.tensor(key_obs_row, type: Nx.type(key))
+    keys = Nx.Random.split(key, parts: 2)
+    key_process = split_key_at(keys, 0)
+    key_obs = split_key_at(keys, 1)
     {process_noise, _} = Nx.Random.normal(key_process, 0.0, 1.0, shape: {n_steps})
     {obs_noise, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {n_steps})
 
@@ -736,14 +739,20 @@ defmodule BstsNx.CausalImpact do
     q_sds = Nx.sqrt(Nx.max(q_diag, Nx.tensor(0.0)))
     obs_sd = :math.sqrt(max(obs_var, 0.0))
 
-    # Pre-extract all state/observation subkeys once to avoid per-step tensor slicing.
-    subkey_rows = Nx.Random.split(key, parts: n_steps * 2) |> Nx.to_list()
-    state_key_rows = Enum.take_every(subkey_rows, 2)
-    obs_key_rows = subkey_rows |> Enum.drop(1) |> Enum.take_every(2)
+    # Pre-extract all state/observation subkeys once while preserving the
+    # previous split-per-step key semantics.
+    step_key_rows = Nx.Random.split(key, parts: n_steps) |> Nx.to_list()
+
+    state_obs_rows =
+      Enum.map(step_key_rows, fn step_key_row ->
+        step_key = Nx.tensor(step_key_row, type: Nx.type(key))
+        [state_key_row, obs_key_row] = Nx.Random.split(step_key, parts: 2) |> Nx.to_list()
+        {state_key_row, obs_key_row}
+      end)
 
     # Iterate directly over post_h list to avoid O(n²) Enum.at access
     {_, values} =
-      Enum.zip(post_h, Enum.zip(state_key_rows, obs_key_rows))
+      Enum.zip(post_h, state_obs_rows)
       |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_t, {state_key_row, obs_key_row}},
                                                        {prev_state, acc} ->
         key_state = Nx.tensor(state_key_row, type: Nx.type(key))
@@ -832,6 +841,11 @@ defmodule BstsNx.CausalImpact do
 
   defp to_number(%Nx.Tensor{} = t), do: Nx.to_number(t)
   defp to_number(x) when is_number(x), do: x + 0.0
+
+  defp split_key_at(keys, idx) do
+    Nx.slice_along_axis(keys, idx, 1, axis: 0)
+    |> Nx.squeeze(axes: [0])
+  end
 
   defp take_time_slice_at(tensor, idx) do
     Nx.slice_along_axis(tensor, idx, 1, axis: 0)

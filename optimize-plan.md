@@ -14,12 +14,12 @@ This section is the tracker of record for completion status.
 
 ### Milestones
 
-- [ ] PR 1: Tracking + benchmark harness
-- [ ] PR 2: Finish Tier 1 + Tier 2 core
-- [ ] PR 3: Finish Tier 2D/2E + remaining Tier 4E batching
-- [ ] PR 4: Close remaining Tier 3/4 medium work
-- [ ] PR 5: Tier 5A compiled multi-dimensional filter
-- [ ] PR 6: Tier 5B compiled multi-dimensional RTS smoother
+- [x] PR 1: Tracking + benchmark harness
+- [~] PR 2: Finish Tier 1 + Tier 2 core
+- [~] PR 3: Finish Tier 2D/2E + remaining Tier 4E batching
+- [~] PR 4: Close remaining Tier 3/4 medium work
+- [~] PR 5: Tier 5A compiled multi-dimensional filter
+- [~] PR 6: Tier 5B compiled multi-dimensional RTS smoother
 - [ ] PR 7: Tier 5C pure-Nx gamma / inv-gamma defn path
 - [ ] PR 8: Tier 5D spike-and-slab rank-1 updates + closeout
 
@@ -29,7 +29,7 @@ This section is the tracker of record for completion status.
 - [~] Tier 2: Partial
 - [~] Tier 3: Mostly complete
 - [~] Tier 4: Mostly complete
-- [ ] Tier 5: Not started
+- [~] Tier 5: Partial API surface landed, integration still pending
 
 Legend: `[x]` done, `[~]` partial, `[ ]` pending.
 
