@@ -524,6 +524,7 @@ defmodule BstsNx.Smoother do
   end
 
   def simulate_with_key(smoothed, filtered, predicted, f, opts) do
+    Process.put(:bsts_smoother_non_pd_logged, false)
     f_t = to_tensor(f)
     t = length(smoothed)
     # Convert inputs to :array for O(1) access
@@ -619,6 +620,7 @@ defmodule BstsNx.Smoother do
 
     # Convert array to list in time order
     sampled_states = Enum.map(0..(t - 1), fn i -> :array.get(i, states_arr) end)
+    Process.delete(:bsts_smoother_non_pd_logged)
     {sampled_states, key_out}
   end
 
@@ -661,6 +663,31 @@ defmodule BstsNx.Smoother do
 
       _ ->
         dot(a, b)
+    end
+  end
+
+  defp symmetrize(matrix), do: Nx.multiply(Nx.add(matrix, Nx.transpose(matrix)), 0.5)
+
+  defp safe_cholesky_or_zero(cov, _context) do
+    cov_sym = symmetrize(cov)
+
+    chol =
+      try do
+        Nx.LinAlg.cholesky(cov_sym)
+      rescue
+        _ -> :error
+      end
+
+    if match?(%Nx.Tensor{}, chol) and not has_non_finite?(chol) do
+      chol
+    else
+      case project_to_psd_cholesky(cov_sym) do
+        {:ok, projected_chol} ->
+          projected_chol
+
+        :error ->
+          Nx.broadcast(0.0, Nx.shape(cov_sym))
+      end
     end
   end
 

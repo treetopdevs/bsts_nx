@@ -15,20 +15,6 @@ defmodule BstsNx.Utils do
   def to_tensor(list) when is_list(list), do: Nx.tensor(list)
 
   @doc """
-  Returns `true` if the observation should be treated as missing.
-
-  Missing observations are `nil` values or tensors containing NaN.
-  """
-  @spec missing_observation?(any()) :: boolean()
-  def missing_observation?(nil), do: true
-
-  def missing_observation?(%Nx.Tensor{} = t) do
-    Nx.any(Nx.is_nan(t)) |> Nx.to_number() == 1
-  end
-
-  def missing_observation?(_), do: false
-
-  @doc """
   Cholesky factorisation with exponentially increasing jitter.
 
   Handles both raising backends (BinaryBackend) and NaN-returning
