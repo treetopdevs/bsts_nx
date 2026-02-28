@@ -241,4 +241,28 @@ defmodule BstsNx.SpotAttributorPosteriorTest do
       assert_in_delta result.total_lift, expected_total_mean, 1.0e-10
     end
   end
+
+  describe "single-draw and validation branches" do
+    test "single draw produces zero posterior standard deviations" do
+      obs = [110.0, 112.0, 111.0]
+      spots = [make_spot("s1", 0, 3)]
+      draws = [[100.0, 100.0, 100.0]]
+
+      result = SpotAttributor.attribute_posterior(obs, spots, draws, 0.0)
+      [attr] = result.attributions
+
+      assert attr.lift_sd == 0.0
+      assert result.total_lift_sd == 0.0
+    end
+
+    test "rejects draw length mismatch" do
+      obs = [110.0, 112.0, 111.0]
+      spots = [make_spot("s1", 0, 3)]
+      draws = [[100.0, 100.0, 100.0], [101.0, 101.0]]
+
+      assert_raise ArgumentError, ~r/each counterfactual draw length/, fn ->
+        SpotAttributor.attribute_posterior(obs, spots, draws, 0.0)
+      end
+    end
+  end
 end

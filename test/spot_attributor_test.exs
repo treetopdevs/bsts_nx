@@ -628,4 +628,99 @@ defmodule BstsNx.SpotAttributorTest do
       assert_in_delta result.total_lift, 1100.0, 1.0e-6
     end
   end
+
+  describe "validation errors" do
+    test "rejects invalid alpha values" do
+      obs = [100.0, 101.0]
+      cf = flat_counterfactual(100.0, 1.0, 0.5, 2)
+      spots = [make_spot("s1", 0, 1)]
+
+      assert_raise ArgumentError, ~r/alpha must be a number in \(0, 1\)/, fn ->
+        SpotAttributor.attribute(obs, spots, cf, alpha: 1.0)
+      end
+    end
+
+    test "rejects counterfactual mean/variance length mismatches" do
+      obs = [100.0, 101.0]
+      spots = [make_spot("s1", 0, 1)]
+
+      assert_raise ArgumentError, ~r/counterfactual.mean length/, fn ->
+        SpotAttributor.attribute(obs, spots, %{
+          mean: [100.0],
+          variance: [1.0, 1.0],
+          obs_variance: 0.5
+        })
+      end
+
+      assert_raise ArgumentError, ~r/counterfactual.variance length/, fn ->
+        SpotAttributor.attribute(obs, spots, %{
+          mean: [100.0, 100.0],
+          variance: [1.0],
+          obs_variance: 0.5
+        })
+      end
+    end
+
+    test "rejects negative obs_variance and duplicate spot ids" do
+      obs = [100.0, 101.0]
+      cf = flat_counterfactual(100.0, 1.0, -0.1, 2)
+
+      assert_raise ArgumentError, ~r/obs_variance must be non-negative/, fn ->
+        SpotAttributor.attribute(obs, [make_spot("s1", 0, 1)], cf)
+      end
+
+      cf_ok = flat_counterfactual(100.0, 1.0, 0.5, 2)
+
+      assert_raise ArgumentError, ~r/duplicate spot IDs/, fn ->
+        SpotAttributor.attribute(obs, [make_spot("dup", 0, 1), make_spot("dup", 1, 2)], cf_ok)
+      end
+    end
+
+    test "rejects invalid spot windows" do
+      obs = [100.0, 101.0]
+      cf = flat_counterfactual(100.0, 1.0, 0.5, 2)
+
+      assert_raise ArgumentError, ~r/out of bounds/, fn ->
+        SpotAttributor.attribute(obs, [make_spot("s1", 0, 3)], cf)
+      end
+
+      assert_raise ArgumentError, ~r/window_start .* > window_end/, fn ->
+        SpotAttributor.attribute(obs, [make_spot("s1", 2, 1)], cf)
+      end
+    end
+  end
+
+  describe "diminishing mode branches" do
+    test "default_spot_value_function uses diminishing mode for n > 6" do
+      t = 20
+      obs = List.duplicate(120.0, t)
+      cf = flat_counterfactual(100.0, 1.0, 0.5, t)
+
+      spots =
+        Enum.map(0..6, fn i ->
+          make_spot("s#{i}", 2 + i, 8 + i)
+        end)
+
+      vf = SpotAttributor.default_spot_value_function(obs, cf, spots)
+      ids = Enum.map(spots, & &1.id)
+
+      assert vf.([]) == 0.0
+      assert vf.(ids) > 0.0
+    end
+
+    test "attribute allocates overlapping groups in diminishing mode" do
+      t = 16
+      obs = List.duplicate(150.0, t)
+      cf = flat_counterfactual(100.0, 1.0, 0.5, t)
+      spots = Enum.map(1..7, fn i -> make_spot("s#{i}", 3, 10) end)
+
+      result = SpotAttributor.attribute(obs, spots, cf, value_fn_mode: :diminishing, decay: 0.6)
+      coalition = SpotAttributor.compute_coalition_lift(obs, cf, spots)
+      sum_lift = Enum.reduce(result.attributions, 0.0, fn a, acc -> acc + a.lift end)
+
+      assert length(result.attributions) == 7
+      assert length(result.overlap_groups) == 1
+      assert_in_delta sum_lift, coalition.lift, 1.0e-6
+    end
+  end
 end
