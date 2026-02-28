@@ -355,19 +355,48 @@ NotebookHelpers.try_exla!(min_headroom: 10_000, warn: true)
 
 _Story beat:_ Product, Marketing, and Finance agree on one equation for the day: baseline behavior plus intervention effect plus noise.
 
-Think of your metric (sessions, signups, revenue) like this:
+### The core decomposition
 
-`observed = latent baseline + intervention effect + noise`
+Think of your metric (sessions, signups, revenue) at every time step as:
 
-* The **latent baseline** is the system behavior if no intervention happened.
-* The **effect** is what we want causally.
-* **Noise** is random fluctuation.
+`observed(t) = latent baseline(t) + intervention effect(t) + noise(t)`
 
-`BstsNx` learns the baseline probabilistically, then computes effect as `actual - counterfactual`.
+* The **latent baseline** is what the system would have done if no intervention happened. It captures trend (the metric drifts up or down over time), seasonality (daily/weekly/hourly cycles), and the influence of correlated external signals (controls). You never observe the baseline directly — it must be *inferred*.
+* The **intervention effect** is the causal lift we want to measure. It is zero during the pre-period and potentially non-zero after the intervention.
+* **Noise** is irreducible random variation — measurement jitter, unexplained user behavior, etc.
+
+### Why "structural" and "Bayesian"?
+
+**Structural** means we don't just fit a black-box curve. We write down an explicit *state-space model* — a set of equations that describe how the latent state (trend, seasonal pattern, regression coefficients) evolves from one time step to the next, and how observations relate to that hidden state. This is the same mathematical framework used in control engineering, GPS navigation, and econometrics.
+
+**Bayesian** means we treat unknown quantities (the latent states, the variance parameters) as random variables with probability distributions, not fixed unknowns with a single "best" value. Instead of getting one estimate of the baseline, we get a *posterior distribution* — a full description of what values are plausible given the data. That posterior is what gives us credible intervals and lets us quantify "how sure are we?"
+
+### The counterfactual trick
+
+The key idea behind causal impact: if we can learn a good model of the baseline during a pre-intervention period (when we know the effect is zero), we can *project* that baseline forward into the post-intervention period to build a **counterfactual** — "what would have happened without the intervention." The effect is then simply:
+
+`effect(t) = actual(t) - counterfactual(t)`
+
+Because the counterfactual is a probability distribution (not a single number), the effect estimate automatically comes with uncertainty bounds. `BstsNx` does exactly this: it learns the baseline probabilistically, then computes effect as `actual - counterfactual`.
 
 ## 3) Build a compact synthetic world with known truth
 
 _Story beat:_ Before analyzing real spend, we rehearse on a digital twin where the true answer is known.
+
+### Why synthetic data?
+
+In the real world you never know the true causal effect — that's the whole reason you need a model. This creates a chicken-and-egg problem: how do you know your model is working?
+
+The solution is a **data generating process (DGP)**: you write code that produces fake data where *you* control every parameter. You choose the true baseline, the true effect size, the noise level. Then you run your statistical method on that synthetic data and check whether it recovers the truth. If it can't recover a known answer, you have no business trusting it on real data.
+
+Our DGP here simulates 6 days of hourly web traffic with:
+
+- A **baseline** that has an intercept (~80 sessions/hour), a slight upward trend, and daily + weekly Fourier seasonality — the kind of cyclical patterns real web traffic shows.
+- **TV spots** that fire in specific time windows during the post-period. Each spot's raw impulse is transformed through adstock (carry-over) and Hill saturation (diminishing returns) before being scaled by a coefficient.
+- **Control series** — correlated but unaffected time series (think: organic search, a sister brand's traffic) that help the model separate the baseline from noise.
+- **Gaussian noise** with known standard deviation.
+
+We split the 144 hours into a **pre-period** (hours 1-96, 4 days) where no TV aired, and a **post-period** (hours 97-144, 2 days) where the campaign ran. The model will only see the pre-period during training.
 
 ```elixir
 minutes_per_hour = 60
@@ -474,13 +503,25 @@ Kino.DataTable.new(
 
 _Story beat:_ Media remembers and audiences fatigue. We encode both effects so our toy world behaves like campaigns do in practice.
 
-### 4.1 `BstsNx.Synthetic.Adstock.geometric_adstock/2`
+If you model a TV spot as a raw on/off impulse, you'll miss two well-documented phenomena from marketing science. Understanding them matters because our synthetic DGP uses both, and real campaigns behave this way too.
 
-A single pulse can have delayed carry-over.
+### 4.1 Adstock (carry-over): `BstsNx.Synthetic.Adstock.geometric_adstock/2`
 
-### 4.2 `BstsNx.Synthetic.Adstock.hill_saturation/3`
+When a 30-second spot airs, people don't all visit your site in that exact minute. Some come immediately, some an hour later, some the next morning when they remember. **Adstock** models this carry-over by spreading a single impulse across subsequent time periods using exponential decay:
 
-More intensity often gives diminishing incremental return.
+`adstock(t) = impulse(t) + lambda * adstock(t-1)`
+
+The parameter `lambda` (0 to 1) controls the decay rate. At `lambda = 0.7`, about 70% of the previous period's effect carries into the next. After ~10 periods, the residual effect is negligible. This turns a sharp spike into a smooth, decaying tail — which is what you actually see in web analytics after a TV spot.
+
+### 4.2 Hill saturation (diminishing returns): `BstsNx.Synthetic.Adstock.hill_saturation/3`
+
+The first time someone sees your ad, it might drive a visit. The fifth time, it drives less incremental response. **Hill saturation** (also called a Hill function or sigmoid response curve) captures this:
+
+`saturated(x) = x^slope / (ec^slope + x^slope)`
+
+The `ec` parameter is the half-saturation point (the input level where output is 50% of maximum), and `slope` controls how sharply the curve bends. The output is always bounded between 0 and 1, so it naturally compresses high inputs.
+
+Together, adstock + Hill transform a raw spend signal into a realistic "effective exposure" curve. In the chart below, watch how the sharp impulse becomes a slow decay (adstock), and then how the peak gets compressed (saturation).
 
 ```elixir
 impulse = [1.0] ++ List.duplicate(0.0, 47)
@@ -513,11 +554,33 @@ NotebookHelpers.line_plot(rows,
 
 _Story beat:_ During the campaign, we need hourly updates. Filtering gives the "right now" baseline estimate.
 
-You can think of this as a probabilistic smoothing cache for latent state.
+### What problem does the Kalman filter solve?
 
-* `KalmanFilter.filter/7` gives filtered posterior state/covariance.
-* `KalmanFilter.filter_with_pred/7` also returns one-step predictions.
-* `KalmanFilter.filter_defn/7` is compiled `defn` path for scalar systems.
+You have a hidden quantity (the "true" baseline level of your metric) that evolves over time, and noisy observations of it. The Kalman filter is an algorithm that, at each time step, answers: **"Given everything I've observed so far, what is my best estimate of the hidden state right now, and how uncertain am I?"**
+
+It works in a two-step cycle:
+
+1. **Predict**: Use the state-space model to project the previous state forward. "Based on where I was, here's where I think I am now." This gives a *prior* for the current state.
+2. **Update**: Observe the actual data point and adjust the prediction toward it. The size of the adjustment is controlled by the **Kalman gain** — a ratio that balances how much you trust the model vs. the data. If observation noise is high relative to process noise, the filter trusts the model more and adjusts less (smoother output). If observation noise is low, the filter tracks the data closely.
+
+The output at each step is a Gaussian posterior: a mean (best estimate) and a covariance (uncertainty). This is exact for linear-Gaussian state-space models — no approximation involved.
+
+### The state-space model
+
+The filter requires a model with two equations:
+
+- **State equation**: `x(t) = F * x(t-1) + process_noise` — how the hidden state evolves. `F` is the transition matrix, and process noise has variance `Q`.
+- **Observation equation**: `y(t) = H * x(t) + obs_noise` — how the hidden state maps to what you measure. `H` is the observation matrix, and observation noise has variance `R`.
+
+For a simple "local level" model (used here), `F = 1`, `H = 1` — the state is just a slowly-drifting level. The filter parameters `Q = 0.8` and `R = 4.0` say: "the level can drift a bit each step (Q), and observations are noisy around it (R)."
+
+### What to look for in the chart
+
+- The **one-step prediction** is the filter's guess *before* seeing each data point — it lags behind sudden changes.
+- The **filtered mean** is the estimate *after* incorporating each observation — it snaps closer to the data.
+- The **defn filtered mean** is the same algorithm compiled via `Nx.Defn` (JIT-compiled for speed) — it should match the eager version exactly.
+
+The gap between prediction and filtered mean shows the Kalman gain in action. The metrics below quantify how much the posterior correction improves accuracy.
 
 ```elixir
 kalman_obs = Enum.take(obs_hourly, 72)
@@ -570,10 +633,28 @@ defn_alignment_rmse = NotebookHelpers.rmse(filtered_mean, defn_mean)
 
 _Story beat:_ After the dust settles, we replay the timeline with hindsight and refine latent state estimates.
 
-Filtering uses information up to time `t`. Smoothing uses the full sequence.
+### Filtering vs. smoothing: a key distinction
 
-* `Smoother.rts/3`: backward pass for smoothed means/covs.
-* `Smoother.simulate_with_key/5`: sample latent trajectories.
+The Kalman filter processes data **left to right** — at time `t`, it only knows observations up to `t`. This is great for real-time monitoring, but it's suboptimal for retrospective analysis. Consider hour 50: the filter's estimate there doesn't benefit from data at hours 51, 52, ... 72. But that future data *does* carry information about where the latent state was at hour 50.
+
+**RTS (Rauch-Tung-Striebel) smoothing** fixes this with a backward pass. After the forward filter finishes, the smoother walks *backward* through time, using the filtered and predicted estimates to compute a refined posterior at each step that conditions on *the entire sequence*. The result:
+
+- **Filtered estimate at time t**: p(state_t | observations_1..t) — uses past + present
+- **Smoothed estimate at time t**: p(state_t | observations_1..T) — uses past + present + future
+
+Smoothed estimates always have equal or lower uncertainty than filtered estimates. The improvement is greatest in the middle of the series and vanishes at the last time step (where filter and smoother are identical).
+
+### Posterior state simulation
+
+Beyond the smoothed *mean*, we often need full posterior **draws** — random samples from the distribution of possible latent trajectories. `Smoother.simulate_with_key/5` implements **forward-filtering, backward-sampling (FFBS)**: it uses the smoothed distribution to draw a complete state trajectory that is consistent with all the data. Each draw looks like a plausible "true" history of the hidden state.
+
+These draws are the building blocks of the Gibbs sampler in the next section. They let us propagate uncertainty through downstream calculations (like causal effect estimates) rather than collapsing everything to a point estimate.
+
+### What to look for in the chart
+
+- The **smoothed mean** should hug the true baseline more tightly than the filtered mean, especially in the middle of the series.
+- The **posterior state draw** is one random sample — it's noisier than the mean but represents a single "what if this was the real trajectory" scenario.
+- The RMSE comparison below quantifies the **hindsight gain**: how much accuracy improves when you use the full series.
 
 ```elixir
 smoothed = Smoother.rts(filtered, predicted, 1.0)
@@ -615,7 +696,25 @@ smoothed_rmse_vs_truth = NotebookHelpers.rmse(smoothed_mean, true_baseline_kalma
 
 _Story beat:_ Executives ask, "How sure are we?" MCMC gives uncertainty, not just point estimates.
 
+### Why MCMC?
+
+The Kalman filter/smoother gives us the posterior over *states* given fixed variance parameters (Q and R). But in practice, we don't know the true Q and R either. We want the **joint posterior** over states *and* variances — the full description of everything that's uncertain.
+
+This joint posterior has no closed-form solution. **Markov Chain Monte Carlo (MCMC)** is a family of algorithms that generates samples from complex distributions by constructing a random walk that, in the long run, visits each region of the distribution in proportion to its probability.
+
+### Gibbs sampling: the divide-and-conquer MCMC strategy
+
+**Gibbs sampling** is a specific MCMC strategy that works when the joint distribution is hard to sample from directly, but the *conditional* distributions are tractable. The idea:
+
+1. **Fix variances, sample states**: Given current Q and R, run the Kalman smoother and draw a full state trajectory. This is the FFBS step from Section 6.
+2. **Fix states, sample variances**: Given the current state trajectory, compute the residuals (process innovations and observation errors). These residuals define sufficient statistics for an inverse-gamma distribution, from which we sample new Q and R.
+3. **Repeat**: Each cycle produces one sample from the joint posterior. Over many iterations, the collection of samples approximates the true posterior distribution.
+
+The first N iterations (**burn-in**) are discarded because the chain may start far from the high-probability region. After burn-in, each saved sample is one draw from the posterior. From these draws you can compute means, credible intervals, or any other summary.
+
 ### 7.1 Scalar sampler
+
+The scalar sampler handles the simplest case: a one-dimensional state with a single process variance Q and observation variance R. Even this simple model can produce useful causal estimates. The trace plots below show the sampled variance values across iterations — you want to see them stabilize (mix well) rather than drift or get stuck.
 
 ```elixir
 scalar_samples =
@@ -653,6 +752,14 @@ NotebookHelpers.line_plot(rows,
 ```
 
 ### 7.2 Multiple chains + diagnostics
+
+A single MCMC chain can get stuck in a local mode and give you false confidence. Running **multiple chains** from different random starting points lets you check convergence:
+
+- **R-hat (Gelman-Rubin statistic)**: Compares the variance *within* each chain to the variance *between* chains. If all chains are exploring the same distribution, these should be similar and R-hat approaches 1.0. Values above 1.05 suggest the chains haven't converged.
+- **Effective Sample Size (ESS)**: MCMC samples are autocorrelated (each sample is similar to its neighbor), so 100 MCMC draws don't carry as much information as 100 independent draws. ESS estimates the number of *independent* samples you effectively have. Low ESS means you need to run longer chains.
+- **Split R-hat**: Splits each chain in half and treats the halves as separate chains. This catches within-chain non-stationarity (e.g., a chain that drifts slowly).
+
+The rule of thumb: R-hat < 1.05 and ESS > 100 per parameter suggests adequate convergence.
 
 ```elixir
 chains =
@@ -700,16 +807,27 @@ NotebookHelpers.line_plot(rows,
 
 _Story beat:_ We upgrade from a toy baseline to something production-shaped: trend, seasonality, and external controls.
 
-This is where BSTS becomes a composable engineering system.
+### From scalar to structured: why bother?
 
-For interactive Livebook runs on `Nx.BinaryBackend`, we intentionally keep this
-section lighter. For larger structured models, prefer EXLA.
+The scalar model from Section 7 treats the baseline as a single drifting level. That's a reasonable starting point, but real web traffic has *structure*: a daily cycle (low at 3 AM, high at noon), a weekly cycle (weekdays vs. weekends), a gradual upward trend (growing user base), and correlations with external signals (competitor outages, weather, other marketing channels).
 
-* `Components.local_linear_trend_spec/1`
-* `Components.seasonal_spec/2`
-* `Components.regression_spec/2`
-* `Components.compose_specs/2`
-* `GibbsSampler.sample_structured/4`
+A **structured state-space model** decomposes the baseline into interpretable components. Each component has its own state variables and dynamics:
+
+- **Local linear trend**: Two state variables — *level* (where the metric is) and *slope* (how fast it's growing). The level can drift randomly each step, and the slope can change too, capturing trend acceleration or deceleration.
+- **Seasonality**: A set of state variables that capture repeating cycles. An 8-season component rotates through 8 phases, allowing the model to learn daily patterns in hourly data.
+- **Regression**: External control series enter as time-varying regressors with learned coefficients. If organic search traffic correlates with your metric in the pre-period, the model uses that relationship to build a better counterfactual.
+
+### Composition via block-diagonal matrices
+
+`BstsNx` treats each component as a self-contained state-space model (its own F, H, Q matrices). `Components.compose_specs/2` combines them by **block-diagonalizing** the transition and noise matrices and concatenating the observation vectors. The composed model is still a single state-space model — the Kalman filter and Gibbs sampler work on it exactly the same way, just with a higher-dimensional state.
+
+This composability is the engineering power of BSTS: you snap together components like LEGO bricks to match the complexity of your data.
+
+### Structured Gibbs sampling
+
+The structured sampler extends the scalar Gibbs sampler to handle the multi-dimensional state. Instead of sampling a single Q, it resamples each diagonal entry of Q independently (each component's noise variance). The `q_specs` in the model spec tell the sampler which state dimensions map to which variance parameter and what prior to use.
+
+For interactive Livebook runs on `Nx.BinaryBackend`, we intentionally keep this section lighter (fewer samples). For larger structured models, prefer EXLA for meaningful speedups.
 
 ```elixir
 regressors = controls_hourly |> Nx.tensor() |> Nx.transpose()
@@ -748,7 +866,21 @@ structured_samples =
 
 _Story beat:_ This is the core verdict section: what likely happened without TV, and what TV added on top.
 
+### The causal impact algorithm
+
+This is where everything comes together. The algorithm (originally published by Google in Brodersen et al., 2015) works in three steps:
+
+1. **Fit the model on pre-period data only**: The MCMC sampler learns the posterior distribution of the state-space parameters and latent states using only the observations before the intervention. The intervention period is masked — the model never sees the post-period actuals during training.
+
+2. **Generate posterior counterfactual predictions**: For each MCMC draw (a set of states + variances), simulate the model forward through the post-period. This produces a *distribution* of counterfactual trajectories — many possible "what would have happened" scenarios, each consistent with the pre-period patterns.
+
+3. **Compute the effect**: At each post-period time step, subtract the counterfactual from the actual observation. The difference is the pointwise effect. Summing over the post-period gives the cumulative effect. Because the counterfactual is a distribution, the effect is also a distribution — giving you a mean estimate and credible intervals.
+
+The **relative effect** divides the cumulative effect by the cumulative counterfactual, giving a percentage lift (e.g., "TV drove a 15% increase in sessions").
+
 ### 9.1 Local-level causal impact (`estimate/4`)
+
+The simplest version uses the scalar sampler with a local-level model. It has no trend, no seasonality, no controls — just a drifting level. This is often a surprisingly decent starting point, but it can't distinguish the intervention effect from pre-existing trends or seasonal patterns.
 
 ```elixir
 impact_scalar =
@@ -791,6 +923,10 @@ NotebookHelpers.interval_plot(rows,
 
 ### 9.2 Structured causal impact with controls (`estimate_structured/5`)
 
+Now we use the full structured model from Section 8 — trend, seasonality, and regression controls. The controls are critical for causal inference: if organic search traffic rose during the post-period for reasons unrelated to TV, the regression component absorbs that variation, preventing it from being misattributed to the campaign.
+
+We compare the scalar and structured estimates against the known true lift from our synthetic DGP. In general, the structured model should recover the truth more accurately because it correctly accounts for patterns that the scalar model conflates with the effect.
+
 ```elixir
 NotebookHelpers.try_exla!(min_headroom: 10_000)
 
@@ -830,6 +966,10 @@ true_post_lift =
 
 ### 9.3 Fast non-MCMC estimator (`estimate_from_filter/3`)
 
+MCMC is thorough but slow. For real-time dashboards or high-frequency monitoring where you need a quick directional estimate, `estimate_from_filter/3` skips the Gibbs sampler entirely. It runs a single Kalman filter pass with fixed (user-specified) variances, uses the filter's Gaussian posterior to compute the counterfactual, and derives confidence intervals analytically from the filter's state covariance.
+
+The trade-off: you get speed (milliseconds vs. seconds) but lose the ability to learn variance parameters from data. The intervals assume your Q and R are correct, whereas the MCMC approach marginalizes over uncertainty in those parameters. Use this for monitoring and alerting; use MCMC for final reports.
+
 ```elixir
 intervention_indices = Enum.to_list(96..143)
 
@@ -856,7 +996,16 @@ filter_estimate =
 
 _Story beat:_ Leadership wants a one-command summary, not a statistical deep dive.
 
-`InterventionAnalysis` wraps model building + impact + significance checks.
+### One-call causal inference
+
+`InterventionAnalysis` is a convenience wrapper that bundles the multi-step process from Sections 8-9 into a single function call. Given a time series and pre/post period boundaries, it:
+
+1. Builds a structured model (with optional seasonality and controls),
+2. Runs the MCMC-based causal impact estimator,
+3. Checks statistical significance (whether the credible interval for the cumulative effect excludes zero),
+4. Produces a human-readable report.
+
+This is the API you'd expose to non-statistician stakeholders. The `significant?` flag answers the executive question directly: "Did this intervention have a statistically credible effect, or could the observed change be explained by normal variation?"
 
 ```elixir
 analysis =
@@ -882,7 +1031,15 @@ InterventionAnalysis.report(analysis)
 
 _Story beat:_ We pick controls like witnesses in an investigation: relevant, stable, and not noisy bystanders.
 
-Use pre-period correlations to pick controls.
+### Why not use every available control?
+
+Including irrelevant controls in your regression component adds noise without improving the counterfactual. Worse, in a Bayesian regression with limited pre-period data, too many regressors can lead to overfitting — the model chases noise in the pre-period and produces poor out-of-sample counterfactuals.
+
+**Covariate selection** screens candidate control series before they enter the model. The simplest approach (used here) computes Pearson correlation between each candidate and the target during the pre-period, then keeps only candidates above an absolute correlation threshold. This ensures the controls actually *predict* the target's pre-intervention behavior.
+
+More sophisticated approaches (like spike-and-slab priors) assign each coefficient a prior probability of being zero, effectively performing variable selection *inside* the model. The `CovariateSelection.select/3` function here uses the correlation-threshold approach with a `max_controls` cap to prevent overfitting.
+
+The table below shows each candidate's correlation. Controls with `abs_corr` above the threshold (0.15) are retained for modeling.
 
 ```elixir
 target_pre = Enum.take(obs_hourly, elem(pre_period, 1))
@@ -917,7 +1074,31 @@ Kino.DataTable.new(
 
 _Story beat:_ Multiple spots aired close together; now we split incremental lift fairly across overlapping windows.
 
+### The attribution problem
+
+Causal impact tells you the *total* lift during the post-period. But four TV spots aired. Which ones drove the most value? If spot A and spot B have overlapping time windows, the lift during the overlap can't be naively assigned to either one without double-counting.
+
+This is a **credit assignment** problem. Simple heuristics (first-touch, last-touch, even-split) are arbitrary and can mislead media planning decisions. We need a principled method.
+
+### Shapley values: fair allocation from cooperative game theory
+
+**Shapley values** come from a 1953 result by Lloyd Shapley (who won a Nobel Prize for related work). The setup: you have N "players" (TV spots) who cooperate to produce a total "payoff" (total lift). How should you divide the payoff fairly?
+
+The Shapley value for a player is the average marginal contribution of that player across *all possible orderings* of players joining the coalition. Formally:
+
+`Shapley(i) = average over all subsets S not containing i of: [value(S + {i}) - value(S)]`
+
+This satisfies several fairness axioms: if a player contributes nothing, they get nothing; if two players are interchangeable, they get equal shares; and the shares sum exactly to the total.
+
+For TV spots, the "value" of a coalition is the combined lift during the union of their time windows. Computing exact Shapley values requires evaluating 2^N coalitions, which is feasible for small N (4 spots = 16 coalitions) but expensive for many. For larger problems, `BstsNx` uses **Monte Carlo Shapley** — randomly sampling orderings to approximate the values.
+
+### Posterior propagation
+
+Rather than computing attribution on a single point estimate, `SpotAttributor.attribute_posterior/5` propagates uncertainty from the counterfactual posterior through the attribution calculation. For each posterior draw, it computes a full set of attributions, then summarizes across draws to get credible intervals on each spot's lift.
+
 ### 12.1 Core utility functions
+
+Before running the full attribution, let's inspect the building blocks: the lift in a single spot's window, the coalition lift (all spots combined), and the detected overlap groups.
 
 ```elixir
 post_obs = Enum.slice(obs_hourly, (elem(post_period, 0) - 1)..(elem(post_period, 1) - 1))
@@ -952,6 +1133,10 @@ overlap_groups = ShapleyAllocator.detect_overlaps(spots_post_hours)
 ```
 
 ### 12.2 Posterior propagation attribution
+
+Here we run the full Shapley-based attribution with posterior uncertainty propagation. The `decay: 0.7` parameter applies time-decay weighting so that lift occurring closer to a spot's air time receives more credit for that spot — a reasonable assumption when carry-over effects from earlier spots are also present.
+
+The **reconciliation gap** should be near zero: the sum of individual spot attributions should equal the total lift. Any gap indicates numerical imprecision in the Monte Carlo Shapley estimation.
 
 ```elixir
 attr_posterior =
@@ -997,7 +1182,15 @@ Kino.DataTable.new(attr_posterior.attributions)
 
 _Story beat:_ The manual analysis gets packaged into a repeatable mission runbook.
 
-This chains structured causal impact + posterior attribution.
+### From manual steps to a single call
+
+Sections 8-12 walked through structured model building, causal impact estimation, and Shapley attribution step by step. In production, you don't want to assemble that pipeline manually each time. `Pipeline.run/6` chains the entire workflow:
+
+1. Run structured causal impact (Section 9.2) to estimate the counterfactual and total lift,
+2. Run posterior Shapley attribution (Section 12.2) to split the lift across spots,
+3. Return both results in a single struct.
+
+The output includes the total lift with its standard deviation (from the posterior) and per-spot attributions. Compare `pipeline_total_lift` with `true_post_lift` to see how well the full pipeline recovers the known ground truth.
 
 ```elixir
 pipeline_result =
@@ -1028,7 +1221,20 @@ pipeline_result =
 
 _Story beat:_ The crisis is over; now operations asks what happens next week so staffing and inventory can plan.
 
+### Forecasting vs. causal impact: same engine, different question
+
+Causal impact asks: "What *would have* happened?" (counterfactual). Forecasting asks: "What *will* happen?" (prediction). Both use the same state-space model — the difference is direction. In causal impact, you project the baseline forward to create a counterfactual and compare it against actuals you already have. In forecasting, you project the full model forward into genuinely unknown future periods.
+
+The BSTS approach to forecasting has a key advantage over point-forecast methods (ARIMA, exponential smoothing): because the forecast comes from posterior draws of the MCMC sampler, each draw produces a different future trajectory. This gives you **calibrated prediction intervals** — a range that should contain the true future value with the stated probability (e.g., 95%).
+
+Two metrics to evaluate forecasts:
+
+- **MAE (Mean Absolute Error)**: How far off is the point forecast on average? Lower is better.
+- **Interval coverage**: What fraction of actual values fell inside the 95% prediction interval? If the intervals are well-calibrated, this should be close to 95%.
+
 ### 14.1 Generic `Forecaster`
+
+`Forecaster.fit_predict/3` fits the structured model on training data and generates forecasts with credible intervals for the specified horizon.
 
 ```elixir
 train = Enum.take(obs_hourly, 120)
@@ -1079,6 +1285,12 @@ forecast_coverage =
 
 ### 14.2 Demand forecasting with regressors
 
+When you have external signals that predict your metric (e.g., weather predicts ice cream demand, promotional calendars predict retail traffic), including them as regressors can dramatically improve forecast accuracy. `DemandForecaster` extends the base forecaster with:
+
+- **Training regressors**: Control series observed during the training period, used to learn the regression relationship.
+- **Future regressors**: The same control series projected into the forecast horizon. You must provide these — the model can't forecast without knowing the future values of its inputs.
+- **Safety stock calculation**: A supply-chain feature that computes buffer inventory given a target service level (probability of not stocking out) and lead time. It uses the upper quantile of the forecast distribution, not just the mean, so the buffer accounts for forecast uncertainty.
+
 ```elixir
 full_regressors = controls_hourly |> Nx.tensor() |> Nx.transpose()
 train_regressors = Nx.slice(full_regressors, [0, 0], [120, Nx.axis_size(full_regressors, 1)])
@@ -1107,6 +1319,8 @@ safety_stock = DemandForecaster.safety_stock(demand_forecast,
 
 ### 14.3 BCT AR scaffold forecaster
 
+For comparison, `BstsNx.BCT.ARForecaster` implements a simpler **autoregressive (AR)** model with Bayesian sampling. An AR(p) model predicts the next value as a weighted combination of the `p` most recent values, plus noise. It captures short-range temporal dependencies but lacks the structural decomposition (trend, seasonality) of the full BSTS model. This is useful as a baseline to benchmark against, and for series where the autoregressive structure dominates.
+
 ```elixir
 ar_forecast =
   BstsNx.BCT.ARForecaster.fit_predict(train, length(test),
@@ -1125,6 +1339,18 @@ ar_forecast =
 ## 15) Anomaly detection
 
 _Story beat:_ Not every spike is marketing. We add guards for incidents, bots, and tracking glitches.
+
+### Statistical process control meets Bayesian filtering
+
+Anomaly detection in time series boils down to: "Is this observation surprising given what I expected?" The Kalman filter gives us exactly the right tool — at each time step, it predicts the next observation and quantifies the prediction uncertainty. The **z-score** measures how many standard deviations the actual observation deviates from the filter's prediction:
+
+`z(t) = (actual(t) - predicted(t)) / sqrt(prediction_variance(t))`
+
+If the model is correct and there are no anomalies, z-scores should follow a standard normal distribution. A z-score of 2.5 means the observation was 2.5 standard deviations from expected — unlikely under normal conditions.
+
+The **alpha** parameter (0.01 here) sets the significance level — the probability threshold for flagging. At alpha = 0.01, the z-score threshold is about 2.58, meaning roughly 1% of normal observations would be falsely flagged. Severity levels (`:warning` vs. `:critical`) provide graduated alerting.
+
+Below, we inject two synthetic anomalies (a +35 spike at index 8 and a -30 dip at index 16) into the post-period stream and check whether the detector flags them. The z-score chart shows the absolute z-score for each observation against the threshold line — points above the threshold are flagged.
 
 ```elixir
 normal_history = Enum.take(obs_hourly, 96)
@@ -1184,6 +1410,17 @@ NotebookHelpers.line_plot(rows ++ threshold_rows,
 
 _Story beat:_ We hand the method to partner teams via pragmatic wrappers that run with less custom glue.
 
+### Rolling baselines for operational use
+
+In the causal impact analysis (Section 9), the baseline model was fit once on the full pre-period. But in ongoing operations, you may want a **rolling baseline** — a model that is periodically re-fit on a sliding window of recent data. This handles non-stationarity (if the relationship between controls and the target shifts over time) and keeps the counterfactual fresh.
+
+`RollingBaseline.fit_and_predict/3` fits a BSTS model on a window of pre-period data and projects a counterfactual forward. The `TVAttribution` wrapper then takes this counterfactual and runs Shapley attribution against it.
+
+Two variants are shown:
+
+1. **`TVAttribution.attribute_from_baseline/4`**: Takes a pre-computed baseline (from the rolling fit) and runs attribution. Useful when you want to separate the baseline estimation from the attribution step.
+2. **`TVAttribution.attribute/3`**: An all-in-one wrapper that handles model fitting, causal impact, and attribution in a single call. This is the "just give me the answer" API for TV teams.
+
 ```elixir
 {rolling_cf, rolling_fit} =
   RollingBaseline.fit_and_predict(
@@ -1237,6 +1474,15 @@ tv_result =
 
 _Story beat:_ The same causal machinery now evaluates campaigns and product interventions beyond TV.
 
+### Same engine, different domains
+
+The underlying statistical method — BSTS + counterfactual — is domain-agnostic. What changes across use cases is the *interface*: what inputs a user provides and how results are labeled.
+
+- **`MarketingLift`**: Takes a campaign descriptor (channel, start/end indices, baseline period) and reports lift in marketing terms (cumulative lift, significance). Designed for digital marketing teams measuring incrementality of email, paid social, or display campaigns.
+- **`PolicyEvaluator`**: Takes an intervention descriptor (policy name, intervention date, outcome metric) and reports results in interrupted time series (ITS) terms. This is the same framework used in public health to evaluate policy changes — the statistical logic is identical to causal impact, but the API speaks the language of policy evaluation.
+
+Both wrappers accept the same tuning options (seasonality, num_samples, burn_in, seed) and internally delegate to `CausalImpact`.
+
 ```elixir
 campaign = %{
   name: "midnight_spike_tv",
@@ -1282,6 +1528,24 @@ policy_result =
 ## 18) Validation and calibration
 
 _Story beat:_ Before publishing results, we try to break our own conclusion with diagnostics and calibration checks.
+
+### Why validation matters
+
+A model that fits the pre-period well might still produce a poor counterfactual. The effect estimate is only as trustworthy as the counterfactual it's based on. Validation asks: **are there signs that the model is misspecified or that the effect estimate is fragile?**
+
+This section runs five diagnostic checks:
+
+1. **Prediction error**: How accurately does the baseline predict the post-period observations? High error suggests the model doesn't generalize well beyond the training period.
+
+2. **Coverage**: What fraction of actual post-period values fall within the model's prediction intervals? If the model claims 95% intervals but only 70% of actuals land inside them, the uncertainty is underestimated — the effect might be an artifact of overconfident intervals.
+
+3. **Durbin-Watson statistic**: Tests for autocorrelation in the residuals (actual minus predicted). Values near 2.0 indicate no autocorrelation. Values significantly below 2.0 mean the model is missing a systematic pattern — the residuals have structure the model should have captured. This often points to missing seasonality or trend components.
+
+4. **Placebo test**: Apply the same causal inference procedure to a period where *no intervention happened*. If the method finds a "significant effect" during a placebo window, it's detecting false positives — the model is too eager to declare significance, and you can't trust the real result either.
+
+5. **Effect stability**: Check whether the cumulative effect estimate changes dramatically as you extend the post-period window. A stable effect that accumulates steadily is more credible than one that swings wildly with each additional hour.
+
+The `Validation.assess/1` function aggregates these checks into pass/fail verdicts. A result is "release-ready" only if all checks pass.
 
 ```elixir
 actual_t = Nx.tensor(post_obs)
@@ -1341,6 +1605,15 @@ assessment =
   release_ready?: Enum.all?(assessment, fn {_k, v} -> v in [:pass, :skip] end)
 }
 ```
+
+### Calibration: can the method recover a known lift?
+
+The ultimate sanity check: generate a completely new synthetic dataset with a known lift (40.0 units injected into the post-period), run the full causal impact estimator on it, and check:
+
+- Does the 95% credible interval **cover** the true lift? (If not, the intervals are miscalibrated.)
+- How close is the **posterior mean** to the true value? (The `relative_error` measures this as a fraction of the true lift.)
+
+This is distinct from the DGP in Section 3 — it uses a simple local-level model with fresh random data, testing the method's ability to recover a *different* ground truth in a *different* setting.
 
 ```elixir
 calibration =
@@ -1422,13 +1695,21 @@ _Story beat:_ Optional side quests to stress-test intuition and build muscle mem
 
 _Story beat:_ Debrief complete. You now have a full campaign-measurement playbook from first signal to validated decision.
 
-If you completed this notebook, you have touched:
+If you completed this notebook, you have built up the following statistical concepts layer by layer:
 
-* synthetic DGP + nonlinear effect transforms,
-* filtering, smoothing, posterior simulation,
-* scalar and structured MCMC,
-* causal impact and intervention-level APIs,
-* overlap-aware attribution (Shapley),
-* forecasting, anomaly detection, and validation calibration.
+| Section | Statistical concept | What you learned |
+|---------|-------------------|------------------|
+| 3 | Data generating process | Why synthetic data with known truth is essential for validating statistical methods |
+| 4 | Adstock + Hill saturation | How marketing effects carry over in time and saturate with intensity |
+| 5 | Kalman filtering | Online Bayesian state estimation — the predict/update cycle that tracks latent state |
+| 6 | RTS smoothing | How conditioning on the full series (hindsight) improves latent state estimates |
+| 7 | Gibbs sampling / MCMC | How to sample from a joint posterior when no closed-form solution exists |
+| 8 | Structured state-space models | Composing trend, seasonality, and regression into an interpretable baseline model |
+| 9 | Causal impact | The counterfactual approach to causal inference — actual minus "what would have happened" |
+| 11 | Covariate selection | Screening controls to avoid overfitting while improving counterfactual accuracy |
+| 12 | Shapley values | Fair credit assignment across overlapping interventions using cooperative game theory |
+| 14 | Bayesian forecasting | Posterior predictive distributions with calibrated uncertainty intervals |
+| 15 | Anomaly detection | Using filter prediction errors as z-scores for statistical process control |
+| 18 | Validation | Placebo tests, coverage checks, residual diagnostics, and calibration to build trust |
 
-That is the core and advanced statistical surface area of this library.
+That is the core and advanced statistical surface area of this library. Each section builds on the previous ones — the Kalman filter feeds the smoother, the smoother feeds the Gibbs sampler, the sampler feeds causal impact, and the validation checks close the loop by stress-testing the whole chain.
