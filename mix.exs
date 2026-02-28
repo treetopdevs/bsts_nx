@@ -33,6 +33,7 @@ defmodule BstsNx.MixProject do
     [
       # Nx provides numerical computing primitives used throughout the library.
       {:nx, "~> 0.11.0"},
+      {:emlx, "~> 0.2.0", optional: true},
       {:exla, "~> 0.11.0", optional: true},
       {:xla, "~> 0.10.0", optional: true},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
