@@ -94,7 +94,7 @@ defmodule BstsNx.GibbsGeneralTest do
       end)
 
     assert length(samples) == 2
-    assert log =~ "missing values are skipped"
+    assert log =~ "missing observations"
 
     Enum.each(samples, fn s ->
       assert length(s.states) == 5

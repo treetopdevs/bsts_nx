@@ -664,38 +664,6 @@ defmodule BstsNx.Smoother do
     end
   end
 
-  # Matrix-covariance Cholesky used by simulation smoothing.
-  # Symmetrizes the covariance and tries a nearest-PSD projection before
-  # degrading to zero process noise.
-  defp safe_cholesky_or_zero(cov, label) do
-    cov_sym = symmetrize(cov)
-
-    try do
-      BstsNx.Utils.safe_cholesky(cov_sym)
-    rescue
-      _ ->
-        case project_to_psd_cholesky(cov_sym) do
-          {:ok, chol} ->
-            Logger.warning(
-              "Simulation smoother: #{label} not positive-definite; " <>
-                "projecting to nearest PSD covariance"
-            )
-
-            chol
-
-          :error ->
-            Logger.warning(
-              "Simulation smoother: #{label} not positive-definite even after PSD projection; " <>
-                "using zero process noise for this step"
-            )
-
-            Nx.broadcast(Nx.tensor(0.0), Nx.shape(cov_sym))
-        end
-    end
-  end
-
-  defp symmetrize(t), do: Nx.multiply(Nx.add(t, transpose(t)), 0.5)
-
   defp project_to_psd_cholesky(cov_sym) do
     projected =
       try do
