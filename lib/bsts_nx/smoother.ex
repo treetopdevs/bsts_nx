@@ -291,15 +291,14 @@ defmodule BstsNx.Smoother do
       steps.
 
     * `:key` – a PRNG key (`Nx` tensor of shape `{2}`) used to generate random
-      draws. When supplied, the key is split into a sequence of subkeys via
-      `Nx.Random.split/2`. The final key is returned as part of the result to
-      facilitate reproducible sampling across calls.
+      draws. When supplied, draws are generated in one batched `Nx.Random.normal/4`
+      call and the returned next key is propagated for reproducible chaining.
 
   The return value is a tuple `{states, new_key}` where `states` is the
   sampled trajectory (list of tensors) and `new_key` is the final PRNG key after
   consumption of random draws. When neither `:noise_list` nor `:key` is provided,
-  a fresh key is generated using a unique integer and split into per-step
-  subkeys. The final key is returned to support reproducibility across calls.
+  a fresh key is generated using a unique integer and consumed in a single batched
+  random draw. The final key is returned to support reproducibility across calls.
 
   ## Examples
 
@@ -342,34 +341,11 @@ defmodule BstsNx.Smoother do
           out_key = key_opt || Nx.Random.key(:erlang.unique_integer([:positive]))
           {noise_list_opt, out_key}
 
-        key_opt != nil ->
-          # Split key into t+1 subkeys: t for noise draws and 1 for the returned key
-          keys_tensor = Nx.Random.split(key_opt, parts: t + 1)
-          # first t keys for noise, last key for next_key
-          noise_samples =
-            Enum.map(0..(t - 1), fn idx ->
-              subkey = split_key_at(keys_tensor, idx)
-              {sample, _unused} = Nx.Random.normal(subkey, 0.0, 1.0, shape: state_shape)
-              sample
-            end)
-
-          next_key = split_key_at(keys_tensor, t)
-          {noise_samples, next_key}
-
         true ->
-          # Generate random draws using a single base key split across steps
-          seed = :erlang.unique_integer([:positive])
-          base_key = Nx.Random.key(seed)
-          keys_tensor = Nx.Random.split(base_key, parts: t + 1)
-
-          noise_samples =
-            Enum.map(0..(t - 1), fn idx ->
-              subkey = split_key_at(keys_tensor, idx)
-              {sample, _unused} = Nx.Random.normal(subkey, 0.0, 1.0, shape: state_shape)
-              sample
-            end)
-
-          next_key = split_key_at(keys_tensor, t)
+          draw_key = key_opt || Nx.Random.key(:erlang.unique_integer([:positive]))
+          draw_shape = Tuple.insert_at(state_shape, 0, t)
+          {noise_batch, next_key} = Nx.Random.normal(draw_key, 0.0, 1.0, shape: draw_shape)
+          noise_samples = Enum.map(0..(t - 1), &take_time_slice_at(noise_batch, &1))
           {noise_samples, next_key}
       end
 
@@ -467,8 +443,8 @@ defmodule BstsNx.Smoother do
     {sampled_states, key_out}
   end
 
-  defp split_key_at(keys, idx) do
-    Nx.slice_along_axis(keys, idx, 1, axis: 0)
+  defp take_time_slice_at(tensor, idx) do
+    Nx.slice_along_axis(tensor, idx, 1, axis: 0)
     |> Nx.squeeze(axes: [0])
   end
 
@@ -500,37 +476,11 @@ defmodule BstsNx.Smoother do
     end
   end
 
-  # Nx 0.6 emits range warnings for some dot rank combinations on newer
-  # Elixir versions. Use explicit multiply/sum forms for common low-rank
-  # cases to keep smoother paths stable across the CI matrix.
+  # Nx.dot handles all rank combinations used here; keep scalar/scalar explicit.
   defp compat_dot(a, b) do
     case {Nx.rank(a), Nx.rank(b)} do
       {0, 0} ->
         Nx.multiply(a, b)
-
-      {2, 1} ->
-        b_row = Nx.reshape(b, {1, Nx.axis_size(b, 0)})
-        Nx.multiply(a, b_row) |> Nx.sum(axes: [1])
-
-      {2, 2} ->
-        {m, n} = Nx.shape(a)
-        {n_b, p} = Nx.shape(b)
-
-        if n != n_b do
-          raise ArgumentError,
-                "incompatible matrix shapes for multiplication: #{inspect(Nx.shape(a))} and #{inspect(Nx.shape(b))}"
-        end
-
-        a_expanded = Nx.reshape(a, {m, n, 1})
-        b_expanded = Nx.reshape(b, {1, n, p})
-        Nx.multiply(a_expanded, b_expanded) |> Nx.sum(axes: [1])
-
-      {1, 2} ->
-        a_col = Nx.reshape(a, {Nx.axis_size(a, 0), 1})
-        Nx.multiply(a_col, b) |> Nx.sum(axes: [0])
-
-      {1, 1} ->
-        Nx.multiply(a, b) |> Nx.sum()
 
       _ ->
         dot(a, b)

@@ -129,14 +129,11 @@ defmodule BstsNx.Utils do
   @spec has_non_finite?(Nx.t()) :: boolean()
   def has_non_finite?(tensor) do
     tensor
-    |> Nx.to_flat_list()
-    |> Enum.any?(fn
-      :nan -> true
-      :infinity -> true
-      :neg_infinity -> true
-      v when is_float(v) -> v != v
-      _ -> false
-    end)
+    |> Nx.is_nan()
+    |> Nx.logical_or(Nx.is_infinity(tensor))
+    |> Nx.any()
+    |> Nx.to_number()
+    |> Kernel.==(1)
   end
 
   defp solve_with_jitter(a, b) do
@@ -184,29 +181,10 @@ defmodule BstsNx.Utils do
     end
   end
 
-  # Nx 0.6's non-batched solve path emits an Elixir range warning on newer
-  # runtimes. Solving as a single-item batch avoids that path with identical
-  # numerical output for rank-2 systems.
+  # On Nx 0.11+, direct solve is stable and fastest for the rank patterns used
+  # in this project.
   defp linalg_solve_compat(a, b) do
-    solve_fn = fn ->
-      if Nx.rank(a) == 2 and Nx.rank(b) in [1, 2] do
-        Nx.LinAlg.solve(Nx.new_axis(a, 0), Nx.new_axis(b, 0))
-        |> Nx.squeeze(axes: [0])
-      else
-        Nx.LinAlg.solve(a, b)
-      end
-    end
-
-    # Elixir >= 1.15: capture internal Nx range diagnostics so they do not
-    # spam runtime output. Skip this on EXLA, where wrapping solve in
-    # Code.with_diagnostics can be unstable on some environments.
-    if function_exported?(Code, :with_diagnostics, 1) and
-         not match?({EXLA.Backend, _}, Nx.default_backend()) do
-      {result, _diagnostics} = apply(Code, :with_diagnostics, [solve_fn])
-      result
-    else
-      solve_fn.()
-    end
+    Nx.LinAlg.solve(a, b)
   end
 
   defp scalar_or_1x1_solve(a, b) do
@@ -279,35 +257,11 @@ defmodule BstsNx.Utils do
     end
   end
 
-  # Rank-safe dot for Nx 0.6 compatibility
+  # Nx.dot handles all rank combinations we use; keep scalar/scalar explicit.
   defp compat_dot(a, b) do
     case {Nx.rank(a), Nx.rank(b)} do
       {0, 0} ->
         Nx.multiply(a, b)
-
-      {2, 1} ->
-        b_row = Nx.reshape(b, {1, Nx.axis_size(b, 0)})
-        Nx.multiply(a, b_row) |> Nx.sum(axes: [1])
-
-      {2, 2} ->
-        {m, n} = Nx.shape(a)
-        {n_b, p} = Nx.shape(b)
-
-        if n != n_b do
-          raise ArgumentError,
-                "incompatible matrix shapes for multiplication: #{inspect(Nx.shape(a))} and #{inspect(Nx.shape(b))}"
-        end
-
-        a_expanded = Nx.reshape(a, {m, n, 1})
-        b_expanded = Nx.reshape(b, {1, n, p})
-        Nx.multiply(a_expanded, b_expanded) |> Nx.sum(axes: [1])
-
-      {1, 2} ->
-        a_col = Nx.reshape(a, {Nx.axis_size(a, 0), 1})
-        Nx.multiply(a_col, b) |> Nx.sum(axes: [0])
-
-      {1, 1} ->
-        Nx.multiply(a, b) |> Nx.sum()
 
       _ ->
         Nx.dot(a, b)

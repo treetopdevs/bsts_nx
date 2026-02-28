@@ -594,22 +594,19 @@ defmodule BstsNx.GibbsSampler do
         {sampled_states, new_key} =
           BstsNx.Smoother.simulate_with_key(smoothed, filtered, predicted, spec.f, key: k)
 
-        # 4. Extract filtered covariances
-        {_means, covs} = Enum.unzip(filtered)
-
-        # 5. Process residuals: e_t = x_t - F * x_{t-1}
+        # 4. Process residuals: e_t = x_t - F * x_{t-1}
         per_dim_ss = process_residuals_structured(sampled_states, spec.f, spec.q_specs)
 
-        # 6. Observation residuals: SS_obs = Σ (y_t - H_t · x_t)²
+        # 5. Observation residuals: SS_obs = Σ (y_t - H_t · x_t)²
         {obs_ss, t_obs} = obs_residuals_structured(observations, sampled_states, h_list)
 
-        # 7. Resample each Q diagonal entry independently
+        # 6. Resample each Q diagonal entry independently
         {q_new, key_after_q} = resample_q_components(spec.q_specs, per_dim_ss, t, new_key)
 
-        # 8. Rebuild Q matrix
+        # 7. Rebuild Q matrix
         q_matrix_new = rebuild_q(q_prev, q_new)
 
-        # 9. Resample observation variance
+        # 8. Resample observation variance
         shape_r = spec.obs_prior_shape + t_obs / 2
         scale_r = spec.obs_prior_scale + obs_ss / 2
 
@@ -618,6 +615,8 @@ defmodule BstsNx.GibbsSampler do
 
         acc2 =
           if iter > burn_in and rem(iter - burn_in, thin) == 0 do
+            {_means, covs} = Enum.unzip(filtered)
+
             sample_map = %{
               states: sampled_states,
               state_covs: covs,
@@ -751,33 +750,33 @@ defmodule BstsNx.GibbsSampler do
           {r_sample, key_next} =
             BstsNx.Distributions.inv_gamma_sample_with_key(shape_r, scale_r, key_after_beta)
 
-          q_matrix_full =
-            build_full_q_matrix(
-              ctx.state_dim,
-              ctx.struct_full_indices,
-              q_struct_new
-            )
-
-          full_states =
-            build_full_state_trajectory(
-              sampled_struct_states,
-              beta_new,
-              ctx.state_dim,
-              ctx.struct_full_indices,
-              ctx.reg_full_indices
-            )
-
-          full_covs =
-            build_full_covariances(
-              struct_covs,
-              beta_cov,
-              ctx.state_dim,
-              ctx.struct_full_indices,
-              ctx.reg_full_indices
-            )
-
           acc2 =
             if iter > burn_in and rem(iter - burn_in, thin) == 0 do
+              q_matrix_full =
+                build_full_q_matrix(
+                  ctx.state_dim,
+                  ctx.struct_full_indices,
+                  q_struct_new
+                )
+
+              full_states =
+                build_full_state_trajectory(
+                  sampled_struct_states,
+                  beta_new,
+                  ctx.state_dim,
+                  ctx.struct_full_indices,
+                  ctx.reg_full_indices
+                )
+
+              full_covs =
+                build_full_covariances(
+                  struct_covs,
+                  beta_cov,
+                  ctx.state_dim,
+                  ctx.struct_full_indices,
+                  ctx.reg_full_indices
+                )
+
               sample_map = %{
                 states: full_states,
                 state_covs: full_covs,
@@ -1212,36 +1211,11 @@ defmodule BstsNx.GibbsSampler do
     |> Enum.reduce(0.0, fn {x, y}, acc -> acc + x * y end)
   end
 
-  # Nx 0.6 emits range warnings for some dot rank combinations on newer
-  # Elixir runtimes. Handle common low-rank products explicitly.
+  # Nx.dot handles all rank combinations used here; keep scalar/scalar explicit.
   defp compat_dot(a, b) do
     case {Nx.rank(a), Nx.rank(b)} do
       {0, 0} ->
         Nx.multiply(a, b)
-
-      {2, 1} ->
-        b_row = Nx.reshape(b, {1, Nx.axis_size(b, 0)})
-        Nx.multiply(a, b_row) |> Nx.sum(axes: [1])
-
-      {2, 2} ->
-        {m, n} = Nx.shape(a)
-        {n_b, p} = Nx.shape(b)
-
-        if n != n_b do
-          raise ArgumentError,
-                "incompatible matrix shapes for multiplication: #{inspect(Nx.shape(a))} and #{inspect(Nx.shape(b))}"
-        end
-
-        a_expanded = Nx.reshape(a, {m, n, 1})
-        b_expanded = Nx.reshape(b, {1, n, p})
-        Nx.multiply(a_expanded, b_expanded) |> Nx.sum(axes: [1])
-
-      {1, 2} ->
-        a_col = Nx.reshape(a, {Nx.axis_size(a, 0), 1})
-        Nx.multiply(a_col, b) |> Nx.sum(axes: [0])
-
-      {1, 1} ->
-        Nx.multiply(a, b) |> Nx.sum()
 
       _ ->
         Nx.dot(a, b)
