@@ -237,37 +237,31 @@ defmodule BstsNx.Forecaster do
   def decompose(%{posterior_samples: samples, spec: spec, training_length: t}) do
     h = spec.h
 
-    # Extract per-sample state trajectories and project through H
-    n_samples = length(samples)
+    sample_state_tensors = Enum.map(samples, fn sample -> Nx.stack(sample.states) end)
+    mean_states_t = sample_state_tensors |> Nx.stack() |> Nx.mean(axes: [0])
+    {_t_steps, state_dim} = Nx.shape(mean_states_t)
 
-    # Convert each sample's states list to :array for O(1) random access
-    sample_state_arrays = Enum.map(samples, fn sample -> :array.from_list(sample.states) end)
-
-    # Compute mean state at each time step across all samples
     mean_states =
-      Enum.map(0..(t - 1), fn step ->
-        step_states =
-          Enum.map(sample_state_arrays, fn arr ->
-            :array.get(step, arr) |> Nx.to_flat_list()
-          end)
-
-        # Average across samples for each state dimension
-        Enum.zip_with(step_states, fn vals ->
-          Enum.sum(vals) / n_samples
-        end)
-      end)
-
-    # Project mean states through H to get fitted values
-    # Convert H to :array when time-varying for O(1) access
-    h_arr = if is_list(h), do: :array.from_list(h), else: nil
+      mean_states_t
+      |> Nx.to_flat_list()
+      |> Enum.chunk_every(state_dim)
+      |> Enum.take(t)
 
     fitted =
-      Enum.with_index(mean_states, fn state_list, idx ->
-        state = Nx.tensor(state_list)
-        h_t = if h_arr, do: :array.get(idx, h_arr), else: h
-        h_row = if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
-        Nx.to_number(compat_dot(h_row, state))
-      end)
+      cond do
+        is_list(h) ->
+          h_rows = h |> Enum.map(&h_to_row_tensor/1) |> Nx.stack()
+
+          h_rows
+          |> Nx.multiply(mean_states_t)
+          |> Nx.sum(axes: [1])
+          |> Nx.to_flat_list()
+          |> Enum.take(t)
+
+        true ->
+          h_row = h_to_row_tensor(h)
+          mean_states_t |> Nx.dot(h_row) |> Nx.to_flat_list() |> Enum.take(t)
+      end
 
     %{
       fitted: fitted,
@@ -285,7 +279,7 @@ defmodule BstsNx.Forecaster do
          base_key,
          future_regressors
        ) do
-    keys = Nx.Random.split(base_key, parts: length(samples))
+    sample_key_rows = Nx.Random.split(base_key, parts: length(samples)) |> Nx.to_list()
     n_state = Nx.axis_size(spec.f, 0)
 
     # Build per-step H: if future_regressors provided, use build_future_h;
@@ -305,7 +299,10 @@ defmodule BstsNx.Forecaster do
           List.duplicate(static_h, horizon)
       end
 
-    Enum.with_index(samples, fn sample, idx ->
+    h_rows = Enum.map(h_list, &h_to_row_tensor/1)
+
+    Enum.zip(samples, sample_key_rows)
+    |> Enum.map(fn {sample, sample_key_row} ->
       final_state = List.last(sample.states)
       q_matrix = sample.q_matrix
       obs_var = Nx.to_number(sample.obs_var)
@@ -313,31 +310,22 @@ defmodule BstsNx.Forecaster do
 
       q_diag = Nx.take_diagonal(q_matrix)
       q_sds = Nx.sqrt(Nx.max(q_diag, Nx.tensor(0.0)))
-
-      sample_key = split_key_at(keys, idx)
-      step_keys = Nx.Random.split(sample_key, parts: horizon)
+      sample_key = Nx.tensor(sample_key_row, type: Nx.type(base_key))
+      key_pair = Nx.Random.split(sample_key, parts: 2)
+      key_state = split_key_at(key_pair, 0)
+      key_obs = split_key_at(key_pair, 1)
+      {proc_noise, _} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {horizon, n_state})
+      {obs_noise, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {horizon})
+      proc_rows = proc_noise |> Nx.multiply(q_sds) |> Nx.to_list()
+      obs_vals = Nx.to_flat_list(obs_noise)
 
       # Iterate h_list directly to avoid O(n²) Enum.at access
       {_, trajectory} =
-        h_list
-        |> Enum.with_index()
-        |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_t, step}, {state, acc} ->
-          step_key = split_key_at(step_keys, step)
-          sk = Nx.Random.split(step_key, parts: 2)
-          key_state = split_key_at(sk, 0)
-          key_obs = split_key_at(sk, 1)
-
-          # Process noise
-          {z_state, _} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {n_state})
-          noise = Nx.multiply(z_state, q_sds)
-          next_state = Nx.add(compat_dot(spec.f, state), noise)
-
-          # Observation with per-step H
-          h_row = if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
+        Enum.zip(h_rows, Enum.zip(proc_rows, obs_vals))
+        |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_row, {proc_row, z_obs}}, {state, acc} ->
+          next_state = Nx.add(compat_dot(spec.f, state), Nx.tensor(proc_row, type: Nx.type(state)))
           y_mean = Nx.to_number(compat_dot(h_row, next_state))
-          {z_obs, _} = Nx.Random.normal(key_obs, 0.0, 1.0)
-          y = y_mean + Nx.to_number(z_obs) * obs_sd
-
+          y = y_mean + z_obs * obs_sd
           {next_state, [y | acc]}
         end)
 
@@ -346,19 +334,20 @@ defmodule BstsNx.Forecaster do
   end
 
   defp predict_scalar(%{posterior_samples: samples}, horizon, base_key) do
-    keys = Nx.Random.split(base_key, parts: length(samples))
+    sample_key_rows = Nx.Random.split(base_key, parts: length(samples)) |> Nx.to_list()
 
-    Enum.with_index(samples, fn sample, idx ->
+    Enum.zip(samples, sample_key_rows)
+    |> Enum.map(fn {sample, sample_key_row} ->
       final_state = Nx.to_number(List.last(sample.states))
       q = Nx.to_number(sample.process_var)
       r = Nx.to_number(sample.obs_var)
       sd_q = :math.sqrt(max(q, 0.0))
       sd_r = :math.sqrt(max(r, 0.0))
 
-      sample_key = split_key_at(keys, idx)
-      sk = Nx.Random.split(sample_key, parts: 2)
-      key_process = split_key_at(sk, 0)
-      key_obs = split_key_at(sk, 1)
+      sample_key = Nx.tensor(sample_key_row, type: Nx.type(base_key))
+      key_pair = Nx.Random.split(sample_key, parts: 2)
+      key_process = split_key_at(key_pair, 0)
+      key_obs = split_key_at(key_pair, 1)
       {proc_noise, _} = Nx.Random.normal(key_process, 0.0, 1.0, shape: {horizon})
       {obs_noise, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {horizon})
 
@@ -380,39 +369,52 @@ defmodule BstsNx.Forecaster do
   defp aggregate_trajectories(trajectories, horizon, alpha) do
     n = length(trajectories)
 
-    # Transpose: from list-of-trajectories to list-of-timesteps.
-    # Enum.zip_with/2 is O(horizon * n) vs O(horizon² * n) with Enum.at.
-    per_step_values =
-      if n == 0,
-        do: List.duplicate([], horizon),
-        else: Enum.zip_with(trajectories, & &1)
+    if n == 0 do
+      %{
+        mean: List.duplicate(0.0, horizon),
+        sd: List.duplicate(0.0, horizon),
+        lower: List.duplicate(0.0, horizon),
+        upper: List.duplicate(0.0, horizon),
+        horizon: horizon,
+        alpha: alpha
+      }
+    else
+      traj_t = Nx.tensor(trajectories, type: {:f, 64})
+      means = Nx.mean(traj_t, axes: [0]) |> Nx.to_flat_list()
 
-    per_step =
-      Enum.map(per_step_values, fn vals ->
-        vals = Enum.sort(vals)
+      sds =
+        if n < 2 do
+          List.duplicate(0.0, horizon)
+        else
+          Nx.standard_deviation(traj_t, axes: [0], ddof: 1) |> Nx.to_flat_list()
+        end
 
-        mean = Enum.sum(vals) / n
+      sorted = Nx.sort(traj_t, axis: 0)
+      last = n - 1
+      lower_idx = trunc(Float.floor(alpha / 2.0 * last))
+      upper_idx = trunc(Float.ceil((1.0 - alpha / 2.0) * last))
 
-        sd =
-          if n < 2 do
-            0.0
-          else
-            ss = Enum.reduce(vals, 0.0, fn v, acc -> acc + (v - mean) * (v - mean) end)
-            :math.sqrt(ss / (n - 1))
-          end
+      lower =
+        sorted
+        |> Nx.slice([max(lower_idx, 0), 0], [1, horizon])
+        |> Nx.squeeze(axes: [0])
+        |> Nx.to_flat_list()
 
-        {lower, upper} = BstsNx.Utils.percentile_interval(vals, n, alpha)
-        {mean, sd, lower, upper}
-      end)
+      upper =
+        sorted
+        |> Nx.slice([min(upper_idx, last), 0], [1, horizon])
+        |> Nx.squeeze(axes: [0])
+        |> Nx.to_flat_list()
 
-    %{
-      mean: Enum.map(per_step, &elem(&1, 0)),
-      sd: Enum.map(per_step, &elem(&1, 1)),
-      lower: Enum.map(per_step, &elem(&1, 2)),
-      upper: Enum.map(per_step, &elem(&1, 3)),
-      horizon: horizon,
-      alpha: alpha
-    }
+      %{
+        mean: means,
+        sd: sds,
+        lower: lower,
+        upper: upper,
+        horizon: horizon,
+        alpha: alpha
+      }
+    end
   end
 
   defp infer_regression_dims(spec, opts, :structured) do
@@ -458,6 +460,15 @@ defmodule BstsNx.Forecaster do
     |> Enum.map(&(&1 + 0.0))
   end
 
+  defp h_to_row_tensor(%Nx.Tensor{} = h_t) do
+    if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
+  end
+
+  defp split_key_at(keys, idx) do
+    Nx.slice_along_axis(keys, idx, 1, axis: 0)
+    |> Nx.squeeze(axes: [0])
+  end
+
   # Nx.dot handles all rank combinations used here; keep scalar/scalar explicit.
   defp compat_dot(a, b) do
     case {Nx.rank(a), Nx.rank(b)} do
@@ -467,11 +478,6 @@ defmodule BstsNx.Forecaster do
       _ ->
         Nx.dot(a, b)
     end
-  end
-
-  defp split_key_at(keys, idx) do
-    Nx.slice_along_axis(keys, idx, 1, axis: 0)
-    |> Nx.squeeze(axes: [0])
   end
 
   # Observation coercion delegated to ModelBuilder.coerce_obs/1

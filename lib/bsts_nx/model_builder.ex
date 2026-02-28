@@ -345,13 +345,13 @@ defmodule BstsNx.ModelBuilder do
         do: Nx.slice(h_last, [0, 0], [1, n_non_reg]),
         else: Nx.reshape(Nx.slice(h_last, [0], [n_non_reg]), {1, n_non_reg})
 
-    Enum.map(0..(horizon - 1), fn i ->
-      reg_row =
-        Nx.slice_along_axis(future_t, i, 1, axis: 0)
-        |> Nx.reshape({1, p})
+    static_h_batched = Nx.broadcast(static_h, {horizon, n_non_reg})
+    combined = Nx.concatenate([static_h_batched, future_t], axis: 1)
+    n_cols = n_non_reg + p
 
-      Nx.concatenate([static_h, reg_row], axis: 1)
-    end)
+    combined
+    |> Nx.to_list()
+    |> Enum.map(fn row -> Nx.reshape(Nx.tensor(row), {1, n_cols}) end)
   end
 
   defp build_base_spec(_observations, nil), do: nil
@@ -469,22 +469,12 @@ defmodule BstsNx.ModelBuilder do
   defp build_selected_regressors(_regressors, []), do: nil
 
   defp build_selected_regressors(regressors, selected_indices) do
-    n = Nx.axis_size(regressors, 0)
-
-    selected_indices
-    |> Enum.map(fn j -> Nx.slice(regressors, [0, j], [n, 1]) end)
-    |> Nx.concatenate(axis: 1)
+    Nx.take(regressors, Nx.tensor(selected_indices, type: {:s, 64}), axis: 1)
   end
 
   defp normalize_number(n) when is_number(n) do
     f = n * 1.0
-
-    case :erlang.float_to_binary(f, [:compact]) do
-      "nan" -> :error
-      "inf" -> :error
-      "-inf" -> :error
-      _ -> {:ok, f}
-    end
+    if f == f and abs(f) < 1.0e300, do: {:ok, f}, else: :error
   end
 
   defp normalize_number(_), do: :error

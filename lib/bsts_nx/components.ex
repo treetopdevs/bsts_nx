@@ -148,10 +148,10 @@ defmodule BstsNx.Components do
     f = build_seasonal_transition(dim)
 
     # Q: innovation variance only on the first state dimension
-    q = Nx.broadcast(0.0, {dim, dim}) |> Nx.put_slice([0, 0], Nx.tensor([[process_var]]))
+    q = [process_var | List.duplicate(0.0, dim - 1)] |> Nx.tensor() |> Nx.make_diagonal()
 
     # H: observe only the current seasonal effect
-    h = Nx.broadcast(0.0, {1, dim}) |> Nx.put_slice([0, 0], Nx.tensor([[1.0]]))
+    h = Nx.tensor([[1.0 | List.duplicate(0.0, dim - 1)]])
 
     %{f: f, q: q, h: h}
   end
@@ -419,7 +419,7 @@ defmodule BstsNx.Components do
     f = build_seasonal_transition(dim)
 
     # H: observe only the current seasonal effect
-    h = Nx.broadcast(0.0, {1, dim}) |> Nx.put_slice([0, 0], Nx.tensor([[1.0]]))
+    h = Nx.tensor([[1.0 | List.duplicate(0.0, dim - 1)]])
 
     # Initial state: zeros (no prior seasonal preference)
     x0 = Nx.broadcast(0.0, {dim})
@@ -539,10 +539,12 @@ defmodule BstsNx.Components do
             "time-varying H lists must have same length (got #{length(h1)} and #{length(h2)})"
     end
 
-    Enum.zip(h1, h2)
-    |> Enum.map(fn {h1_t, h2_t} ->
-      Nx.concatenate([ensure_row(h1_t), ensure_row(h2_t)], axis: 1)
-    end)
+    h1_stack = h1 |> Enum.map(&ensure_row/1) |> Nx.stack()
+    h2_stack = h2 |> Enum.map(&ensure_row/1) |> Nx.stack()
+
+    Nx.concatenate([h1_stack, h2_stack], axis: 2)
+    |> Nx.to_list()
+    |> Enum.map(&Nx.tensor/1)
   end
 
   defp compose_h(%Nx.Tensor{} = h1, %Nx.Tensor{} = h2, _n1) do
@@ -551,18 +553,24 @@ defmodule BstsNx.Components do
 
   defp compose_h(%Nx.Tensor{} = h1, h2_list, _n1) when is_list(h2_list) do
     h1_row = ensure_row(h1)
+    h2_stack = h2_list |> Enum.map(&ensure_row/1) |> Nx.stack()
+    t_len = Nx.axis_size(h2_stack, 0)
+    h1_stack = Nx.broadcast(h1_row, {t_len, Nx.axis_size(h1_row, 0), Nx.axis_size(h1_row, 1)})
 
-    Enum.map(h2_list, fn h2_t ->
-      Nx.concatenate([h1_row, ensure_row(h2_t)], axis: 1)
-    end)
+    Nx.concatenate([h1_stack, h2_stack], axis: 2)
+    |> Nx.to_list()
+    |> Enum.map(&Nx.tensor/1)
   end
 
   defp compose_h(h1_list, %Nx.Tensor{} = h2, _n1) when is_list(h1_list) do
     h2_row = ensure_row(h2)
+    h1_stack = h1_list |> Enum.map(&ensure_row/1) |> Nx.stack()
+    t_len = Nx.axis_size(h1_stack, 0)
+    h2_stack = Nx.broadcast(h2_row, {t_len, Nx.axis_size(h2_row, 0), Nx.axis_size(h2_row, 1)})
 
-    Enum.map(h1_list, fn h1_t ->
-      Nx.concatenate([ensure_row(h1_t), h2_row], axis: 1)
-    end)
+    Nx.concatenate([h1_stack, h2_stack], axis: 2)
+    |> Nx.to_list()
+    |> Enum.map(&Nx.tensor/1)
   end
 
   # Ensures a tensor is a {1, n} row matrix
@@ -586,19 +594,17 @@ defmodule BstsNx.Components do
   end
 
   defp build_seasonal_transition(dim) when dim > 1 do
-    # First row: all -1's
-    first_row = Nx.broadcast(-1.0, {1, dim})
+    rows =
+      [List.duplicate(-1.0, dim)] ++
+        Enum.map(1..(dim - 1), fn row_idx ->
+          Enum.map(0..(dim - 1), fn col_idx -> if col_idx == row_idx - 1, do: 1.0, else: 0.0 end)
+        end)
 
-    # Bottom rows: [I_{dim-1} | 0_{(dim-1)×1}]
-    eye_part = Nx.eye(dim - 1)
-    zero_col = Nx.broadcast(0.0, {dim - 1, 1})
-    shift = Nx.concatenate([eye_part, zero_col], axis: 1)
-
-    Nx.concatenate([first_row, shift], axis: 0)
+    Nx.tensor(rows)
   end
 
   defp build_dynamic_regression_spec(regressors_t, opts) do
-    {t_len, p} = Nx.shape(regressors_t)
+    {_t_len, p} = Nx.shape(regressors_t)
     obs_var = Keyword.get(opts, :obs_var, 1.0)
     prior_shape = Keyword.get(opts, :prior_shape, 1.0)
     prior_scale = Keyword.get(opts, :prior_scale, 1.0)
@@ -632,9 +638,9 @@ defmodule BstsNx.Components do
 
     # Time-varying H: list of {1, p} tensors, one per timestep
     h_list =
-      Enum.map(0..(t_len - 1), fn i ->
-        Nx.slice(regressors_t, [i, 0], [1, p])
-      end)
+      regressors_t
+      |> Nx.to_list()
+      |> Enum.map(fn row -> Nx.reshape(Nx.tensor(row), {1, p}) end)
 
     q_specs =
       Enum.map(0..(p - 1), fn d ->
@@ -692,9 +698,9 @@ defmodule BstsNx.Components do
       end
 
     h_list =
-      Enum.map(0..(t_len - 1), fn i ->
-        Nx.slice(regressors_t, [i, 0], [1, p])
-      end)
+      regressors_t
+      |> Nx.to_list()
+      |> Enum.map(fn row -> Nx.reshape(Nx.tensor(row), {1, p}) end)
 
     %ModelSpec{
       f: Nx.eye(p),

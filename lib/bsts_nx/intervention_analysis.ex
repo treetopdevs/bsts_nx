@@ -349,13 +349,7 @@ defmodule BstsNx.InterventionAnalysis do
   end
 
   defp is_significant_filter?(summary) do
-    cum = summary.cumulative_effect
-
-    case {cum.lower, cum.upper} do
-      {:nan, _} -> false
-      {_, :nan} -> false
-      {lower, upper} -> lower > 0.0 or upper < 0.0
-    end
+    is_significant?(summary, 0.05)
   end
 
   defp format_num(n), do: ModelBuilder.format_num(n)

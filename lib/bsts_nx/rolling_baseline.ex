@@ -253,12 +253,8 @@ defmodule BstsNx.RollingBaseline do
 
     h_series = build_h_for_counterfactual(spec.h, n_state, n_reg, post_regressors, horizon)
 
-    {mean_acc, mean_sq_acc, var_acc, obs_var_acc} =
-      Enum.reduce(samples, {zeros(horizon), zeros(horizon), zeros(horizon), 0.0}, fn sample,
-                                                                                     {m_acc,
-                                                                                      m2_acc,
-                                                                                      v_acc,
-                                                                                      ov_acc} ->
+    per_sample =
+      Enum.map(samples, fn sample ->
         final_state = List.last(sample.states)
 
         final_cov =
@@ -282,30 +278,24 @@ defmodule BstsNx.RollingBaseline do
               forward_simulate_h(final_state, final_cov, spec.f, h_list, q_matrix, horizon)
           end
 
-        means_sq = Enum.map(means, &(&1 * &1))
-
-        {
-          add_lists(m_acc, means),
-          add_lists(m2_acc, means_sq),
-          add_lists(v_acc, vars),
-          ov_acc + obs_var
-        }
+        {Nx.tensor(means, type: {:f, 64}), Nx.tensor(vars, type: {:f, 64}), obs_var}
       end)
 
     n = length(samples)
+    mean_tensors = Enum.map(per_sample, &elem(&1, 0))
+    var_tensors = Enum.map(per_sample, &elem(&1, 1))
+    obs_var_acc = Enum.reduce(per_sample, 0.0, fn {_, _, ov}, acc -> acc + ov end)
 
-    mean = Enum.map(mean_acc, &(&1 / n))
-    mean_sq = Enum.map(mean_sq_acc, &(&1 / n))
-    process_var = Enum.map(var_acc, &(&1 / n))
-
-    between_var =
-      Enum.zip_with(mean_sq, mean, fn m2, m ->
-        max(m2 - m * m, 0.0)
-      end)
+    mean_stack = Nx.stack(mean_tensors)
+    var_stack = Nx.stack(var_tensors)
+    mean = Nx.mean(mean_stack, axes: [0])
+    mean_sq = Nx.mean(Nx.multiply(mean_stack, mean_stack), axes: [0])
+    process_var = Nx.mean(var_stack, axes: [0])
+    between_var = Nx.max(Nx.subtract(mean_sq, Nx.multiply(mean, mean)), 0.0)
 
     %{
-      mean: mean,
-      variance: Enum.zip_with(process_var, between_var, &(&1 + &2)),
+      mean: Nx.to_flat_list(mean),
+      variance: between_var |> Nx.add(process_var) |> Nx.to_flat_list(),
       obs_variance: obs_var_acc / n
     }
   end
@@ -377,13 +367,14 @@ defmodule BstsNx.RollingBaseline do
 
   defp posterior_q_means(samples, q_specs) do
     n = length(samples)
+    all_diags = Enum.map(samples, fn s -> Nx.take_diagonal(s.q_matrix) |> Nx.to_flat_list() end)
 
     Enum.reduce(q_specs, %{}, fn qs, acc ->
       dim = qs.dim_index
 
       sum =
-        Enum.reduce(samples, 0.0, fn sample, s ->
-          val = diagonal_value_at(sample.q_matrix, dim)
+        Enum.reduce(all_diags, 0.0, fn diag, s ->
+          val = Enum.at(diag, dim, 0.0)
           s + val
         end)
 
@@ -398,13 +389,14 @@ defmodule BstsNx.RollingBaseline do
   # variance component; reports conservative summaries across Q dimensions.
   defp compute_convergence(samples, %ModelSpec{} = spec) do
     obs_var_chain = Enum.map(samples, fn s -> Nx.to_number(s.obs_var) end)
+    all_diags = Enum.map(samples, fn s -> Nx.take_diagonal(s.q_matrix) |> Nx.to_flat_list() end)
 
     r_hat_obs = Diagnostics.split_r_hat(obs_var_chain)
     ess_obs = Diagnostics.ess_single(obs_var_chain)
 
     process_diags =
       Enum.map(spec.q_specs, fn qs ->
-        chain = extract_process_var_chain(samples, qs.dim_index)
+        chain = Enum.map(all_diags, &Enum.at(&1, qs.dim_index, 0.0))
 
         %{
           dim_index: qs.dim_index,
@@ -428,21 +420,6 @@ defmodule BstsNx.RollingBaseline do
       ess_process_var: ess_proc,
       converged: converged
     }
-  end
-
-  # Extracts the process variance chain for a specific Q diagonal dimension.
-  defp extract_process_var_chain(samples, dim) when is_integer(dim) do
-    Enum.map(samples, fn sample ->
-      diagonal_value_at(sample.q_matrix, dim)
-    end)
-  end
-
-  defp diagonal_value_at(q_matrix, dim) do
-    diag = Nx.take_diagonal(q_matrix)
-
-    Nx.take(diag, Nx.tensor([dim]))
-    |> Nx.squeeze()
-    |> Nx.to_number()
   end
 
   defp summarize_process_r_hat([]), do: :nan
@@ -516,15 +493,18 @@ defmodule BstsNx.RollingBaseline do
   # -- Private helpers --
 
   defp forward_simulate(state, cov, f, h_row, q_matrix, horizon) do
+    f_t = Nx.transpose(f)
+    h_col = Nx.transpose(h_row)
+
     {means_rev, vars_rev, _state, _cov} =
       Enum.reduce(1..horizon, {[], [], state, cov}, fn _t, {ms, vs, x, p} ->
         x_pred = Nx.dot(f, x)
-        p_pred = Nx.add(Nx.dot(Nx.dot(f, p), Nx.transpose(f)), q_matrix)
+        p_pred = Nx.add(Nx.dot(Nx.dot(f, p), f_t), q_matrix)
 
         y_mean = Nx.dot(h_row, x_pred) |> Nx.squeeze() |> Nx.to_number()
 
         y_var =
-          Nx.dot(Nx.dot(h_row, p_pred), Nx.transpose(h_row))
+          Nx.dot(Nx.dot(h_row, p_pred), h_col)
           |> Nx.squeeze()
           |> Nx.to_number()
 
@@ -536,10 +516,12 @@ defmodule BstsNx.RollingBaseline do
 
   # Forward-simulates with per-step time-varying H (list of {1, n_state} tensors).
   defp forward_simulate_h(state, cov, f, h_list, q_matrix, _horizon) do
+    f_t = Nx.transpose(f)
+
     {means_rev, vars_rev, _state, _cov} =
       Enum.reduce(h_list, {[], [], state, cov}, fn h_row, {ms, vs, x, p} ->
         x_pred = Nx.dot(f, x)
-        p_pred = Nx.add(Nx.dot(Nx.dot(f, p), Nx.transpose(f)), q_matrix)
+        p_pred = Nx.add(Nx.dot(Nx.dot(f, p), f_t), q_matrix)
 
         y_mean = Nx.dot(h_row, x_pred) |> Nx.squeeze() |> Nx.to_number()
 
@@ -614,11 +596,12 @@ defmodule BstsNx.RollingBaseline do
       end
 
     structural_h = Nx.slice(h0, [0, 0], [1, n_structural])
+    structural_h_batched = Nx.broadcast(structural_h, {horizon, n_structural})
+    combined = Nx.concatenate([structural_h_batched, post_regressors_t], axis: 1)
 
-    Enum.map(0..(horizon - 1), fn t ->
-      x_row = Nx.slice(post_regressors_t, [t, 0], [1, n_reg_effective])
-      Nx.concatenate([structural_h, x_row], axis: 1)
-    end)
+    combined
+    |> Nx.to_list()
+    |> Enum.map(fn row -> Nx.reshape(Nx.tensor(row), {1, n_state}) end)
   end
 
   # Splits :regressors from opts into pre-period (for build_spec/fit) and
@@ -683,7 +666,4 @@ defmodule BstsNx.RollingBaseline do
   defp to_float(v) when is_integer(v), do: v * 1.0
   defp to_float(%Nx.Tensor{} = t), do: Nx.to_number(t)
 
-  defp zeros(n), do: List.duplicate(0.0, n)
-
-  defp add_lists(a, b), do: Enum.zip_with(a, b, &(&1 + &2))
 end

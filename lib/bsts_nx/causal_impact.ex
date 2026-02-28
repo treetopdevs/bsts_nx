@@ -328,50 +328,74 @@ defmodule BstsNx.CausalImpact do
   def summary(result) do
     n_post = length(result.actual)
     m = length(result.point_effects)
-    # Transpose: from list-of-samples to list-of-timesteps.
-    # Enum.zip_with/2 is O(n_post * m) vs O(n_post² * m) with Enum.at.
-    per_time_effects =
-      if m == 0,
-        do: List.duplicate([], n_post),
-        else: Enum.zip_with(result.point_effects, & &1)
+    lower_idx = trunc(Float.floor(0.025 * max(m - 1, 0)))
+    upper_idx = trunc(Float.ceil(0.975 * max(m - 1, 0)))
 
-    mean_or_nan = fn vals ->
-      if m == 0, do: :nan, else: Enum.sum(vals) / m
-    end
-
-    sd_or_nan = fn vals, mean ->
-      if m < 2,
-        do: :nan,
-        else:
-          :math.sqrt(
-            Enum.reduce(vals, 0.0, fn x, acc -> acc + :math.pow(x - mean, 2) end) / (m - 1)
-          )
-    end
-
-    interval_or_nan = fn vals ->
-      if m < 2 do
-        {:nan, :nan}
-      else
-        sorted = Enum.sort(vals)
-        BstsNx.Utils.percentile_interval(sorted, m, 0.05)
-      end
-    end
-
-    # summarise each time step
     point_summaries =
-      Enum.map(per_time_effects, fn vals ->
-        mean = mean_or_nan.(vals)
-        sd = sd_or_nan.(vals, mean)
-        {lower, upper} = interval_or_nan.(vals)
-        %{mean: mean, sd: sd, lower: lower, upper: upper}
-      end)
+      cond do
+        m == 0 ->
+          List.duplicate(%{mean: :nan, sd: :nan, lower: :nan, upper: :nan}, n_post)
 
-    # summarise cumulative and relative effects
+        true ->
+          effects_t = Nx.tensor(result.point_effects, type: {:f, 64})
+          means = Nx.mean(effects_t, axes: [0]) |> Nx.to_flat_list()
+
+          sds =
+            if m < 2 do
+              List.duplicate(:nan, n_post)
+            else
+              Nx.standard_deviation(effects_t, axes: [0], ddof: 1) |> Nx.to_flat_list()
+            end
+
+          {lowers, uppers} =
+            if m < 2 do
+              {List.duplicate(:nan, n_post), List.duplicate(:nan, n_post)}
+            else
+              sorted = Nx.sort(effects_t, axis: 0)
+
+              lower =
+                sorted
+                |> Nx.slice([lower_idx, 0], [1, n_post])
+                |> Nx.squeeze(axes: [0])
+                |> Nx.to_flat_list()
+
+              upper =
+                sorted
+                |> Nx.slice([upper_idx, 0], [1, n_post])
+                |> Nx.squeeze(axes: [0])
+                |> Nx.to_flat_list()
+
+              {lower, upper}
+            end
+
+          Enum.map(0..(n_post - 1), fn idx ->
+            %{mean: Enum.at(means, idx), sd: Enum.at(sds, idx), lower: Enum.at(lowers, idx), upper: Enum.at(uppers, idx)}
+          end)
+      end
+
     sum_stats = fn vals ->
-      mean = mean_or_nan.(vals)
-      sd = sd_or_nan.(vals, mean)
-      {lower, upper} = interval_or_nan.(vals)
-      %{mean: mean, sd: sd, lower: lower, upper: upper}
+      cond do
+        m == 0 ->
+          %{mean: :nan, sd: :nan, lower: :nan, upper: :nan}
+
+        m == 1 ->
+          v = hd(vals)
+          %{mean: v, sd: :nan, lower: :nan, upper: :nan}
+
+        true ->
+          v_t = Nx.tensor(vals, type: {:f, 64})
+          sorted = Nx.sort(v_t)
+
+          lower = sorted |> Nx.slice([lower_idx], [1]) |> Nx.squeeze() |> Nx.to_number()
+          upper = sorted |> Nx.slice([upper_idx], [1]) |> Nx.squeeze() |> Nx.to_number()
+
+          %{
+            mean: v_t |> Nx.mean() |> Nx.to_number(),
+            sd: v_t |> Nx.standard_deviation(ddof: 1) |> Nx.to_number(),
+            lower: lower,
+            upper: upper
+          }
+      end
     end
 
     cum_stats = sum_stats.(result.cumulative_effects)
@@ -674,7 +698,7 @@ defmodule BstsNx.CausalImpact do
     # observation noise, and one unused.  Using 3 parts ensures process
     # and observation streams share no common ancestor from a single split,
     # consistent with the per-step splitting in generate_structured_counterfactual.
-    keys = Nx.Random.split(key, parts: 3)
+    keys = Nx.Random.split(key, parts: 2)
     key_process = split_key_at(keys, 0)
     key_obs = split_key_at(keys, 1)
     {process_noise, _} = Nx.Random.normal(key_process, 0.0, 1.0, shape: {n_steps})
@@ -710,16 +734,15 @@ defmodule BstsNx.CausalImpact do
     q_sds = Nx.sqrt(Nx.max(q_diag, Nx.tensor(0.0)))
     obs_sd = :math.sqrt(max(obs_var, 0.0))
 
-    # Pre-split keys for all steps
-    keys = Nx.Random.split(key, parts: n_steps + 1)
+    # Pre-split keys for all steps once and iterate as plain Elixir data.
+    step_key_rows = Nx.Random.split(key, parts: n_steps) |> Nx.to_list()
 
     # Iterate directly over post_h list to avoid O(n²) Enum.at access
-    {_, values, _} =
-      post_h
-      |> Enum.with_index()
-      |> Enum.reduce({Nx.flatten(final_state), [], keys}, fn {h_t, step}, {prev_state, acc, ks} ->
-        subkey = split_key_at(ks, step)
-        sub_keys = Nx.Random.split(subkey, parts: 2)
+    {_, values} =
+      Enum.zip(post_h, step_key_rows)
+      |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_t, step_key_row}, {prev_state, acc} ->
+        step_key = Nx.tensor(step_key_row, type: Nx.type(key))
+        sub_keys = Nx.Random.split(step_key, parts: 2)
         key_state = split_key_at(sub_keys, 0)
         key_obs = split_key_at(sub_keys, 1)
 
@@ -738,7 +761,7 @@ defmodule BstsNx.CausalImpact do
         {z_obs, _} = Nx.Random.normal(key_obs, 0.0, 1.0)
         cf_obs = predicted_y + Nx.to_number(z_obs) * obs_sd
 
-        {next_state, [cf_obs | acc], ks}
+        {next_state, [cf_obs | acc]}
       end)
 
     Enum.reverse(values)
