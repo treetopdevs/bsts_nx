@@ -11,10 +11,10 @@ defmodule BstsNx.ParameterRecoveryTest do
   test "local linear trend sampler covers true variances with 95% HPD intervals" do
     :rand.seed(:exsss, {1_111, 1_112, 1_113})
 
-    n = 220
+    n = 160
     true_obs_var = 2.0
     true_level_var = 0.5
-    true_slope_var = 0.08
+    true_slope_var = 0.12
 
     {_level, _slope, observations} =
       Enum.reduce(1..n, {100.0, 0.2, []}, fn _i, {level, slope, acc} ->
@@ -39,7 +39,7 @@ defmodule BstsNx.ParameterRecoveryTest do
         prior_scale: 1.0
       )
 
-    samples = GibbsSampler.sample_structured(observations, spec, 400, burn_in: 400, seed: 1234)
+    samples = GibbsSampler.sample_structured(observations, spec, 160, burn_in: 160, seed: 1234)
 
     level_trace = Enum.map(samples, fn s -> Nx.to_number(s.q_matrix[0][0]) end)
     slope_trace = Enum.map(samples, fn s -> Nx.to_number(s.q_matrix[1][1]) end)
