@@ -190,6 +190,58 @@ defmodule BstsNx.InterventionAnalysisTest do
       # Trend (2) + seasonal (6 for period 7) + 1 regressor = 9
       assert Nx.axis_size(result.model_spec.f, 0) == 9
     end
+
+    test "control_selection screens controls before composing the model" do
+      control_signal = Enum.map(1..35, &(&1 * 1.0))
+      control_constant = List.duplicate(10.0, 35)
+      pre = Enum.map(1..28, fn i -> Enum.at(control_signal, i - 1) + 0.05 * :math.sin(i) end)
+      post = Enum.map(29..35, fn i -> Enum.at(control_signal, i - 1) + 10.0 end)
+      obs = pre ++ post
+
+      result =
+        InterventionAnalysis.analyze(
+          obs,
+          %{pre_period: {1, 28}, post_period: {29, 35}},
+          control_series: [control_signal, control_constant],
+          control_selection: [threshold: 0.7, max_controls: 1],
+          num_samples: 10,
+          burn_in: 5,
+          seed: 42
+        )
+
+      assert result.model_spec != nil
+      # Trend (2) + 1 selected regressor = 3
+      assert Nx.axis_size(result.model_spec.f, 0) == 3
+    end
+
+    test "control_regression_mode enables in-loop spike-and-slab regression" do
+      :rand.seed(:exsss, {720, 721, 722})
+      n = 40
+      control1 = Enum.map(1..n, fn _ -> :rand.normal() end)
+      control2 = Enum.map(1..n, fn _ -> :rand.normal() end)
+      pre = Enum.map(1..30, fn i -> 3.0 * Enum.at(control1, i - 1) + :rand.normal() * 0.2 end)
+
+      post =
+        Enum.map(31..40, fn i -> 3.0 * Enum.at(control1, i - 1) + 4.0 + :rand.normal() * 0.2 end)
+
+      obs = pre ++ post
+
+      result =
+        InterventionAnalysis.analyze(
+          obs,
+          %{pre_period: {1, 30}, post_period: {31, 40}},
+          control_series: [control1, control2],
+          control_regression_mode: :spike_and_slab,
+          control_regression_opts: [prior_inclusion: 0.2, g: 30.0],
+          num_samples: 20,
+          burn_in: 20,
+          seed: 4242
+        )
+
+      assert result.model_spec != nil
+      assert result.model_spec.regression.mode == :spike_and_slab
+      assert is_map(result.summary)
+    end
   end
 
   describe "validation" do

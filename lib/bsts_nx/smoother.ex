@@ -176,6 +176,136 @@ defmodule BstsNx.Smoother do
     {sxs_out, sps_out, lag1_out}
   end
 
+  @doc """
+  Compiled scalar Carter-Kohn simulation smoother.
+
+  Draws one latent state trajectory from the posterior using the scalar
+  filtered/smoothed outputs returned by `filter_defn/7` and `rts_defn/4`.
+  The entire backward pass runs inside `Nx.Defn`.
+
+  Returns `{states, next_key}` where `states` has shape `{t}`.
+  """
+  @spec simulate_defn(
+          Nx.t(),
+          Nx.t(),
+          Nx.t(),
+          Nx.t(),
+          number | Nx.t(),
+          number | Nx.t(),
+          Nx.t()
+        ) :: {Nx.t(), Nx.t()}
+  def simulate_defn(smoothed_xs, smoothed_ps, filtered_xs, filtered_ps, f, q, key) do
+    f_t = to_tensor(f)
+    q_t = to_tensor(q)
+    simulate_defn_impl(smoothed_xs, smoothed_ps, filtered_xs, filtered_ps, f_t, q_t, key)
+  end
+
+  @doc """
+  Compiled scalar Carter-Kohn sampler directly from filtered outputs.
+
+  This variant skips the separate RTS pass and performs one backward sampling
+  pass from `{filtered_xs, filtered_ps}`.
+  """
+  @spec simulate_from_filtered_defn(Nx.t(), Nx.t(), number | Nx.t(), number | Nx.t(), Nx.t()) ::
+          {Nx.t(), Nx.t()}
+  def simulate_from_filtered_defn(filtered_xs, filtered_ps, f, q, key) do
+    f_t = to_tensor(f)
+    q_t = to_tensor(q)
+    simulate_from_filtered_defn_impl(filtered_xs, filtered_ps, f_t, q_t, key)
+  end
+
+  @doc """
+  Runs scalar RTS smoothing and then scalar simulation smoothing from the same
+  filtered trajectories.
+
+  Returns `{smoothed_xs, smoothed_ps, sampled_states, next_key}`.
+  """
+  @spec rts_and_simulate_defn(Nx.t(), Nx.t(), number | Nx.t(), number | Nx.t(), Nx.t()) ::
+          {Nx.t(), Nx.t(), Nx.t(), Nx.t()}
+  def rts_and_simulate_defn(filtered_xs, filtered_ps, f, q, key) do
+    {sxs, sps} = rts_defn(filtered_xs, filtered_ps, f, q)
+    {states, key_out} = simulate_defn(sxs, sps, filtered_xs, filtered_ps, f, q, key)
+    {sxs, sps, states, key_out}
+  end
+
+  Nx.Defn.defn simulate_defn_impl(smoothed_xs, smoothed_ps, filtered_xs, filtered_ps, f, q, key) do
+    t = Nx.axis_size(smoothed_xs, 0)
+    {eps, key_out} = Nx.Random.normal(key, 0.0, 1.0, shape: {t})
+
+    states = Nx.broadcast(Nx.tensor(0.0), {t})
+    last_idx = t - 1
+
+    x_t_mean = take_scalar_at(smoothed_xs, last_idx)
+    p_t_cov = take_scalar_at(smoothed_ps, last_idx) |> Nx.max(1.0e-12)
+    x_t = x_t_mean + Nx.sqrt(p_t_cov) * take_scalar_at(eps, last_idx)
+    states = Nx.put_slice(states, [last_idx], Nx.reshape(x_t, {1}))
+
+    num_steps = t - 1
+
+    {_, states_out, _, _, _, _, _} =
+      while {k = Nx.tensor(0), states_acc = states, eps_in = eps, fxs = filtered_xs,
+             fps = filtered_ps, f_in = f, q_in = q},
+            k < num_steps do
+        i = last_idx - 1 - k
+        x_filt = take_scalar_at(fxs, i)
+        p_filt = take_scalar_at(fps, i)
+        x_pred_next = f_in * x_filt
+        p_pred_next = f_in * p_filt * f_in + q_in
+        near_zero_p = Nx.abs(p_pred_next) < 1.0e-15
+        safe_pred = Nx.select(near_zero_p, 1.0, p_pred_next)
+        j = Nx.select(near_zero_p, 0.0, p_filt * f_in / safe_pred)
+
+        x_next = take_scalar_at(states_acc, i + 1)
+        mean = x_filt + j * (x_next - x_pred_next)
+        cov = (p_filt * (1.0 - j * f_in)) |> Nx.max(1.0e-12)
+        x_i = mean + Nx.sqrt(cov) * take_scalar_at(eps_in, i)
+        states_new = Nx.put_slice(states_acc, [i], Nx.reshape(x_i, {1}))
+
+        {k + 1, states_new, eps_in, fxs, fps, f_in, q_in}
+      end
+
+    {states_out, key_out}
+  end
+
+  Nx.Defn.defn simulate_from_filtered_defn_impl(filtered_xs, filtered_ps, f, q, key) do
+    t = Nx.axis_size(filtered_xs, 0)
+    {eps, key_out} = Nx.Random.normal(key, 0.0, 1.0, shape: {t})
+
+    states = Nx.broadcast(Nx.tensor(0.0), {t})
+    last_idx = t - 1
+
+    x_t_mean = take_scalar_at(filtered_xs, last_idx)
+    p_t_cov = take_scalar_at(filtered_ps, last_idx) |> Nx.max(1.0e-12)
+    x_t = x_t_mean + Nx.sqrt(p_t_cov) * take_scalar_at(eps, last_idx)
+    states = Nx.put_slice(states, [last_idx], Nx.reshape(x_t, {1}))
+
+    num_steps = t - 1
+
+    {_, states_out, _, _, _, _, _} =
+      while {k = Nx.tensor(0), states_acc = states, eps_in = eps, fxs = filtered_xs,
+             fps = filtered_ps, f_in = f, q_in = q},
+            k < num_steps do
+        i = last_idx - 1 - k
+        x_filt = take_scalar_at(fxs, i)
+        p_filt = take_scalar_at(fps, i)
+        x_pred_next = f_in * x_filt
+        p_pred_next = f_in * p_filt * f_in + q_in
+        near_zero_p = Nx.abs(p_pred_next) < 1.0e-15
+        safe_pred = Nx.select(near_zero_p, 1.0, p_pred_next)
+        j = Nx.select(near_zero_p, 0.0, p_filt * f_in / safe_pred)
+
+        x_next = take_scalar_at(states_acc, i + 1)
+        mean = x_filt + j * (x_next - x_pred_next)
+        cov = (p_filt * (1.0 - j * f_in)) |> Nx.max(1.0e-12)
+        x_i = mean + Nx.sqrt(cov) * take_scalar_at(eps_in, i)
+        states_new = Nx.put_slice(states_acc, [i], Nx.reshape(x_i, {1}))
+
+        {k + 1, states_new, eps_in, fxs, fps, f_in, q_in}
+      end
+
+    {states_out, key_out}
+  end
+
   Nx.Defn.defnp take_scalar_at(vec, idx) do
     Nx.slice(vec, [idx], [1]) |> Nx.squeeze()
   end
@@ -291,15 +421,14 @@ defmodule BstsNx.Smoother do
       steps.
 
     * `:key` – a PRNG key (`Nx` tensor of shape `{2}`) used to generate random
-      draws. When supplied, the key is split into a sequence of subkeys via
-      `Nx.Random.split/2`. The final key is returned as part of the result to
-      facilitate reproducible sampling across calls.
+      draws. When supplied, draws are generated in one batched `Nx.Random.normal/4`
+      call and the returned next key is propagated for reproducible chaining.
 
   The return value is a tuple `{states, new_key}` where `states` is the
   sampled trajectory (list of tensors) and `new_key` is the final PRNG key after
   consumption of random draws. When neither `:noise_list` nor `:key` is provided,
-  a fresh key is generated using a unique integer and split into per-step
-  subkeys. The final key is returned to support reproducibility across calls.
+  a fresh key is generated using a unique integer and consumed in a single batched
+  random draw. The final key is returned to support reproducibility across calls.
 
   ## Examples
 
@@ -342,34 +471,11 @@ defmodule BstsNx.Smoother do
           out_key = key_opt || Nx.Random.key(:erlang.unique_integer([:positive]))
           {noise_list_opt, out_key}
 
-        key_opt != nil ->
-          # Split key into t+1 subkeys: t for noise draws and 1 for the returned key
-          keys_tensor = Nx.Random.split(key_opt, parts: t + 1)
-          # first t keys for noise, last key for next_key
-          noise_samples =
-            Enum.map(0..(t - 1), fn idx ->
-              subkey = split_key_at(keys_tensor, idx)
-              {sample, _unused} = Nx.Random.normal(subkey, 0.0, 1.0, shape: state_shape)
-              sample
-            end)
-
-          next_key = split_key_at(keys_tensor, t)
-          {noise_samples, next_key}
-
         true ->
-          # Generate random draws using a single base key split across steps
-          seed = :erlang.unique_integer([:positive])
-          base_key = Nx.Random.key(seed)
-          keys_tensor = Nx.Random.split(base_key, parts: t + 1)
-
-          noise_samples =
-            Enum.map(0..(t - 1), fn idx ->
-              subkey = split_key_at(keys_tensor, idx)
-              {sample, _unused} = Nx.Random.normal(subkey, 0.0, 1.0, shape: state_shape)
-              sample
-            end)
-
-          next_key = split_key_at(keys_tensor, t)
+          draw_key = key_opt || Nx.Random.key(:erlang.unique_integer([:positive]))
+          draw_shape = Tuple.insert_at(state_shape, 0, t)
+          {noise_batch, next_key} = Nx.Random.normal(draw_key, 0.0, 1.0, shape: draw_shape)
+          noise_samples = Enum.map(0..(t - 1), &take_time_slice_at(noise_batch, &1))
           {noise_samples, next_key}
       end
 
@@ -383,19 +489,7 @@ defmodule BstsNx.Smoother do
 
     x_sample_T =
       if Nx.rank(p_T_cov) == 0 do
-        p_T_val = Nx.to_number(p_T_cov)
-
-        safe_var =
-          if p_T_val < 0.0 do
-            Logger.warning(
-              "Simulation smoother: negative terminal variance #{p_T_val}, clamping to 1.0e-12"
-            )
-
-            Nx.tensor(1.0e-12)
-          else
-            Nx.max(p_T_cov, 1.0e-12)
-          end
-
+        safe_var = Nx.max(p_T_cov, Nx.tensor(1.0e-12))
         chol_T = Nx.sqrt(safe_var)
         Nx.add(x_T_mean, Nx.multiply(chol_T, eps_T))
       else
@@ -435,19 +529,7 @@ defmodule BstsNx.Smoother do
 
           x_k =
             if Nx.rank(cov) == 0 do
-              cov_val = Nx.to_number(cov)
-
-              safe_cov =
-                if cov_val < 0.0 do
-                  Logger.warning(
-                    "Simulation smoother: negative conditional variance #{cov_val} at step #{idx}, clamping to 1.0e-12"
-                  )
-
-                  Nx.tensor(1.0e-12)
-                else
-                  Nx.max(cov, 1.0e-12)
-                end
-
+              safe_cov = Nx.max(cov, Nx.tensor(1.0e-12))
               chol_k = Nx.sqrt(safe_cov)
               Nx.add(mean, Nx.multiply(chol_k, eps_k))
             else
@@ -467,8 +549,8 @@ defmodule BstsNx.Smoother do
     {sampled_states, key_out}
   end
 
-  defp split_key_at(keys, idx) do
-    Nx.slice_along_axis(keys, idx, 1, axis: 0)
+  defp take_time_slice_at(tensor, idx) do
+    Nx.slice_along_axis(tensor, idx, 1, axis: 0)
     |> Nx.squeeze(axes: [0])
   end
 
@@ -476,61 +558,33 @@ defmodule BstsNx.Smoother do
   # For scalar systems uses division; for matrix systems uses solve+transpose.
   defp smoother_gain(p_filt, f_t, p_pred_next) do
     if Nx.rank(p_pred_next) == 0 do
-      if abs(Nx.to_number(p_pred_next)) < 1.0e-15 do
-        Nx.tensor(0.0)
-      else
-        p_filt |> Nx.multiply(f_t) |> Nx.divide(p_pred_next)
-      end
+      near_zero = Nx.less(Nx.abs(p_pred_next), 1.0e-15)
+      safe_pred = Nx.select(near_zero, Nx.tensor(1.0), p_pred_next)
+      gain = p_filt |> Nx.multiply(f_t) |> Nx.divide(safe_pred)
+      Nx.select(near_zero, Nx.tensor(0.0), gain)
     else
       rhs = compat_dot(f_t, p_filt)
 
       # Avoid LinAlg.solve for 1x1 systems to prevent version-specific
       # warnings and numeric jitter in older Nx/Elixir combinations.
       if Nx.shape(p_pred_next) == {1, 1} and Nx.shape(rhs) == {1, 1} do
-        denom = Nx.to_number(Nx.squeeze(p_pred_next))
-
-        if abs(denom) < 1.0e-15 do
-          Nx.tensor([[0.0]])
-        else
-          Nx.divide(rhs, p_pred_next)
-        end
+        p_scalar = Nx.squeeze(p_pred_next)
+        rhs_scalar = Nx.squeeze(rhs)
+        near_zero = Nx.less(Nx.abs(p_scalar), 1.0e-15)
+        safe_pred = Nx.select(near_zero, Nx.tensor(1.0), p_scalar)
+        gain_scalar = Nx.select(near_zero, Nx.tensor(0.0), Nx.divide(rhs_scalar, safe_pred))
+        Nx.reshape(gain_scalar, {1, 1})
       else
         safe_solve(p_pred_next, rhs) |> transpose()
       end
     end
   end
 
-  # Nx 0.6 emits range warnings for some dot rank combinations on newer
-  # Elixir versions. Use explicit multiply/sum forms for common low-rank
-  # cases to keep smoother paths stable across the CI matrix.
+  # Nx.dot handles all rank combinations used here; keep scalar/scalar explicit.
   defp compat_dot(a, b) do
     case {Nx.rank(a), Nx.rank(b)} do
       {0, 0} ->
         Nx.multiply(a, b)
-
-      {2, 1} ->
-        b_row = Nx.reshape(b, {1, Nx.axis_size(b, 0)})
-        Nx.multiply(a, b_row) |> Nx.sum(axes: [1])
-
-      {2, 2} ->
-        {m, n} = Nx.shape(a)
-        {n_b, p} = Nx.shape(b)
-
-        if n != n_b do
-          raise ArgumentError,
-                "incompatible matrix shapes for multiplication: #{inspect(Nx.shape(a))} and #{inspect(Nx.shape(b))}"
-        end
-
-        a_expanded = Nx.reshape(a, {m, n, 1})
-        b_expanded = Nx.reshape(b, {1, n, p})
-        Nx.multiply(a_expanded, b_expanded) |> Nx.sum(axes: [1])
-
-      {1, 2} ->
-        a_col = Nx.reshape(a, {Nx.axis_size(a, 0), 1})
-        Nx.multiply(a_col, b) |> Nx.sum(axes: [0])
-
-      {1, 1} ->
-        Nx.multiply(a, b) |> Nx.sum()
 
       _ ->
         dot(a, b)

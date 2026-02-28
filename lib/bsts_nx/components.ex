@@ -148,10 +148,10 @@ defmodule BstsNx.Components do
     f = build_seasonal_transition(dim)
 
     # Q: innovation variance only on the first state dimension
-    q = Nx.broadcast(0.0, {dim, dim}) |> Nx.put_slice([0, 0], Nx.tensor([[process_var]]))
+    q = [process_var | List.duplicate(0.0, dim - 1)] |> Nx.tensor() |> Nx.make_diagonal()
 
     # H: observe only the current seasonal effect
-    h = Nx.broadcast(0.0, {1, dim}) |> Nx.put_slice([0, 0], Nx.tensor([[1.0]]))
+    h = Nx.tensor([[1.0 | List.duplicate(0.0, dim - 1)]])
 
     %{f: f, q: q, h: h}
   end
@@ -327,6 +327,9 @@ defmodule BstsNx.Components do
 
   ## Options
 
+    * `:mode` — `:dynamic` (default random-walk coefficients) or
+      `:spike_and_slab` (static coefficients sampled in-loop via
+      Zellner's g-prior in the structured Gibbs sampler).
     * `:var_beta` — initial process variance for each coefficient (default: 0.01).
       Can be a single number (applied to all) or a list of length p.
     * `:obs_var` — initial observation variance (default: 1.0)
@@ -335,6 +338,10 @@ defmodule BstsNx.Components do
       Can be a single number or list of length p.
     * `:prior_shape` — shape for all inverse-gamma priors (default: 1.0)
     * `:prior_scale` — scale for all inverse-gamma priors (default: 1.0)
+    * `:prior_inclusion` — prior inclusion probability π for spike-and-slab
+      mode (default: `min(0.5, 3 / p)`).
+    * `:g` — Zellner g-prior scale in spike-and-slab mode
+      (default: number of timesteps `T`).
 
   ## Examples
 
@@ -353,64 +360,16 @@ defmodule BstsNx.Components do
         list when is_list(list) -> Nx.tensor(list)
       end
 
-    {t_len, p} = Nx.shape(regressors_t)
-    obs_var = Keyword.get(opts, :obs_var, 1.0)
-    prior_shape = Keyword.get(opts, :prior_shape, 1.0)
-    prior_scale = Keyword.get(opts, :prior_scale, 1.0)
+    case Keyword.get(opts, :mode, :dynamic) do
+      :dynamic ->
+        build_dynamic_regression_spec(regressors_t, opts)
 
-    # Per-coefficient process variances
-    var_beta_opt = Keyword.get(opts, :var_beta, 0.01)
+      :spike_and_slab ->
+        build_spike_slab_regression_spec(regressors_t, opts)
 
-    var_betas =
-      case var_beta_opt do
-        v when is_number(v) -> List.duplicate(v, p)
-        list when is_list(list) -> list
-      end
-
-    # Initial betas
-    initial_betas_opt = Keyword.get(opts, :initial_betas, List.duplicate(0.0, p))
-
-    initial_betas =
-      case initial_betas_opt do
-        %Nx.Tensor{} -> initial_betas_opt
-        list when is_list(list) -> Nx.tensor(list)
-      end
-
-    # Initial covariance for betas
-    initial_cov_opt = Keyword.get(opts, :initial_cov_beta, 1.0)
-
-    initial_covs =
-      case initial_cov_opt do
-        v when is_number(v) -> List.duplicate(v, p)
-        list when is_list(list) -> list
-      end
-
-    # Time-varying H: list of {1, p} tensors, one per timestep
-    h_list =
-      Enum.map(0..(t_len - 1), fn i ->
-        Nx.slice(regressors_t, [i, 0], [1, p])
-      end)
-
-    q_specs =
-      Enum.map(0..(p - 1), fn d ->
-        %{
-          dim_index: d,
-          initial: Enum.at(var_betas, d),
-          prior_shape: prior_shape,
-          prior_scale: prior_scale
-        }
-      end)
-
-    %ModelSpec{
-      f: Nx.eye(p),
-      h: h_list,
-      x0: initial_betas,
-      p0: BstsNx.StateSpace.block_diag(initial_covs),
-      obs_var: obs_var,
-      q_specs: q_specs,
-      obs_prior_shape: prior_shape,
-      obs_prior_scale: prior_scale
-    }
+      other ->
+        raise ArgumentError, "unknown regression mode #{inspect(other)}"
+    end
   end
 
   @doc """
@@ -460,7 +419,7 @@ defmodule BstsNx.Components do
     f = build_seasonal_transition(dim)
 
     # H: observe only the current seasonal effect
-    h = Nx.broadcast(0.0, {1, dim}) |> Nx.put_slice([0, 0], Nx.tensor([[1.0]]))
+    h = Nx.tensor([[1.0 | List.duplicate(0.0, dim - 1)]])
 
     # Initial state: zeros (no prior seasonal preference)
     x0 = Nx.broadcast(0.0, {dim})
@@ -543,6 +502,8 @@ defmodule BstsNx.Components do
         %{qs | dim_index: qs.dim_index + n1}
       end)
 
+    regression = compose_regression(spec1.regression, spec2.regression, n1)
+
     %ModelSpec{
       f: f,
       h: h,
@@ -550,9 +511,24 @@ defmodule BstsNx.Components do
       p0: p0,
       obs_var: obs_var,
       q_specs: spec1.q_specs ++ shifted_q2,
+      regression: regression,
       obs_prior_shape: obs_prior_shape,
       obs_prior_scale: obs_prior_scale
     }
+  end
+
+  defp compose_regression(nil, nil, _n1), do: nil
+  defp compose_regression(regression, nil, _n1), do: regression
+  defp compose_regression(nil, regression, n1), do: shift_regression_start(regression, n1)
+
+  defp compose_regression(_regression1, _regression2, _n1) do
+    raise ArgumentError,
+          "compose_specs/2 supports at most one regression metadata block"
+  end
+
+  defp shift_regression_start(regression, n1) when is_map(regression) do
+    start_dim = Map.get(regression, :start_dim, 0)
+    Map.put(regression, :start_dim, start_dim + n1)
   end
 
   # Composes two H specifications. Each may be a tensor (static) or a list
@@ -563,10 +539,12 @@ defmodule BstsNx.Components do
             "time-varying H lists must have same length (got #{length(h1)} and #{length(h2)})"
     end
 
-    Enum.zip(h1, h2)
-    |> Enum.map(fn {h1_t, h2_t} ->
-      Nx.concatenate([ensure_row(h1_t), ensure_row(h2_t)], axis: 1)
-    end)
+    h1_stack = h1 |> Enum.map(&ensure_row/1) |> Nx.stack()
+    h2_stack = h2 |> Enum.map(&ensure_row/1) |> Nx.stack()
+
+    Nx.concatenate([h1_stack, h2_stack], axis: 2)
+    |> Nx.to_list()
+    |> Enum.map(&Nx.tensor/1)
   end
 
   defp compose_h(%Nx.Tensor{} = h1, %Nx.Tensor{} = h2, _n1) do
@@ -575,18 +553,24 @@ defmodule BstsNx.Components do
 
   defp compose_h(%Nx.Tensor{} = h1, h2_list, _n1) when is_list(h2_list) do
     h1_row = ensure_row(h1)
+    h2_stack = h2_list |> Enum.map(&ensure_row/1) |> Nx.stack()
+    t_len = Nx.axis_size(h2_stack, 0)
+    h1_stack = Nx.broadcast(h1_row, {t_len, Nx.axis_size(h1_row, 0), Nx.axis_size(h1_row, 1)})
 
-    Enum.map(h2_list, fn h2_t ->
-      Nx.concatenate([h1_row, ensure_row(h2_t)], axis: 1)
-    end)
+    Nx.concatenate([h1_stack, h2_stack], axis: 2)
+    |> Nx.to_list()
+    |> Enum.map(&Nx.tensor/1)
   end
 
   defp compose_h(h1_list, %Nx.Tensor{} = h2, _n1) when is_list(h1_list) do
     h2_row = ensure_row(h2)
+    h1_stack = h1_list |> Enum.map(&ensure_row/1) |> Nx.stack()
+    t_len = Nx.axis_size(h1_stack, 0)
+    h2_stack = Nx.broadcast(h2_row, {t_len, Nx.axis_size(h2_row, 0), Nx.axis_size(h2_row, 1)})
 
-    Enum.map(h1_list, fn h1_t ->
-      Nx.concatenate([ensure_row(h1_t), h2_row], axis: 1)
-    end)
+    Nx.concatenate([h1_stack, h2_stack], axis: 2)
+    |> Nx.to_list()
+    |> Enum.map(&Nx.tensor/1)
   end
 
   # Ensures a tensor is a {1, n} row matrix
@@ -610,14 +594,130 @@ defmodule BstsNx.Components do
   end
 
   defp build_seasonal_transition(dim) when dim > 1 do
-    # First row: all -1's
-    first_row = Nx.broadcast(-1.0, {1, dim})
+    rows =
+      [List.duplicate(-1.0, dim)] ++
+        Enum.map(1..(dim - 1), fn row_idx ->
+          Enum.map(0..(dim - 1), fn col_idx -> if col_idx == row_idx - 1, do: 1.0, else: 0.0 end)
+        end)
 
-    # Bottom rows: [I_{dim-1} | 0_{(dim-1)×1}]
-    eye_part = Nx.eye(dim - 1)
-    zero_col = Nx.broadcast(0.0, {dim - 1, 1})
-    shift = Nx.concatenate([eye_part, zero_col], axis: 1)
+    Nx.tensor(rows)
+  end
 
-    Nx.concatenate([first_row, shift], axis: 0)
+  defp build_dynamic_regression_spec(regressors_t, opts) do
+    {_t_len, p} = Nx.shape(regressors_t)
+    obs_var = Keyword.get(opts, :obs_var, 1.0)
+    prior_shape = Keyword.get(opts, :prior_shape, 1.0)
+    prior_scale = Keyword.get(opts, :prior_scale, 1.0)
+
+    # Per-coefficient process variances
+    var_beta_opt = Keyword.get(opts, :var_beta, 0.01)
+
+    var_betas =
+      case var_beta_opt do
+        v when is_number(v) -> List.duplicate(v, p)
+        list when is_list(list) -> list
+      end
+
+    # Initial betas
+    initial_betas_opt = Keyword.get(opts, :initial_betas, List.duplicate(0.0, p))
+
+    initial_betas =
+      case initial_betas_opt do
+        %Nx.Tensor{} -> initial_betas_opt
+        list when is_list(list) -> Nx.tensor(list)
+      end
+
+    # Initial covariance for betas
+    initial_cov_opt = Keyword.get(opts, :initial_cov_beta, 1.0)
+
+    initial_covs =
+      case initial_cov_opt do
+        v when is_number(v) -> List.duplicate(v, p)
+        list when is_list(list) -> list
+      end
+
+    # Time-varying H: list of {1, p} tensors, one per timestep
+    h_list =
+      regressors_t
+      |> Nx.to_list()
+      |> Enum.map(fn row -> Nx.reshape(Nx.tensor(row), {1, p}) end)
+
+    q_specs =
+      Enum.map(0..(p - 1), fn d ->
+        %{
+          dim_index: d,
+          initial: Enum.at(var_betas, d),
+          prior_shape: prior_shape,
+          prior_scale: prior_scale
+        }
+      end)
+
+    %ModelSpec{
+      f: Nx.eye(p),
+      h: h_list,
+      x0: initial_betas,
+      p0: BstsNx.StateSpace.block_diag(initial_covs),
+      obs_var: obs_var,
+      q_specs: q_specs,
+      obs_prior_shape: prior_shape,
+      obs_prior_scale: prior_scale
+    }
+  end
+
+  defp build_spike_slab_regression_spec(regressors_t, opts) do
+    {t_len, p} = Nx.shape(regressors_t)
+    obs_var = Keyword.get(opts, :obs_var, 1.0)
+    prior_shape = Keyword.get(opts, :prior_shape, 1.0)
+    prior_scale = Keyword.get(opts, :prior_scale, 1.0)
+    prior_inclusion = Keyword.get(opts, :prior_inclusion, min(0.5, 3.0 / max(p, 1)))
+    g = Keyword.get(opts, :g, max(t_len, 1))
+
+    if not is_number(prior_inclusion) or prior_inclusion <= 0.0 or prior_inclusion >= 1.0 do
+      raise ArgumentError,
+            "prior_inclusion must be in (0, 1), got: #{inspect(prior_inclusion)}"
+    end
+
+    if not is_number(g) or g <= 0.0 do
+      raise ArgumentError, "g must be > 0, got: #{inspect(g)}"
+    end
+
+    initial_betas_opt = Keyword.get(opts, :initial_betas, List.duplicate(0.0, p))
+
+    initial_betas =
+      case initial_betas_opt do
+        %Nx.Tensor{} -> initial_betas_opt
+        list when is_list(list) -> Nx.tensor(list)
+      end
+
+    initial_cov_opt = Keyword.get(opts, :initial_cov_beta, 10.0)
+
+    initial_covs =
+      case initial_cov_opt do
+        v when is_number(v) -> List.duplicate(v, p)
+        list when is_list(list) -> list
+      end
+
+    h_list =
+      regressors_t
+      |> Nx.to_list()
+      |> Enum.map(fn row -> Nx.reshape(Nx.tensor(row), {1, p}) end)
+
+    %ModelSpec{
+      f: Nx.eye(p),
+      h: h_list,
+      x0: initial_betas,
+      p0: BstsNx.StateSpace.block_diag(initial_covs),
+      obs_var: obs_var,
+      q_specs: [],
+      regression: %{
+        mode: :spike_and_slab,
+        start_dim: 0,
+        num_dims: p,
+        prior_inclusion: prior_inclusion,
+        g: g
+      },
+      obs_prior_shape: prior_shape,
+      obs_prior_scale: prior_scale
+    }
   end
 end

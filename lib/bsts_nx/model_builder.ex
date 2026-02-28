@@ -10,6 +10,7 @@ defmodule BstsNx.ModelBuilder do
   """
 
   alias BstsNx.Components
+  alias BstsNx.CovariateSelection
   alias BstsNx.ModelSpec
 
   @default_initial_cov 10.0
@@ -20,7 +21,11 @@ defmodule BstsNx.ModelBuilder do
     :seed,
     :seasonality,
     :model_spec,
-    :method
+    :method,
+    :regression_mode,
+    :regression_opts,
+    :control_regression_mode,
+    :control_regression_opts
   ]
 
   @doc """
@@ -36,6 +41,10 @@ defmodule BstsNx.ModelBuilder do
     * `:regressors` - a `{T, p}` Nx tensor of regressor values (one row per
       observation, one column per covariate). When provided, produces a composed
       model with trend + optional seasonal + regression components.
+    * `:regression_mode` - `:dynamic` (default) or `:spike_and_slab` when
+      building the regression component.
+    * `:regression_opts` - keyword options forwarded to
+      `Components.regression_spec/2`.
 
   ## Examples
 
@@ -62,14 +71,14 @@ defmodule BstsNx.ModelBuilder do
 
           {nil, reg} ->
             trend = default_trend_spec(observations)
-            reg_spec = Components.regression_spec(ensure_tensor(reg))
+            reg_spec = Components.regression_spec(ensure_tensor(reg), regression_spec_opts(opts))
             {Components.compose_specs(trend, reg_spec), :structured}
 
           {spec, nil} ->
             {spec, :structured}
 
           {spec, reg} ->
-            reg_spec = Components.regression_spec(ensure_tensor(reg))
+            reg_spec = Components.regression_spec(ensure_tensor(reg), regression_spec_opts(opts))
             {Components.compose_specs(spec, reg_spec), :structured}
         end
     end
@@ -88,6 +97,21 @@ defmodule BstsNx.ModelBuilder do
       or `nil` for no controls
     * `opts` - keyword options (same as `build_spec/2`, plus `:seasonality`)
 
+  ## Control-selection options
+
+    * `:control_selection` - optional covariate-selection strategy for controls.
+      When `true`, uses default Pearson screening. When a keyword list, options
+      are passed to `BstsNx.CovariateSelection.select/3` (for example:
+      `control_selection: [method: :spike_and_slab]`).
+    * `:control_selection_pre_period` - optional `{start, end}` (1-based
+      inclusive) window used to fit control selection. Defaults to the full
+      series when omitted.
+    * `:control_regression_mode` - `:dynamic` (default) or `:spike_and_slab`.
+      In `:spike_and_slab` mode, coefficients are sampled in-loop with
+      Zellner's g-prior.
+    * `:control_regression_opts` - keyword options forwarded to
+      `Components.regression_spec/2` (for example `prior_inclusion`, `g`).
+
   Returns a keyword list suitable for passing to `InterventionAnalysis.analyze/3`.
   """
   @spec build_opts_with_controls([number()], [[number()]] | nil, keyword()) :: keyword()
@@ -102,7 +126,7 @@ defmodule BstsNx.ModelBuilder do
   def build_opts_with_controls(observations, controls, opts) when is_list(controls) do
     n = length(observations)
 
-    regressors =
+    regressors_all =
       controls
       |> Enum.map(fn series ->
         if length(series) != n do
@@ -115,25 +139,45 @@ defmodule BstsNx.ModelBuilder do
       |> Nx.tensor()
       |> Nx.transpose()
 
-    spec =
-      case Keyword.get(opts, :model_spec) do
-        %ModelSpec{} = base_spec ->
-          # Preserve explicit model_spec precedence while still adding controls.
-          Components.compose_specs(base_spec, Components.regression_spec(regressors))
+    regressors = maybe_select_controls(observations, regressors_all, opts)
 
-        nil ->
+    spec =
+      case {Keyword.get(opts, :model_spec), regressors} do
+        {%ModelSpec{} = base_spec, nil} ->
+          base_spec
+
+        {%ModelSpec{} = base_spec, %Nx.Tensor{} = selected_regressors} ->
+          reg_spec =
+            Components.regression_spec(
+              selected_regressors,
+              control_regression_spec_opts(opts)
+            )
+
+          # Preserve explicit model_spec precedence while still adding controls.
+          Components.compose_specs(base_spec, reg_spec)
+
+        {nil, selected_regressors} ->
           build_opts =
             opts
             |> Keyword.take([:seasonality])
-            |> Keyword.put(:regressors, regressors)
+            |> maybe_put_regressors(selected_regressors)
+            |> put_control_regression_config(opts)
 
-          {built_spec, :structured} = build_spec(observations, build_opts)
-          built_spec
+          case build_spec(observations, build_opts) do
+            {nil, :scalar} -> nil
+            {built_spec, :structured} -> built_spec
+          end
       end
 
-    opts
-    |> Keyword.take([:alpha, :num_samples, :burn_in, :seed, :method])
-    |> Keyword.put(:model_spec, spec)
+    result =
+      opts
+      |> Keyword.take([:alpha, :num_samples, :burn_in, :seed, :method])
+
+    if spec == nil do
+      result
+    else
+      Keyword.put(result, :model_spec, spec)
+    end
   end
 
   @doc """
@@ -301,13 +345,13 @@ defmodule BstsNx.ModelBuilder do
         do: Nx.slice(h_last, [0, 0], [1, n_non_reg]),
         else: Nx.reshape(Nx.slice(h_last, [0], [n_non_reg]), {1, n_non_reg})
 
-    Enum.map(0..(horizon - 1), fn i ->
-      reg_row =
-        Nx.slice_along_axis(future_t, i, 1, axis: 0)
-        |> Nx.reshape({1, p})
+    static_h_batched = Nx.broadcast(static_h, {horizon, n_non_reg})
+    combined = Nx.concatenate([static_h_batched, future_t], axis: 1)
+    n_cols = n_non_reg + p
 
-      Nx.concatenate([static_h, reg_row], axis: 1)
-    end)
+    combined
+    |> Nx.to_list()
+    |> Enum.map(fn row -> Nx.reshape(Nx.tensor(row), {1, n_cols}) end)
   end
 
   defp build_base_spec(_observations, nil), do: nil
@@ -334,15 +378,103 @@ defmodule BstsNx.ModelBuilder do
   defp safe_divide(_, d) when d == 0.0, do: 0.0
   defp safe_divide(n, d), do: n / d
 
+  defp regression_spec_opts(opts) do
+    mode = Keyword.get(opts, :regression_mode, :dynamic)
+    extra_opts = Keyword.get(opts, :regression_opts, [])
+    validate_keyword_opts!(:regression_opts, extra_opts)
+    [mode: mode] ++ extra_opts
+  end
+
+  defp control_regression_spec_opts(opts) do
+    mode =
+      Keyword.get(opts, :control_regression_mode, Keyword.get(opts, :regression_mode, :dynamic))
+
+    extra_opts =
+      Keyword.get(opts, :control_regression_opts, Keyword.get(opts, :regression_opts, []))
+
+    validate_keyword_opts!(:control_regression_opts, extra_opts)
+    [mode: mode] ++ extra_opts
+  end
+
+  defp put_control_regression_config(build_opts, source_opts) do
+    spec_opts = control_regression_spec_opts(source_opts)
+    {mode, reg_opts} = Keyword.pop(spec_opts, :mode, :dynamic)
+    build_opts |> Keyword.put(:regression_mode, mode) |> Keyword.put(:regression_opts, reg_opts)
+  end
+
+  defp validate_keyword_opts!(_name, []), do: :ok
+
+  defp validate_keyword_opts!(name, opts) when is_list(opts) do
+    if not Keyword.keyword?(opts) do
+      raise ArgumentError, "#{name} must be a keyword list, got: #{inspect(opts)}"
+    end
+  end
+
+  defp validate_keyword_opts!(name, opts) do
+    raise ArgumentError, "#{name} must be a keyword list, got: #{inspect(opts)}"
+  end
+
+  defp maybe_put_regressors(opts, nil), do: opts
+  defp maybe_put_regressors(opts, regressors), do: Keyword.put(opts, :regressors, regressors)
+
+  defp maybe_select_controls(observations, regressors, opts) do
+    case normalize_control_selection(Keyword.get(opts, :control_selection)) do
+      :disabled ->
+        regressors
+
+      selection_opts ->
+        n_obs = length(observations)
+
+        {start_idx, end_idx} =
+          select_window(Keyword.get(opts, :control_selection_pre_period), n_obs)
+
+        pre_count = end_idx - start_idx + 1
+        p = Nx.axis_size(regressors, 1)
+
+        target_pre = Enum.slice(observations, (start_idx - 1)..(end_idx - 1))
+        regressors_pre = Nx.slice(regressors, [start_idx - 1, 0], [pre_count, p])
+
+        selected =
+          CovariateSelection.select(target_pre, regressors_pre, selection_opts).selected_indices
+
+        build_selected_regressors(regressors, selected)
+    end
+  end
+
+  defp normalize_control_selection(nil), do: :disabled
+  defp normalize_control_selection(false), do: :disabled
+  defp normalize_control_selection(true), do: []
+
+  defp normalize_control_selection(selection_opts) when is_list(selection_opts),
+    do: selection_opts
+
+  defp normalize_control_selection(other) do
+    raise ArgumentError,
+          ":control_selection must be true, false/nil, or a keyword list; got: #{inspect(other)}"
+  end
+
+  defp select_window(nil, n_obs), do: {1, n_obs}
+
+  defp select_window({start_idx, end_idx}, n_obs)
+       when is_integer(start_idx) and is_integer(end_idx) and start_idx >= 1 and
+              end_idx >= start_idx and end_idx <= n_obs do
+    {start_idx, end_idx}
+  end
+
+  defp select_window(other, n_obs) do
+    raise ArgumentError,
+          ":control_selection_pre_period must be {start, end} within [1, #{n_obs}], got: #{inspect(other)}"
+  end
+
+  defp build_selected_regressors(_regressors, []), do: nil
+
+  defp build_selected_regressors(regressors, selected_indices) do
+    Nx.take(regressors, Nx.tensor(selected_indices, type: {:s, 64}), axis: 1)
+  end
+
   defp normalize_number(n) when is_number(n) do
     f = n * 1.0
-
-    case :erlang.float_to_binary(f, [:compact]) do
-      "nan" -> :error
-      "inf" -> :error
-      "-inf" -> :error
-      _ -> {:ok, f}
-    end
+    if f == f and abs(f) < 1.0e300, do: {:ok, f}, else: :error
   end
 
   defp normalize_number(_), do: :error

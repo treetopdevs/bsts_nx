@@ -148,11 +148,10 @@ defmodule BstsNx.KalmanFilter do
             # multi-dim state (matrix-vector product giving K as a vector).
             k =
               if Nx.rank(s) == 0 do
-                if abs(Nx.to_number(s)) < 1.0e-15 do
-                  Nx.broadcast(0.0, Nx.shape(x_pred))
-                else
-                  mul_or_dot(p_pred, h_i) |> Nx.divide(s)
-                end
+                near_zero_s = Nx.less(Nx.abs(s), 1.0e-15)
+                safe_s = Nx.select(near_zero_s, Nx.tensor(1.0), s)
+                k_raw = mul_or_dot(p_pred, h_i) |> Nx.divide(safe_s)
+                Nx.select(near_zero_s, Nx.broadcast(0.0, Nx.shape(x_pred)), k_raw)
               else
                 # Solve S * X = H * P_pred for X; the result has shape (m x n)'
                 rhs =
@@ -390,17 +389,16 @@ defmodule BstsNx.KalmanFilter do
               end
 
               # Time-varying scalar coefficients.
-              Enum.map(0..(len - 1), fn idx ->
-                Nx.slice(h, [idx], [1]) |> Nx.squeeze()
-              end)
+              h |> Nx.to_flat_list() |> Enum.map(&Nx.tensor/1)
 
             rank == 2 and obs_dim == 1 and len == t_len ->
               # Scalar-observation time-varying H encoded as {T, n}
-              Enum.map(0..(len - 1), fn idx ->
-                start_indices = [idx | List.duplicate(0, rank - 1)]
-                lengths = [1 | Enum.map(1..(rank - 1)//1, &Nx.axis_size(h, &1))]
-                Nx.slice(h, start_indices, lengths) |> Nx.squeeze()
-              end)
+              cols = Nx.axis_size(h, 1)
+
+              h
+              |> Nx.to_flat_list()
+              |> Enum.chunk_every(cols)
+              |> Enum.map(&Nx.tensor/1)
 
             rank == 2 ->
               # Rank-2 tensors are static observation matrices by default.
@@ -416,11 +414,9 @@ defmodule BstsNx.KalmanFilter do
 
             len == t_len ->
               # Rank-3+ time-varying matrix H_t over first axis
-              Enum.map(0..(len - 1), fn idx ->
-                start_indices = [idx | List.duplicate(0, rank - 1)]
-                lengths = [1 | Enum.map(1..(rank - 1)//1, &Nx.axis_size(h, &1))]
-                Nx.slice(h, start_indices, lengths) |> Nx.squeeze()
-              end)
+              h
+              |> Nx.to_list()
+              |> Enum.map(&Nx.tensor/1)
 
             true ->
               raise ArgumentError,
@@ -479,37 +475,11 @@ defmodule BstsNx.KalmanFilter do
     end
   end
 
-  # Nx 0.6 emits warnings for scalar dot paths in some Elixir/OTP combos.
-  # Also avoid rank-2/rank-1 dot calls (matrix-vector and vector-matrix),
-  # which can trigger noisy range warnings in older Nx versions.
+  # Nx.dot handles all rank combinations used here; keep scalar/scalar explicit.
   defp mul_or_dot(a, b) do
     case {Nx.rank(a), Nx.rank(b)} do
       {0, 0} ->
         Nx.multiply(a, b)
-
-      {2, 1} ->
-        b_row = Nx.reshape(b, {1, Nx.axis_size(b, 0)})
-        Nx.multiply(a, b_row) |> Nx.sum(axes: [1])
-
-      {2, 2} ->
-        {m, n} = Nx.shape(a)
-        {n_b, p} = Nx.shape(b)
-
-        if n != n_b do
-          raise ArgumentError,
-                "incompatible matrix shapes for multiplication: #{inspect(Nx.shape(a))} and #{inspect(Nx.shape(b))}"
-        end
-
-        a_expanded = Nx.reshape(a, {m, n, 1})
-        b_expanded = Nx.reshape(b, {1, n, p})
-        Nx.multiply(a_expanded, b_expanded) |> Nx.sum(axes: [1])
-
-      {1, 2} ->
-        a_col = Nx.reshape(a, {Nx.axis_size(a, 0), 1})
-        Nx.multiply(a_col, b) |> Nx.sum(axes: [0])
-
-      {1, 1} ->
-        Nx.multiply(a, b) |> Nx.sum()
 
       _ ->
         dot(a, b)

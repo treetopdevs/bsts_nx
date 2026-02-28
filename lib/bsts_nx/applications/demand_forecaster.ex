@@ -236,11 +236,12 @@ defmodule BstsNx.Applications.DemandForecaster do
     samples = GibbsSampler.sample_structured(obs_list, spec, num_samples, sampler_opts)
 
     # Forward simulation with future regressors
-    keys = Nx.Random.split(key, parts: length(samples))
+    key_rows = Nx.Random.split(key, parts: length(samples)) |> Nx.to_list()
 
     trajectories =
-      Enum.with_index(samples, fn sample, idx ->
-        sample_key = split_key_at(keys, idx)
+      Enum.zip(samples, key_rows)
+      |> Enum.map(fn {sample, key_row} ->
+        sample_key = Nx.tensor(key_row, type: Nx.type(key))
         forward_simulate_demand(sample, spec, future_h, horizon, sample_key)
       end)
 
@@ -325,20 +326,20 @@ defmodule BstsNx.Applications.DemandForecaster do
     q_diag = Nx.take_diagonal(q_matrix)
     q_sds = Nx.sqrt(Nx.max(q_diag, Nx.tensor(0.0)))
 
-    step_keys = Nx.Random.split(key, parts: horizon)
+    subkey_rows = Nx.Random.split(key, parts: horizon * 2) |> Nx.to_list()
+    state_key_rows = Enum.take_every(subkey_rows, 2)
+    obs_key_rows = subkey_rows |> Enum.drop(1) |> Enum.take_every(2)
 
     # Resolve H for each future step
     h_list = resolve_future_h(spec, future_h, horizon, n_state)
 
     # Iterate h_list directly to avoid O(n²) Enum.at access
     {_, trajectory} =
-      h_list
-      |> Enum.with_index()
-      |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_t, step}, {state, acc} ->
-        step_key = split_key_at(step_keys, step)
-        sk = Nx.Random.split(step_key, parts: 2)
-        key_state = split_key_at(sk, 0)
-        key_obs = split_key_at(sk, 1)
+      Enum.zip(h_list, Enum.zip(state_key_rows, obs_key_rows))
+      |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_t, {state_key_row, obs_key_row}},
+                                                       {state, acc} ->
+        key_state = Nx.tensor(state_key_row, type: Nx.type(key))
+        key_obs = Nx.tensor(obs_key_row, type: Nx.type(key))
 
         {z_state, _} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {n_state})
         noise = Nx.multiply(z_state, q_sds)
@@ -405,11 +406,6 @@ defmodule BstsNx.Applications.DemandForecaster do
       horizon: horizon,
       alpha: alpha
     }
-  end
-
-  defp split_key_at(keys, idx) do
-    Nx.slice_along_axis(keys, idx, 1, axis: 0)
-    |> Nx.squeeze(axes: [0])
   end
 
   defp ensure_tensor(v), do: ModelBuilder.ensure_tensor(v)

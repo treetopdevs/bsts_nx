@@ -191,56 +191,27 @@ defmodule BstsNx.BCT.ARForecaster do
 
   defp estimate_coefficients(rows, targets, ridge) do
     n_features = rows |> hd() |> length()
-    zero_matrix = Enum.map(1..n_features, fn _ -> List.duplicate(0.0, n_features) end)
-    zero_vec = List.duplicate(0.0, n_features)
+    x = Nx.tensor(rows, type: {:f, 64})
+    y = Nx.tensor(targets, type: {:f, 64})
+    xt = Nx.transpose(x)
+    xtx = Nx.dot(xt, x)
+    xty = Nx.dot(xt, y)
+    ridge_mat = Nx.multiply(Nx.eye(n_features), ridge)
 
-    {xtx, xty} =
-      Enum.zip(rows, targets)
-      |> Enum.reduce({zero_matrix, zero_vec}, fn {row, y}, {m_acc, v_acc} ->
-        m_next =
-          Enum.with_index(m_acc)
-          |> Enum.map(fn {m_row, i} ->
-            Enum.with_index(m_row)
-            |> Enum.map(fn {m_val, j} ->
-              m_val + Enum.at(row, i) * Enum.at(row, j)
-            end)
-          end)
-
-        v_next =
-          Enum.with_index(v_acc)
-          |> Enum.map(fn {v_val, i} ->
-            v_val + Enum.at(row, i) * y
-          end)
-
-        {m_next, v_next}
-      end)
-
-    xtx_ridge =
-      Enum.with_index(xtx)
-      |> Enum.map(fn {row, i} ->
-        Enum.with_index(row)
-        |> Enum.map(fn {val, j} ->
-          if i == j, do: val + ridge, else: val
-        end)
-      end)
-
-    solve_coefficients(xtx_ridge, xty, targets)
+    solve_coefficients(Nx.add(xtx, ridge_mat), xty, targets)
   end
 
   defp solve_coefficients(xtx, xty, targets) do
-    a = Nx.tensor(xtx, type: {:f, 64})
-    b = Nx.tensor(xty, type: {:f, 64})
-
     try do
-      coeffs = a |> Nx.LinAlg.solve(b) |> Nx.to_flat_list()
+      coeffs = xtx |> BstsNx.Utils.safe_solve(xty) |> Nx.to_flat_list()
 
       if Enum.all?(coeffs, &finite_number?/1) do
         coeffs
       else
-        fallback_coefficients(length(xty), targets)
+        fallback_coefficients(Nx.axis_size(xty, 0), targets)
       end
     rescue
-      _ -> fallback_coefficients(length(xty), targets)
+      _ -> fallback_coefficients(Nx.axis_size(xty, 0), targets)
     end
   end
 
@@ -277,7 +248,7 @@ defmodule BstsNx.BCT.ARForecaster do
 
       true ->
         mean = Enum.sum(values) / n
-        ss = Enum.reduce(values, 0.0, fn x, acc -> acc + :math.pow(x - mean, 2) end)
+        ss = Enum.reduce(values, 0.0, fn x, acc -> d = x - mean; acc + d * d end)
         :math.sqrt(ss / (n - 1))
     end
   end
@@ -288,23 +259,23 @@ defmodule BstsNx.BCT.ARForecaster do
   end
 
   defp simulate_paths(fit_result, horizon, num_samples, key) do
-    keys = Nx.Random.split(key, parts: num_samples)
+    keys = Nx.Random.split(key, parts: num_samples) |> Nx.to_list()
 
-    Enum.map(0..(num_samples - 1), fn idx ->
-      simulate_single_path(fit_result, horizon, split_key_at(keys, idx))
+    Enum.map(keys, fn key_row ->
+      simulate_single_path(fit_result, horizon, Nx.tensor(key_row, type: Nx.type(key)))
     end)
   end
 
   defp simulate_single_path(fit_result, horizon, key) do
-    step_keys = Nx.Random.split(key, parts: horizon)
+    step_keys = Nx.Random.split(key, parts: horizon) |> Nx.to_list()
 
     initial_window =
       fit_result.observations |> Enum.take(-fit_result.order) |> left_pad(fit_result.order)
 
     {_window, draws} =
-      Enum.reduce(0..(horizon - 1), {initial_window, []}, fn step, {window, acc} ->
+      Enum.reduce(step_keys, {initial_window, []}, fn step_key, {window, acc} ->
         mean = ar_mean(window, fit_result.coefficients)
-        {z, _} = Distributions.normal_sample(split_key_at(step_keys, step))
+        {z, _} = Distributions.normal_sample(Nx.tensor(step_key, type: Nx.type(key)))
         draw = mean + Nx.to_number(z) * fit_result.innovation_sd
         next_window = window |> tl() |> Kernel.++([draw])
         {next_window, [draw | acc]}
@@ -323,20 +294,11 @@ defmodule BstsNx.BCT.ARForecaster do
     if missing > 0, do: List.duplicate(0.0, missing) ++ values, else: values
   end
 
-  defp split_key_at(keys, idx) do
-    Nx.slice_along_axis(keys, idx, 1, axis: 0)
-    |> Nx.squeeze(axes: [0])
-  end
-
   defp summarize_paths(paths, alpha) do
-    horizon = paths |> hd() |> length()
     lower_p = alpha / 2.0
     upper_p = 1.0 - alpha / 2.0
 
-    columns =
-      Enum.map(0..(horizon - 1), fn idx ->
-        Enum.map(paths, &Enum.at(&1, idx))
-      end)
+    columns = Enum.zip_with(paths, & &1)
 
     %{
       mean: Enum.map(columns, &mean/1),
@@ -352,6 +314,7 @@ defmodule BstsNx.BCT.ARForecaster do
 
   defp quantile(values, p) do
     sorted = Enum.sort(values)
+    sorted_t = List.to_tuple(sorted)
     n = length(sorted)
 
     cond do
@@ -359,17 +322,17 @@ defmodule BstsNx.BCT.ARForecaster do
         0.0
 
       p <= 0.0 ->
-        hd(sorted)
+        elem(sorted_t, 0)
 
       p >= 1.0 ->
-        List.last(sorted)
+        elem(sorted_t, n - 1)
 
       true ->
         pos = (n - 1) * p
         i = trunc(:math.floor(pos))
         j = trunc(:math.ceil(pos))
-        low = Enum.at(sorted, i)
-        high = Enum.at(sorted, j)
+        low = elem(sorted_t, i)
+        high = elem(sorted_t, j)
         weight = pos - i
         low + (high - low) * weight
     end

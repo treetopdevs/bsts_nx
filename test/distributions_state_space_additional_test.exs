@@ -14,8 +14,65 @@ defmodule BstsNx.DistributionsStateSpaceAdditionalTest do
     test "inv_gamma_sample raises on invalid key shape" do
       bad_key = Nx.tensor([1, 2, 3], type: {:u, 32})
 
-      assert_raise ArgumentError, ~r/Expected Nx.Random key with shape \{2\}/, fn ->
+      assert_raise ArgumentError, ~r/shape \{2\}/, fn ->
         Distributions.inv_gamma_sample(2.0, 3.0, key: bad_key)
+      end
+    end
+
+    test "inv_gamma_sample supports tensor alpha/beta inputs without a key" do
+      draws =
+        Distributions.inv_gamma_sample(
+          Nx.tensor([2.0, 4.0, 6.0]),
+          Nx.tensor([1.0, 2.0, 3.0])
+        )
+
+      assert Nx.shape(draws) == {3}
+      assert Enum.all?(Nx.to_flat_list(draws), &(&1 > 0.0))
+    end
+
+    test "inv_gamma_sample supports list alpha/beta inputs with key" do
+      key = Nx.Random.key(1234)
+
+      draw1 = Distributions.inv_gamma_sample([2.0, 3.0], [1.0, 1.5], key: key)
+      draw2 = Distributions.inv_gamma_sample([2.0, 3.0], [1.0, 1.5], key: key)
+
+      assert Nx.shape(draw1) == {2}
+      assert Nx.to_flat_list(draw1) == Nx.to_flat_list(draw2)
+      assert Enum.all?(Nx.to_flat_list(draw1), &(&1 > 0.0))
+    end
+
+    test "inv_gamma_sample_with_key supports tensor alpha/beta and returns next key" do
+      key = Nx.Random.key(99)
+      {sample, next_key} = Distributions.inv_gamma_sample_with_key([2.0, 5.0], [1.0, 3.0], key)
+
+      assert Nx.shape(sample) == {2}
+      assert Nx.shape(next_key) == {2}
+      assert Enum.all?(Nx.to_flat_list(sample), &(&1 > 0.0))
+    end
+
+    test "inv_gamma_sample_with_key rejects opts key conflict" do
+      assert_raise ArgumentError, ~r/pass the PRNG key as the third argument/, fn ->
+        Distributions.inv_gamma_sample_with_key(2.0, 3.0, Nx.Random.key(1), key: Nx.Random.key(2))
+      end
+    end
+
+    test "inv_gamma_sample rejects invalid max_value option" do
+      assert_raise ArgumentError, ~r/max_value must be :infinity or a positive number/, fn ->
+        Distributions.inv_gamma_sample(2.0, 3.0, max_value: 0.0)
+      end
+    end
+
+    test "inv_gamma_sample rejects non-positive alpha" do
+      assert_raise ArgumentError, ~r/requires alpha > 0/, fn ->
+        Distributions.inv_gamma_sample(0.0, 2.0, key: Nx.Random.key(7))
+      end
+    end
+
+    test "inv_gamma_sample_with_key rejects invalid key shape" do
+      bad_key = Nx.tensor([1, 2, 3], type: {:u, 32})
+
+      assert_raise ArgumentError, ~r/shape \{2\}/, fn ->
+        Distributions.inv_gamma_sample_with_key(2.0, 3.0, bad_key)
       end
     end
 

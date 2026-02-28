@@ -22,6 +22,8 @@ defmodule BstsNx.ModelSpec do
     * `:q_specs` — list of maps, one per diagonal Q entry to resample.
       Each map has keys: `:dim_index` (int), `:initial` (float),
       `:prior_shape` (float), `:prior_scale` (float)
+    * `:regression` — optional regression metadata map used by advanced
+      in-loop samplers (for example spike-and-slab priors). `nil` by default.
     * `:obs_prior_shape` — shape parameter of the inverse-gamma prior on
       observation variance (default: 1.0)
     * `:obs_prior_scale` — scale parameter of the inverse-gamma prior on
@@ -36,6 +38,7 @@ defmodule BstsNx.ModelSpec do
     :p0,
     :obs_var,
     :q_specs,
+    regression: nil,
     obs_prior_shape: 1.0,
     obs_prior_scale: 1.0
   ]
@@ -54,6 +57,7 @@ defmodule BstsNx.ModelSpec do
           p0: Nx.t(),
           obs_var: float(),
           q_specs: [q_spec()],
+          regression: map() | nil,
           obs_prior_shape: float(),
           obs_prior_scale: float()
         }

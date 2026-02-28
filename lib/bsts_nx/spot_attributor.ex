@@ -209,7 +209,7 @@ defmodule BstsNx.SpotAttributor do
             zeros_arr,
             obs_variance,
             z,
-            opts
+            Keyword.put(opts, :overlap_groups, overlap_groups)
           )
 
         attr_map = Map.new(result.attributions, fn a -> {a.spot_id, a.lift} end)
@@ -228,33 +228,53 @@ defmodule BstsNx.SpotAttributor do
         }
       end)
 
-    # Aggregate per-spot statistics
+    lift_columns = Enum.map(spots, fn spot -> Map.fetch!(per_spot_lifts, spot.id) end)
+    lift_rows = Enum.zip_with(lift_columns, & &1)
+    lifts_t = Nx.tensor(lift_rows, type: {:f, 64})
+    n_spots = length(spots)
+
+    means = Nx.mean(lifts_t, axes: [0]) |> Nx.to_flat_list()
+
+    sds =
+      if n_draws < 2 do
+        List.duplicate(0.0, n_spots)
+      else
+        Nx.standard_deviation(lifts_t, axes: [0], ddof: 1) |> Nx.to_flat_list()
+      end
+
+    sorted = Nx.sort(lifts_t, axis: 0)
+    lower_idx = trunc(Float.floor(alpha / 2.0 * max(n_draws - 1, 0)))
+    upper_idx = trunc(Float.ceil((1.0 - alpha / 2.0) * max(n_draws - 1, 0)))
+
+    lowers =
+      sorted
+      |> Nx.slice([lower_idx, 0], [1, n_spots])
+      |> Nx.squeeze(axes: [0])
+      |> Nx.to_flat_list()
+
+    uppers =
+      sorted
+      |> Nx.slice([upper_idx, 0], [1, n_spots])
+      |> Nx.squeeze(axes: [0])
+      |> Nx.to_flat_list()
+
+    p_positives =
+      lifts_t
+      |> Nx.greater(0.0)
+      |> Nx.mean(axes: [0])
+      |> Nx.to_flat_list()
+
     attributions =
-      Enum.map(spots, fn spot ->
-        lifts = Map.fetch!(per_spot_lifts, spot.id)
-        mean_lift = Enum.sum(lifts) / n_draws
-
-        lift_sd =
-          if n_draws < 2 do
-            0.0
-          else
-            ss =
-              Enum.reduce(lifts, 0.0, fn l, acc -> acc + (l - mean_lift) * (l - mean_lift) end)
-
-            safe_sqrt(ss / (n_draws - 1))
-          end
-
-        sorted = Enum.sort(lifts)
-        {lower, upper} = quantiles(sorted, n_draws, alpha)
-        p_pos = Enum.count(lifts, fn l -> l > 0.0 end) / n_draws
-
+      spots
+      |> Enum.with_index()
+      |> Enum.map(fn {spot, idx} ->
         %{
           spot_id: spot.id,
-          lift: mean_lift,
-          lift_sd: lift_sd,
-          lift_lower: lower,
-          lift_upper: upper,
-          p_positive: p_pos,
+          lift: Enum.at(means, idx),
+          lift_sd: Enum.at(sds, idx),
+          lift_lower: Enum.at(lowers, idx),
+          lift_upper: Enum.at(uppers, idx),
+          p_positive: Enum.at(p_positives, idx),
           window_start: spot.window_start,
           window_end: spot.window_end
         }
@@ -266,14 +286,10 @@ defmodule BstsNx.SpotAttributor do
       if n_draws < 2 do
         0.0
       else
-        mean_total = Enum.sum(per_draw_totals) / n_draws
-
-        ss =
-          Enum.reduce(per_draw_totals, 0.0, fn dt, acc ->
-            acc + (dt - mean_total) * (dt - mean_total)
-          end)
-
-        safe_sqrt(ss / (n_draws - 1))
+        per_draw_totals
+        |> Nx.tensor(type: {:f, 64})
+        |> Nx.standard_deviation(ddof: 1)
+        |> Nx.to_number()
       end
 
     %{
@@ -284,16 +300,14 @@ defmodule BstsNx.SpotAttributor do
     }
   end
 
-  defp quantiles(sorted, n, alpha) do
-    BstsNx.Utils.percentile_interval(sorted, n, alpha)
-  end
-
   # Shared attribution core used by `attribute/4` and `attribute_posterior/5`.
   defp evaluate_attribution(groups, spot_map, obs_arr, mean_arr, var_arr, obs_var, z, opts) do
     overlap_groups =
-      groups
-      |> Enum.filter(fn g -> length(g) > 1 end)
-      |> Enum.map(fn g -> Enum.map(g, & &1.id) end)
+      Keyword.get_lazy(opts, :overlap_groups, fn ->
+        groups
+        |> Enum.filter(fn g -> length(g) > 1 end)
+        |> Enum.map(fn g -> Enum.map(g, & &1.id) end)
+      end)
 
     # Process each group
     attributions =

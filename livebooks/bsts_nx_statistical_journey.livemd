@@ -13,27 +13,38 @@ We will:
 
 Everything is reproducible and seeded.
 
+## Narrative Thread: "Operation Midnight Spike"
+
+You are the lead web engineer at **Northstar Commerce**. Last night, a high-profile TV campaign aired during a championship game and sessions spiked hard.
+
+By tomorrow morning, leadership wants answers:
+
+* How much lift was truly caused by TV?
+* Which spots deserve credit when they overlap?
+* Are we robust enough to trust the estimate and operationalize it?
+
+Each section below is a chapter in that investigation.
+
 ## 1) Setup
 
+_Story beat:_ 08:00 AM. The war room opens, and we load the tooling before touching the data.
+
 ```elixir
-project_root =
-  cond do
-    File.exists?("mix.exs") ->
-      File.cwd!()
-
-    File.exists?(Path.expand("../mix.exs", File.cwd!())) ->
-      Path.expand("..", File.cwd!())
-
-    true ->
-      raise "Could not find mix.exs. Open this Livebook from inside the bsts_nx repository."
-  end
+project_root = "/Users/nicholas/develop/bsts_nx"
 
 Mix.install([
+  {:nx, "~> 0.11.0"},
+  {:exla, "~> 0.11.0"},
+  {:xla, "~> 0.10.0"},
   {:bsts_nx, path: project_root},
   {:kino_vega_lite, "~> 0.1.13"}
 ])
 
-IO.puts("Loaded bsts_nx from: #{inspect(local_root || :github)}")
+Nx.global_default_backend(Nx.BinaryBackend)
+
+IO.puts("Loaded bsts_nx from: #{inspect(project_root || :github)}")
+IO.puts("Nx default backend: #{inspect(Nx.default_backend())}")
+IO.puts("EXLA is strongly recommended for this notebook.")
 
 alias BstsNx.{
   CausalImpact,
@@ -73,6 +84,108 @@ defmodule NotebookHelpers do
     Nx.Random.key(seed)
   end
 
+  defp loud_warning(lines) do
+    banner = String.duplicate("!", 92)
+    IO.puts("")
+    IO.puts(banner)
+    IO.puts("!!! EXLA WARNING: EXLA BACKEND IS NOT ACTIVE !!!")
+    Enum.each(lines, &IO.puts/1)
+    IO.puts(banner)
+    IO.puts("")
+  end
+
+  def backend_status do
+    process_count = :erlang.system_info(:process_count)
+    process_limit = :erlang.system_info(:process_limit)
+
+    %{
+      default_backend: Nx.default_backend(),
+      process_count: process_count,
+      process_limit: process_limit,
+      headroom: process_limit - process_count
+    }
+  end
+
+  def use_binary! do
+    Nx.global_default_backend(Nx.BinaryBackend)
+    backend_status()
+  end
+
+  def try_exla!(opts \\ []) do
+    min_headroom = Keyword.get(opts, :min_headroom, 10_000)
+    warn = Keyword.get(opts, :warn, true)
+    status = backend_status()
+
+    result =
+      if status.headroom < min_headroom do
+        Nx.global_default_backend(Nx.BinaryBackend)
+
+        backend_status()
+        |> Map.put(:exla_status, :skipped_low_headroom)
+        |> Map.put(:min_headroom, min_headroom)
+      else
+        try do
+          # Keep BinaryBackend for eager ops (loops in Smoother.rts, etc.)
+          # and use EXLA only as the defn compiler. This avoids spawning
+          # an EXLA CallbackServer for every small Nx operation in tight loops.
+          Nx.global_default_backend(Nx.BinaryBackend)
+          Nx.Defn.global_default_options(compiler: EXLA)
+          _ = Nx.backend_transfer(Nx.tensor([0.0]), EXLA.Backend)
+
+          backend_status()
+          |> Map.put(:exla_status, :enabled)
+          |> Map.put(:exla_mode, :compiler_only)
+        rescue
+          error ->
+            Nx.global_default_backend(Nx.BinaryBackend)
+            Nx.Defn.global_default_options(compiler: Nx.Defn.Evaluator)
+
+            backend_status()
+            |> Map.put(:exla_status, :fallback_binary)
+            |> Map.put(:exla_error, Exception.message(error))
+        catch
+          :exit, reason ->
+            Nx.global_default_backend(Nx.BinaryBackend)
+            Nx.Defn.global_default_options(compiler: Nx.Defn.Evaluator)
+
+            backend_status()
+            |> Map.put(:exla_status, :fallback_binary)
+            |> Map.put(:exla_error, inspect(reason))
+        end
+      end
+
+    if warn and result.exla_status != :enabled do
+      base_lines = [
+        "Current Nx backend: #{inspect(result.default_backend)}",
+        "Process usage: #{result.process_count}/#{result.process_limit} (headroom #{result.headroom})",
+        "Structured sections (7.2/9.2) will be much slower without EXLA."
+      ]
+
+      lines =
+        case result.exla_status do
+          :skipped_low_headroom ->
+            [
+              "EXLA activation skipped: low process headroom (< #{result.min_headroom})."
+              | base_lines
+            ]
+
+          :fallback_binary ->
+            [
+              "EXLA activation failed and backend fell back to BinaryBackend.",
+              "EXLA error: #{Map.get(result, :exla_error)}"
+              | base_lines
+            ]
+
+          other ->
+            ["EXLA unavailable (status #{inspect(other)})." | base_lines]
+        end
+
+      loud_warning(lines)
+    end
+
+    result
+  end
+
   def mean(list) when is_list(list) and list != [] do
     Enum.sum(list) / length(list)
   end
@@ -86,6 +199,23 @@ defmodule NotebookHelpers do
   end
 
   def sd(_), do: 0.0
+
+  def mae(a, b) when is_list(a) and is_list(b) and a != [] and length(a) == length(b) do
+    Enum.zip(a, b)
+    |> Enum.map(fn {x, y} -> abs(x - y) end)
+    |> mean()
+  end
+
+  def mae(_, _), do: 0.0
+
+  def rmse(a, b) when is_list(a) and is_list(b) and a != [] and length(a) == length(b) do
+    Enum.zip(a, b)
+    |> Enum.map(fn {x, y} -> (x - y) * (x - y) end)
+    |> mean()
+    |> :math.sqrt()
+  end
+
+  def rmse(_, _), do: 0.0
 
   def quantile(sorted, q) when sorted != [] do
     pos = q * (length(sorted) - 1)
@@ -120,7 +250,9 @@ defmodule NotebookHelpers do
 
   def posterior_var(_), do: []
 
-  def per_t_bands(draws, alpha \\ 0.05) when is_list(draws) and draws != [] do
+  def per_t_bands(draws, alpha \\ 0.05)
+
+  def per_t_bands(draws, alpha) when is_list(draws) and draws != [] do
     Enum.zip_with(draws, fn vals ->
       sorted = Enum.sort(vals)
 
@@ -154,13 +286,17 @@ defmodule NotebookHelpers do
     width = Keyword.get(opts, :width, 900)
     height = Keyword.get(opts, :height, 320)
     title = Keyword.get(opts, :title)
+    legend_title = Keyword.get(opts, :legend_title, "series")
 
     Vl.new(width: width, height: height, title: title)
     |> Vl.data_from_values(rows)
     |> Vl.mark(:line)
     |> Vl.encode_field(:x, "t", type: :quantitative, title: "time index")
     |> Vl.encode_field(:y, "value", type: :quantitative)
-    |> Vl.encode_field(:color, "series", type: :nominal)
+    |> Vl.encode_field(:color, "series",
+      type: :nominal,
+      legend: [title: legend_title, orient: :bottom]
+    )
     |> Kino.VegaLite.new()
   end
 
@@ -168,6 +304,7 @@ defmodule NotebookHelpers do
     width = Keyword.get(opts, :width, 900)
     height = Keyword.get(opts, :height, 320)
     title = Keyword.get(opts, :title)
+    legend_title = Keyword.get(opts, :legend_title, "series")
 
     plot_rows =
       Enum.flat_map(rows, fn row ->
@@ -184,7 +321,10 @@ defmodule NotebookHelpers do
     |> Vl.mark(:line)
     |> Vl.encode_field(:x, "t", type: :quantitative, title: "time index")
     |> Vl.encode_field(:y, "value", type: :quantitative)
-    |> Vl.encode_field(:color, "series", type: :nominal)
+    |> Vl.encode_field(:color, "series",
+      type: :nominal,
+      legend: [title: legend_title, orient: :bottom]
+    )
     |> Kino.VegaLite.new()
   end
 
@@ -192,20 +332,28 @@ defmodule NotebookHelpers do
     width = Keyword.get(opts, :width, 900)
     height = Keyword.get(opts, :height, 320)
     title = Keyword.get(opts, :title)
+    legend_title = Keyword.get(opts, :legend_title, "category")
 
     Vl.new(width: width, height: height, title: title)
     |> Vl.data_from_values(rows)
     |> Vl.mark(:bar)
     |> Vl.encode_field(:x, "label", type: :nominal, title: "category")
     |> Vl.encode_field(:y, "value", type: :quantitative)
+    |> Vl.encode_field(:color, "label",
+      type: :nominal,
+      legend: [title: legend_title, orient: :bottom]
+    )
     |> Kino.VegaLite.new()
   end
 end
 
 NotebookHelpers.seed!(2026)
+NotebookHelpers.try_exla!(min_headroom: 10_000, warn: true)
 ```
 
 ## 2) Mental model: what BSTS is doing
+
+_Story beat:_ Product, Marketing, and Finance agree on one equation for the day: baseline behavior plus intervention effect plus noise.
 
 Think of your metric (sessions, signups, revenue) like this:
 
@@ -218,6 +366,8 @@ Think of your metric (sessions, signups, revenue) like this:
 `BstsNx` learns the baseline probabilistically, then computes effect as `actual - counterfactual`.
 
 ## 3) Build a compact synthetic world with known truth
+
+_Story beat:_ Before analyzing real spend, we rehearse on a digital twin where the true answer is known.
 
 ```elixir
 minutes_per_hour = 60
@@ -279,12 +429,23 @@ spots_post_hours =
   end)
   |> Enum.filter(fn s -> s.window_end > s.window_start and s.window_start < post_len end)
 
+reconstructed_hourly =
+  Enum.zip(baseline_hourly, tv_hourly)
+  |> Enum.map(fn {b, e} -> b + e end)
+
+decomposition_residual =
+  Enum.zip(obs_hourly, reconstructed_hourly)
+  |> Enum.map(fn {obs, recon} -> obs - recon end)
+
 %{
+  mission_name: config.name,
   n_hours: length(obs_hourly),
   pre_period: pre_period,
   post_period: post_period,
   spots_in_post: length(spots_post_hours),
-  true_total_lift: synthetic.ground_truth.total_lift
+  true_total_lift: synthetic.ground_truth.total_lift,
+  decomposition_rmse: NotebookHelpers.rmse(obs_hourly, reconstructed_hourly),
+  decomposition_residual_sd: NotebookHelpers.sd(decomposition_residual)
 }
 ```
 
@@ -311,6 +472,8 @@ Kino.DataTable.new(
 
 ## 4) Adstock and saturation: two key nonlinear effect concepts
 
+_Story beat:_ Media remembers and audiences fatigue. We encode both effects so our toy world behaves like campaigns do in practice.
+
 ### 4.1 `BstsNx.Synthetic.Adstock.geometric_adstock/2`
 
 A single pulse can have delayed carry-over.
@@ -336,7 +499,19 @@ NotebookHelpers.line_plot(rows,
 )
 ```
 
+```elixir
+%{
+  impulse_area: Enum.sum(impulse),
+  adstock_area: Enum.sum(adstocked),
+  saturated_peak: Enum.max(saturated),
+  peak_compression_pct:
+    100.0 * (1.0 - Enum.max(saturated) / max(Enum.max(adstocked), 1.0e-9))
+}
+```
+
 ## 5) Kalman filter: online Bayesian state estimation
+
+_Story beat:_ During the campaign, we need hourly updates. Filtering gives the "right now" baseline estimate.
 
 You can think of this as a probabilistic smoothing cache for latent state.
 
@@ -378,7 +553,22 @@ NotebookHelpers.line_plot(rows,
 )
 ```
 
+```elixir
+prediction_mae = NotebookHelpers.mae(kalman_obs, pred_mean)
+filtered_mae = NotebookHelpers.mae(kalman_obs, filtered_mean)
+defn_alignment_rmse = NotebookHelpers.rmse(filtered_mean, defn_mean)
+
+%{
+  one_step_prediction_mae: prediction_mae,
+  filtered_posterior_mae: filtered_mae,
+  posterior_correction_gain_pct: 100.0 * (prediction_mae - filtered_mae) / max(prediction_mae, 1.0e-9),
+  defn_vs_eager_filtered_rmse: defn_alignment_rmse
+}
+```
+
 ## 6) RTS smoothing and posterior trajectories
+
+_Story beat:_ After the dust settles, we replay the timeline with hindsight and refine latent state estimates.
 
 Filtering uses information up to time `t`. Smoothing uses the full sequence.
 
@@ -408,7 +598,22 @@ NotebookHelpers.line_plot(rows,
 )
 ```
 
+```elixir
+true_baseline_kalman = Enum.take(baseline_hourly, length(kalman_obs))
+filtered_rmse_vs_truth = NotebookHelpers.rmse(filtered_mean, true_baseline_kalman)
+smoothed_rmse_vs_truth = NotebookHelpers.rmse(smoothed_mean, true_baseline_kalman)
+
+%{
+  filtered_rmse_vs_true_baseline: filtered_rmse_vs_truth,
+  smoothed_rmse_vs_true_baseline: smoothed_rmse_vs_truth,
+  hindsight_gain_pct:
+    100.0 * (filtered_rmse_vs_truth - smoothed_rmse_vs_truth) / max(filtered_rmse_vs_truth, 1.0e-9)
+}
+```
+
 ## 7) Gibbs sampling: full posterior over states and variances
+
+_Story beat:_ Executives ask, "How sure are we?" MCMC gives uncertainty, not just point estimates.
 
 ### 7.1 Scalar sampler
 
@@ -472,7 +677,11 @@ diagnostics = %{
   ess_single_chain1: Diagnostics.ess_single(Enum.at(process_chains, 0))
 }
 
-diagnostics
+%{
+  diagnostics: diagnostics,
+  convergence_rule_of_thumb: "r_hat < 1.05 and healthy ESS",
+  convergence_status: if(diagnostics.r_hat < 1.05, do: :looks_good, else: :inspect_further)
+}
 ```
 
 ```elixir
@@ -489,7 +698,12 @@ NotebookHelpers.line_plot(rows,
 
 ## 8) Structured models: trend + seasonality + regression controls
 
+_Story beat:_ We upgrade from a toy baseline to something production-shaped: trend, seasonality, and external controls.
+
 This is where BSTS becomes a composable engineering system.
+
+For interactive Livebook runs on `Nx.BinaryBackend`, we intentionally keep this
+section lighter. For larger structured models, prefer EXLA.
 
 * `Components.local_linear_trend_spec/1`
 * `Components.seasonal_spec/2`
@@ -508,7 +722,7 @@ trend_spec =
     obs_var: 2.0
   )
 
-seasonal_spec = Components.seasonal_spec(24, process_var: 0.05, obs_var: 2.0)
+seasonal_spec = Components.seasonal_spec(8, process_var: 0.05, obs_var: 2.0)
 regression_spec = Components.regression_spec(regressors, var_beta: 0.02, obs_var: 2.0)
 
 structured_spec =
@@ -517,19 +731,22 @@ structured_spec =
   |> Components.compose_specs(regression_spec)
 
 structured_samples =
-  GibbsSampler.sample_structured(obs_hourly, structured_spec, 40,
-    burn_in: 15,
+  GibbsSampler.sample_structured(obs_hourly, structured_spec, 6,
+    burn_in: 3,
     seed: 77
   )
 
 %{
   n_structured_samples: length(structured_samples),
   q_dims_resampled: length(structured_spec.q_specs),
-  state_dim: Nx.axis_size(structured_spec.f, 0)
+  state_dim: Nx.axis_size(structured_spec.f, 0),
+  n_regression_controls: Nx.axis_size(regressors, 1)
 }
 ```
 
 ## 9) Causal impact: from posterior counterfactual to lift
+
+_Story beat:_ This is the core verdict section: what likely happened without TV, and what TV added on top.
 
 ### 9.1 Local-level causal impact (`estimate/4`)
 
@@ -542,7 +759,11 @@ impact_scalar =
   )
 
 summary_scalar = CausalImpact.summary(impact_scalar)
-summary_scalar.cumulative_effect
+
+%{
+  scalar_cumulative_effect: summary_scalar.cumulative_effect,
+  scalar_relative_effect: summary_scalar.relative_effect
+}
 ```
 
 ```elixir
@@ -571,14 +792,16 @@ NotebookHelpers.interval_plot(rows,
 ### 9.2 Structured causal impact with controls (`estimate_structured/5`)
 
 ```elixir
+NotebookHelpers.try_exla!(min_headroom: 10_000)
+
 impact_structured =
   CausalImpact.estimate_structured(
     obs_hourly,
     pre_period,
     post_period,
     structured_spec,
-    num_samples: 50,
-    burn_in: 25,
+    num_samples: 30,
+    burn_in: 15,
     seed: 202
   )
 
@@ -593,7 +816,15 @@ true_post_lift =
   true_post_lift: true_post_lift,
   scalar_estimated_cumulative: summary_scalar.cumulative_effect.mean,
   structured_estimated_cumulative: summary_structured.cumulative_effect.mean,
-  structured_ci95: {summary_structured.cumulative_effect.lower, summary_structured.cumulative_effect.upper}
+  scalar_abs_error: abs(summary_scalar.cumulative_effect.mean - true_post_lift),
+  structured_abs_error: abs(summary_structured.cumulative_effect.mean - true_post_lift),
+  structured_ci95: {summary_structured.cumulative_effect.lower, summary_structured.cumulative_effect.upper},
+  better_recovery: if(
+    abs(summary_structured.cumulative_effect.mean - true_post_lift) <=
+      abs(summary_scalar.cumulative_effect.mean - true_post_lift),
+    do: :structured,
+    else: :scalar
+  )
 }
 ```
 
@@ -613,10 +844,17 @@ filter_estimate =
     alpha: 0.05
   )
 
-filter_estimate.cumulative_effect
+%{
+  filter_cumulative_effect: filter_estimate.cumulative_effect,
+  structured_cumulative_mean: summary_structured.cumulative_effect.mean,
+  filter_minus_structured_mean:
+    filter_estimate.cumulative_effect.mean - summary_structured.cumulative_effect.mean
+}
 ```
 
 ## 10) High-level intervention API
+
+_Story beat:_ Leadership wants a one-command summary, not a statistical deep dive.
 
 `InterventionAnalysis` wraps model building + impact + significance checks.
 
@@ -642,6 +880,8 @@ InterventionAnalysis.report(analysis)
 
 ## 11) Covariate selection before modeling
 
+_Story beat:_ We pick controls like witnesses in an investigation: relevant, stable, and not noisy bystanders.
+
 Use pre-period correlations to pick controls.
 
 ```elixir
@@ -665,7 +905,17 @@ Kino.DataTable.new(
 )
 ```
 
+```elixir
+%{
+  selected_control_indices: selection.selected_indices,
+  n_selected_controls: length(selection.selected_indices),
+  selection_threshold: 0.15
+}
+```
+
 ## 12) Attribution and Shapley allocation
+
+_Story beat:_ Multiple spots aired close together; now we split incremental lift fairly across overlapping windows.
 
 ### 12.1 Core utility functions
 
@@ -719,6 +969,16 @@ attr_posterior
 ```
 
 ```elixir
+sum_of_spot_lifts = Enum.reduce(attr_posterior.attributions, 0.0, fn a, acc -> acc + a.lift end)
+
+%{
+  total_lift: attr_posterior.total_lift,
+  sum_of_spot_lifts: sum_of_spot_lifts,
+  reconciliation_gap: attr_posterior.total_lift - sum_of_spot_lifts
+}
+```
+
+```elixir
 rows =
   Enum.map(attr_posterior.attributions, fn a ->
     %{label: a.spot_id, value: a.lift}
@@ -734,6 +994,8 @@ Kino.DataTable.new(attr_posterior.attributions)
 ```
 
 ## 13) End-to-end pipeline (`Pipeline.run/6`)
+
+_Story beat:_ The manual analysis gets packaged into a repeatable mission runbook.
 
 This chains structured causal impact + posterior attribution.
 
@@ -756,11 +1018,15 @@ pipeline_result =
 %{
   pipeline_total_lift: pipeline_result.attributions.total_lift,
   pipeline_total_sd: pipeline_result.attributions.total_lift_sd,
-  true_post_lift: true_post_lift
+  true_post_lift: true_post_lift,
+  pipeline_minus_structured_mean:
+    pipeline_result.attributions.total_lift - summary_structured.cumulative_effect.mean
 }
 ```
 
 ## 14) Forecasting APIs
+
+_Story beat:_ The crisis is over; now operations asks what happens next week so staffing and inventory can plan.
 
 ### 14.1 Generic `Forecaster`
 
@@ -791,6 +1057,24 @@ rows =
 NotebookHelpers.interval_plot(rows,
   title: "Forecast horizon: actual vs posterior intervals"
 )
+```
+
+```elixir
+forecast_mae = NotebookHelpers.mae(test, forecast.mean)
+
+forecast_coverage =
+  Enum.with_index(test)
+  |> Enum.count(fn {actual, t} ->
+    lower = Enum.at(forecast.lower, t)
+    upper = Enum.at(forecast.upper, t)
+    actual >= lower and actual <= upper
+  end)
+  |> Kernel./(max(length(test), 1))
+
+%{
+  forecast_horizon_mae: forecast_mae,
+  interval_coverage_pct: 100.0 * forecast_coverage
+}
 ```
 
 ### 14.2 Demand forecasting with regressors
@@ -840,6 +1124,8 @@ ar_forecast =
 
 ## 15) Anomaly detection
 
+_Story beat:_ Not every spike is marketing. We add guards for incidents, bots, and tracking glitches.
+
 ```elixir
 normal_history = Enum.take(obs_hourly, 96)
 stream = Enum.take(Enum.drop(obs_hourly, 96), 24)
@@ -858,8 +1144,19 @@ detector = AnomalyDetector.fit(normal_history,
 scores = AnomalyDetector.score(detector, stream_with_anomalies)
 summary = AnomalyDetector.summary(scores)
 flagged = AnomalyDetector.detect(detector, stream_with_anomalies, min_severity: :warning)
+flagged_indices =
+  scores
+  |> Enum.with_index()
+  |> Enum.filter(fn {s, _idx} ->
+    s.anomaly? and s.severity in [:warning, :critical]
+  end)
+  |> Enum.map(&elem(&1, 1))
 
-%{summary: summary, flagged_count: length(flagged)}
+%{
+  summary: summary,
+  flagged_count: length(flagged),
+  flagged_indices: flagged_indices
+}
 ```
 
 ```elixir
@@ -884,6 +1181,8 @@ NotebookHelpers.line_plot(rows ++ threshold_rows,
 ```
 
 ## 16) Rolling baseline and TV attribution wrappers
+
+_Story beat:_ We hand the method to partner teams via pragmatic wrappers that run with less custom glue.
 
 ```elixir
 {rolling_cf, rolling_fit} =
@@ -929,15 +1228,18 @@ tv_result =
 %{
   total_lift: tv_result.total_lift,
   total_lift_sd: tv_result.total_lift_sd,
-  overlaps: tv_result.overlaps
+  overlaps: tv_result.overlaps,
+  full_wrapper_minus_baseline: tv_result.total_lift - attr_from_baseline.total_lift
 }
 ```
 
 ## 17) Marketing and policy wrappers
 
+_Story beat:_ The same causal machinery now evaluates campaigns and product interventions beyond TV.
+
 ```elixir
 campaign = %{
-  name: "campaign_demo",
+  name: "midnight_spike_tv",
   channel: :tv,
   start_index: 97,
   end_index: 120,
@@ -954,7 +1256,7 @@ marketing_result =
   )
 
 intervention = %{
-  intervention_name: "feature_rollout",
+  intervention_name: "checkout_policy_rollout",
   intervention_date_index: 97,
   pre_period_start: 1,
   outcome_metric: "sessions"
@@ -978,6 +1280,8 @@ policy_result =
 ```
 
 ## 18) Validation and calibration
+
+_Story beat:_ Before publishing results, we try to break our own conclusion with diagnostics and calibration checks.
 
 ```elixir
 actual_t = Nx.tensor(post_obs)
@@ -1033,7 +1337,8 @@ assessment =
   durbin_watson: dw,
   placebo: placebo,
   stability: stability,
-  assessment: assessment
+  assessment: assessment,
+  release_ready?: Enum.all?(assessment, fn {_k, v} -> v in [:pass, :skip] end)
 }
 ```
 
@@ -1053,7 +1358,18 @@ calibration =
 calibration
 ```
 
+```elixir
+%{
+  covered_true_lift?: calibration.covered,
+  relative_error_pct: 100.0 * calibration.relative_error,
+  estimated_mean: calibration.estimated_mean,
+  true_lift: calibration.true_lift
+}
+```
+
 ## 19) Function map of the public modules
+
+_Story beat:_ We document the toolkit so the next engineer can jump in without repeating our archaeology.
 
 This gives you a practical "where do I start" index.
 
@@ -1094,6 +1410,8 @@ Kino.DataTable.new(rows)
 
 ## 20) Suggested self-guided exercises
 
+_Story beat:_ Optional side quests to stress-test intuition and build muscle memory.
+
 1. Change `config.effect.coefficient` and rerun impact + attribution. Watch how posterior uncertainty changes.
 2. Add stronger seasonality to the synthetic generator and compare scalar vs structured impact recovery.
 3. Replace `method: :mcmc` with `method: :filter` in intervention/anomaly sections and compare speed/accuracy.
@@ -1101,6 +1419,8 @@ Kino.DataTable.new(rows)
 5. Add one irrelevant control series and see whether `CovariateSelection.select/3` excludes it.
 
 ## 21) End state checklist
+
+_Story beat:_ Debrief complete. You now have a full campaign-measurement playbook from first signal to validated decision.
 
 If you completed this notebook, you have touched:
 

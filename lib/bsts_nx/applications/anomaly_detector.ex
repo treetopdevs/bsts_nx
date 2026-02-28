@@ -202,12 +202,12 @@ defmodule BstsNx.Applications.AnomalyDetector do
     %{filter_state: x, filter_cov: p, f: f, h: h, q: q, r: r} = detector
 
     # One-step prediction
-    x_pred = Nx.multiply(f, x)
-    p_pred = Nx.add(Nx.multiply(Nx.multiply(f, p), f), q)
+    x_pred = f * x
+    p_pred = f * p * f + q
 
     # Predicted observation
-    y_pred = Nx.to_number(Nx.multiply(h, x_pred))
-    y_var = Nx.to_number(Nx.add(Nx.multiply(Nx.multiply(h, p_pred), h), r))
+    y_pred = h * x_pred
+    y_var = h * p_pred * h + r
     y_sd = :math.sqrt(max(y_var, 1.0e-10))
 
     score = build_score(observation, y_pred, y_sd, detector.z_threshold)
@@ -215,12 +215,12 @@ defmodule BstsNx.Applications.AnomalyDetector do
     # Kalman update
     innovation = observation - y_pred
     s = y_var
-    k = if s > 1.0e-15, do: Nx.to_number(Nx.multiply(p_pred, h)) / s, else: 0.0
+    k = if s > 1.0e-15, do: p_pred * h / s, else: 0.0
 
-    new_x = Nx.tensor(Nx.to_number(x_pred) + k * innovation)
-    new_p = Nx.tensor(Nx.to_number(p_pred) * (1.0 - Nx.to_number(h) * k))
+    new_x = x_pred + k * innovation
+    new_p = max(p_pred * (1.0 - h * k), 0.0)
 
-    updated = %{detector | filter_state: new_x, filter_cov: Nx.max(new_p, Nx.tensor(0.0))}
+    updated = %{detector | filter_state: new_x, filter_cov: new_p}
     {score, updated}
   end
 
@@ -359,12 +359,12 @@ defmodule BstsNx.Applications.AnomalyDetector do
       posterior_mean: nil,
       posterior_sd: nil,
       spec: nil,
-      filter_state: final_x,
-      filter_cov: final_p,
-      f: Nx.tensor(f),
-      h: Nx.tensor(h),
-      q: Nx.tensor(q),
-      r: Nx.tensor(r)
+      filter_state: Nx.to_number(final_x),
+      filter_cov: Nx.to_number(final_p),
+      f: f * 1.0,
+      h: h * 1.0,
+      q: q * 1.0,
+      r: r * 1.0
     }
   end
 
@@ -372,63 +372,54 @@ defmodule BstsNx.Applications.AnomalyDetector do
 
   defp compute_structured_predictions(samples, spec, t, n) do
     h = spec.h
-    # Convert to :array for O(1) random access in the nested loop
-    h_arr = if is_list(h), do: :array.from_list(h), else: nil
-    sample_state_arrays = Enum.map(samples, fn s -> :array.from_list(s.states) end)
+    states_t = samples |> Enum.map(&Nx.stack(&1.states)) |> Nx.stack()
 
-    per_step =
-      Enum.map(0..(t - 1), fn step ->
-        vals =
-          Enum.map(sample_state_arrays, fn state_arr ->
-            state = :array.get(step, state_arr)
+    preds =
+      if is_list(h) do
+        h_rows = h |> Enum.map(&h_to_row_tensor/1) |> Nx.stack()
+        Nx.sum(Nx.multiply(states_t, Nx.reshape(h_rows, {1, t, Nx.axis_size(h_rows, 1)})), axes: [2])
+      else
+        Nx.dot(states_t, h_to_row_tensor(h))
+      end
 
-            h_t = if h_arr, do: :array.get(step, h_arr), else: h
+    means = preds |> Nx.mean(axes: [0]) |> Nx.to_flat_list()
 
-            h_row = if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
-            Nx.to_number(Nx.dot(h_row, state))
-          end)
+    sds =
+      if n < 2 do
+        List.duplicate(1.0, t)
+      else
+        preds
+        |> Nx.standard_deviation(axes: [0], ddof: 1)
+        |> Nx.to_flat_list()
+        |> Enum.map(&max(&1, 1.0e-6))
+      end
 
-        mean = Enum.sum(vals) / n
-
-        sd =
-          if n < 2 do
-            1.0
-          else
-            ss = Enum.reduce(vals, 0.0, fn v, acc -> acc + (v - mean) * (v - mean) end)
-            :math.sqrt(ss / (n - 1))
-          end
-
-        {mean, max(sd, 1.0e-6)}
-      end)
-
-    {Enum.map(per_step, &elem(&1, 0)), Enum.map(per_step, &elem(&1, 1))}
+    {means, sds}
   end
 
   defp compute_scalar_predictions(samples, t, n) do
-    # Convert to :array for O(1) random access
-    sample_state_arrays = Enum.map(samples, fn s -> :array.from_list(s.states) end)
+    states_t =
+      samples
+      |> Enum.map(fn s -> s.states |> Enum.map(&Nx.to_number/1) end)
+      |> Nx.tensor(type: {:f, 64})
 
-    per_step =
-      Enum.map(0..(t - 1), fn step ->
-        vals =
-          Enum.map(sample_state_arrays, fn state_arr ->
-            Nx.to_number(:array.get(step, state_arr))
-          end)
+    means = states_t |> Nx.mean(axes: [0]) |> Nx.to_flat_list()
 
-        mean = Enum.sum(vals) / n
+    sds =
+      if n < 2 do
+        List.duplicate(1.0, t)
+      else
+        states_t
+        |> Nx.standard_deviation(axes: [0], ddof: 1)
+        |> Nx.to_flat_list()
+        |> Enum.map(&max(&1, 1.0e-6))
+      end
 
-        sd =
-          if n < 2 do
-            1.0
-          else
-            ss = Enum.reduce(vals, 0.0, fn v, acc -> acc + (v - mean) * (v - mean) end)
-            :math.sqrt(ss / (n - 1))
-          end
+    {means, sds}
+  end
 
-        {mean, max(sd, 1.0e-6)}
-      end)
-
-    {Enum.map(per_step, &elem(&1, 0)), Enum.map(per_step, &elem(&1, 1))}
+  defp h_to_row_tensor(%Nx.Tensor{} = h_t) do
+    if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
   end
 
   defp extrapolate_mean(%{posterior_mean: means}, idx) when is_list(means) do

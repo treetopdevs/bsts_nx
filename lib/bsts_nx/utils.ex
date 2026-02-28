@@ -6,12 +6,12 @@ defmodule BstsNx.Utils do
   @doc """
   Converts numbers or lists into Nx tensors; leaves tensors unchanged.
 
-  Scalars are wrapped in a 1-element tensor and squeezed to a
-  0-dimensional tensor.  Lists are converted directly via `Nx.tensor/1`.
+  Scalars are converted directly to 0-dimensional tensors. Lists are
+  converted directly via `Nx.tensor/1`.
   """
   @spec to_tensor(number | list | Nx.t()) :: Nx.t()
   def to_tensor(%Nx.Tensor{} = t), do: t
-  def to_tensor(v) when is_number(v), do: Nx.tensor([v]) |> Nx.squeeze()
+  def to_tensor(v) when is_number(v), do: Nx.tensor(v)
   def to_tensor(list) when is_list(list), do: Nx.tensor(list)
 
   @doc """
@@ -46,9 +46,10 @@ defmodule BstsNx.Utils do
 
   defp cholesky_with_jitter(mat) do
     dim = Nx.shape(mat) |> elem(0)
+    eye = Nx.eye(dim)
 
     Enum.reduce_while([1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3], nil, fn jitter_scale, _acc ->
-      jitter = Nx.eye(dim) |> Nx.multiply(jitter_scale)
+      jitter = Nx.multiply(eye, jitter_scale)
 
       chol =
         try do
@@ -97,22 +98,28 @@ defmodule BstsNx.Utils do
   """
   @spec safe_solve(Nx.t(), Nx.t()) :: Nx.t()
   def safe_solve(a, b) do
-    result =
-      try do
-        Nx.LinAlg.solve(a, b)
-      rescue
-        _ -> :failed
-      end
+    case scalar_or_1x1_solve(a, b) do
+      {:ok, tensor} ->
+        tensor
 
-    case result do
-      :failed ->
-        solve_with_jitter(a, b)
+      :not_applicable ->
+        result =
+          try do
+            linalg_solve_compat(a, b)
+          rescue
+            _ -> :failed
+          end
 
-      tensor ->
-        if has_non_finite?(tensor) do
-          solve_with_jitter(a, b)
-        else
-          tensor
+        case result do
+          :failed ->
+            solve_with_jitter(a, b)
+
+          tensor ->
+            if has_non_finite?(tensor) do
+              solve_with_jitter(a, b)
+            else
+              tensor
+            end
         end
     end
   end
@@ -122,44 +129,112 @@ defmodule BstsNx.Utils do
   """
   @spec has_non_finite?(Nx.t()) :: boolean()
   def has_non_finite?(tensor) do
-    Nx.any(Nx.logical_or(Nx.is_nan(tensor), Nx.is_infinity(tensor)))
-    |> Nx.to_number() == 1
+    tensor
+    |> Nx.abs()
+    |> Nx.less(Nx.Constants.infinity())
+    |> Nx.logical_not()
+    |> Nx.any()
+    |> Nx.to_number()
+    |> Kernel.==(1)
   end
 
   defp solve_with_jitter(a, b) do
     dim = Nx.axis_size(a, 0)
     a_sym = Nx.multiply(Nx.add(a, Nx.transpose(a)), 0.5)
 
-    Enum.reduce_while(
-      [1.0e-8, 1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3],
-      nil,
-      fn jitter_scale, _acc ->
-        jitter = Nx.eye(dim) |> Nx.multiply(jitter_scale)
+    if dim == 1 do
+      scalar_divide_with_jitter(Nx.to_number(Nx.squeeze(a_sym)), b)
+    else
+      Enum.reduce_while(
+        [1.0e-8, 1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3],
+        nil,
+        fn jitter_scale, _acc ->
+          jitter = Nx.eye(dim) |> Nx.multiply(jitter_scale)
 
-        result =
-          try do
-            Nx.LinAlg.solve(Nx.add(a_sym, jitter), b)
-          rescue
-            _ -> :failed
-          end
-
-        case result do
-          :failed ->
-            {:cont, nil}
-
-          tensor ->
-            if has_non_finite?(tensor) do
-              {:cont, nil}
-            else
-              {:halt, tensor}
+          result =
+            try do
+              linalg_solve_compat(Nx.add(a_sym, jitter), b)
+            rescue
+              _ -> :failed
             end
+
+          case result do
+            :failed ->
+              {:cont, nil}
+
+            tensor ->
+              if has_non_finite?(tensor) do
+                {:cont, nil}
+              else
+                {:halt, tensor}
+              end
+          end
+        end
+      ) ||
+        pinv_fallback(a_sym, b) ||
+        (
+          Logger.warning(
+            "Utils.safe_solve: solve failed even with max jitter 1e-3; " <>
+              "falling back to zero matrix"
+          )
+
+          Nx.broadcast(Nx.tensor(0.0), Nx.shape(b))
+        )
+    end
+  end
+
+  # On Nx 0.11+, direct solve is stable and fastest for the rank patterns used
+  # in this project.
+  defp linalg_solve_compat(a, b) do
+    Nx.LinAlg.solve(a, b)
+  end
+
+  defp scalar_or_1x1_solve(a, b) do
+    cond do
+      Nx.rank(a) == 0 ->
+        {:ok, scalar_divide_with_jitter(Nx.to_number(a), b)}
+
+      Nx.rank(a) == 2 and Nx.shape(a) == {1, 1} ->
+        {:ok, scalar_divide_with_jitter(Nx.to_number(Nx.squeeze(a)), b)}
+
+      true ->
+        :not_applicable
+    end
+  end
+
+  defp scalar_divide_with_jitter(denom, b) do
+    if abs(denom) >= 1.0e-15 do
+      direct = Nx.divide(b, denom)
+
+      if has_non_finite?(direct) do
+        scalar_divide_with_jitter_fallback(denom, b)
+      else
+        direct
+      end
+    else
+      scalar_divide_with_jitter_fallback(denom, b)
+    end
+  end
+
+  defp scalar_divide_with_jitter_fallback(denom, b) do
+    Enum.reduce_while([1.0e-8, 1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3], nil, fn jitter, _acc ->
+      adjusted = denom + jitter
+
+      if abs(adjusted) < 1.0e-15 do
+        {:cont, nil}
+      else
+        candidate = Nx.divide(b, adjusted)
+
+        if has_non_finite?(candidate) do
+          {:cont, nil}
+        else
+          {:halt, candidate}
         end
       end
-    ) ||
-      pinv_fallback(a_sym, b) ||
+    end) ||
       (
         Logger.warning(
-          "Utils.safe_solve: solve failed even with max jitter 1e-3; " <>
+          "Utils.safe_solve: scalar solve failed even with max jitter 1e-3; " <>
             "falling back to zero matrix"
         )
 
@@ -184,35 +259,11 @@ defmodule BstsNx.Utils do
     end
   end
 
-  # Rank-safe dot for Nx 0.6 compatibility
+  # Nx.dot handles all rank combinations we use; keep scalar/scalar explicit.
   defp compat_dot(a, b) do
     case {Nx.rank(a), Nx.rank(b)} do
       {0, 0} ->
         Nx.multiply(a, b)
-
-      {2, 1} ->
-        b_row = Nx.reshape(b, {1, Nx.axis_size(b, 0)})
-        Nx.multiply(a, b_row) |> Nx.sum(axes: [1])
-
-      {2, 2} ->
-        {m, n} = Nx.shape(a)
-        {n_b, p} = Nx.shape(b)
-
-        if n != n_b do
-          raise ArgumentError,
-                "incompatible matrix shapes for multiplication: #{inspect(Nx.shape(a))} and #{inspect(Nx.shape(b))}"
-        end
-
-        a_expanded = Nx.reshape(a, {m, n, 1})
-        b_expanded = Nx.reshape(b, {1, n, p})
-        Nx.multiply(a_expanded, b_expanded) |> Nx.sum(axes: [1])
-
-      {1, 2} ->
-        a_col = Nx.reshape(a, {Nx.axis_size(a, 0), 1})
-        Nx.multiply(a_col, b) |> Nx.sum(axes: [0])
-
-      {1, 1} ->
-        Nx.multiply(a, b) |> Nx.sum()
 
       _ ->
         Nx.dot(a, b)
@@ -241,7 +292,8 @@ defmodule BstsNx.Utils do
     last = n - 1
     lower_idx = trunc(Float.floor(alpha / 2.0 * last))
     upper_idx = trunc(Float.ceil((1.0 - alpha / 2.0) * last))
-    {Enum.at(sorted, max(lower_idx, 0)), Enum.at(sorted, min(upper_idx, last))}
+    arr = List.to_tuple(sorted)
+    {elem(arr, max(lower_idx, 0)), elem(arr, min(upper_idx, last))}
   end
 
   # Precomputed two-tailed z-scores for common significance levels.

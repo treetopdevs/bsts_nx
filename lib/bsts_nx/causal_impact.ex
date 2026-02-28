@@ -128,19 +128,20 @@ defmodule BstsNx.CausalImpact do
     seed_base = Keyword.get(opts, :seed, System.os_time())
     cf_base_key = Keyword.get(opts, :key, Nx.Random.key(seed_base))
     # Split into one key per sample for independent counterfactual draws
-    cf_keys = Nx.Random.split(cf_base_key, parts: length(pre_samples))
+    cf_key_rows = Nx.Random.split(cf_base_key, parts: length(pre_samples)) |> Nx.to_list()
 
     # Collect point effects and counterfactual predictions per sample by forward simulation
     effects =
-      Enum.with_index(pre_samples)
-      |> Enum.map(fn {sample, idx} ->
+      Enum.zip(pre_samples, cf_key_rows)
+      |> Enum.map(fn {sample, cf_key_row} ->
         # final state of pre-period
         final_state = List.last(sample.states)
         init_val = Nx.to_number(final_state)
         q = Nx.to_number(sample.process_var)
         r = Nx.to_number(sample.obs_var)
         # generate counterfactual by forward simulation (random walk with observation noise)
-        cf = generate_counterfactual(init_val, q, r, n_post, split_key_at(cf_keys, idx))
+        cf_key = Nx.tensor(cf_key_row, type: Nx.type(cf_base_key))
+        cf = generate_counterfactual(init_val, q, r, n_post, cf_key)
         # compute point effects as difference between actual post data and counterfactual
         point_effects =
           Enum.zip(post_data, cf)
@@ -246,17 +247,18 @@ defmodule BstsNx.CausalImpact do
     n_post = post_end - pre_end
     seed_base = Keyword.get(opts, :seed, System.os_time())
     cf_base_key = Keyword.get(opts, :key, Nx.Random.key(seed_base))
-    cf_keys = Nx.Random.split(cf_base_key, parts: length(pre_samples))
+    cf_key_rows = Nx.Random.split(cf_base_key, parts: length(pre_samples)) |> Nx.to_list()
 
     # Get post-period H entries for counterfactual forward simulation
     post_h = post_period_h(spec.h, pre_end, n_post)
 
     effects =
-      Enum.with_index(pre_samples)
-      |> Enum.map(fn {sample, idx} ->
+      Enum.zip(pre_samples, cf_key_rows)
+      |> Enum.map(fn {sample, cf_key_row} ->
         final_state = List.last(sample.states)
         q_mat = sample.q_matrix
         r = Nx.to_number(sample.obs_var)
+        cf_key = Nx.tensor(cf_key_row, type: Nx.type(cf_base_key))
 
         # Forward-simulate the state-space model for counterfactual
         cf =
@@ -267,7 +269,7 @@ defmodule BstsNx.CausalImpact do
             q_mat,
             r,
             n_post,
-            split_key_at(cf_keys, idx)
+            cf_key
           )
 
         point_effects =
@@ -328,50 +330,74 @@ defmodule BstsNx.CausalImpact do
   def summary(result) do
     n_post = length(result.actual)
     m = length(result.point_effects)
-    # Transpose: from list-of-samples to list-of-timesteps.
-    # Enum.zip_with/2 is O(n_post * m) vs O(n_post² * m) with Enum.at.
-    per_time_effects =
-      if m == 0,
-        do: List.duplicate([], n_post),
-        else: Enum.zip_with(result.point_effects, & &1)
+    lower_idx = trunc(Float.floor(0.025 * max(m - 1, 0)))
+    upper_idx = trunc(Float.ceil(0.975 * max(m - 1, 0)))
 
-    mean_or_nan = fn vals ->
-      if m == 0, do: :nan, else: Enum.sum(vals) / m
-    end
-
-    sd_or_nan = fn vals, mean ->
-      if m < 2,
-        do: :nan,
-        else:
-          :math.sqrt(
-            Enum.reduce(vals, 0.0, fn x, acc -> acc + :math.pow(x - mean, 2) end) / (m - 1)
-          )
-    end
-
-    interval_or_nan = fn vals ->
-      if m < 2 do
-        {:nan, :nan}
-      else
-        sorted = Enum.sort(vals)
-        BstsNx.Utils.percentile_interval(sorted, m, 0.05)
-      end
-    end
-
-    # summarise each time step
     point_summaries =
-      Enum.map(per_time_effects, fn vals ->
-        mean = mean_or_nan.(vals)
-        sd = sd_or_nan.(vals, mean)
-        {lower, upper} = interval_or_nan.(vals)
-        %{mean: mean, sd: sd, lower: lower, upper: upper}
-      end)
+      cond do
+        m == 0 ->
+          List.duplicate(%{mean: :nan, sd: :nan, lower: :nan, upper: :nan}, n_post)
 
-    # summarise cumulative and relative effects
+        true ->
+          effects_t = Nx.tensor(result.point_effects, type: {:f, 64})
+          means = Nx.mean(effects_t, axes: [0]) |> Nx.to_flat_list()
+
+          sds =
+            if m < 2 do
+              List.duplicate(:nan, n_post)
+            else
+              Nx.standard_deviation(effects_t, axes: [0], ddof: 1) |> Nx.to_flat_list()
+            end
+
+          {lowers, uppers} =
+            if m < 2 do
+              {List.duplicate(:nan, n_post), List.duplicate(:nan, n_post)}
+            else
+              sorted = Nx.sort(effects_t, axis: 0)
+
+              lower =
+                sorted
+                |> Nx.slice([lower_idx, 0], [1, n_post])
+                |> Nx.squeeze(axes: [0])
+                |> Nx.to_flat_list()
+
+              upper =
+                sorted
+                |> Nx.slice([upper_idx, 0], [1, n_post])
+                |> Nx.squeeze(axes: [0])
+                |> Nx.to_flat_list()
+
+              {lower, upper}
+            end
+
+          Enum.map(0..(n_post - 1), fn idx ->
+            %{mean: Enum.at(means, idx), sd: Enum.at(sds, idx), lower: Enum.at(lowers, idx), upper: Enum.at(uppers, idx)}
+          end)
+      end
+
     sum_stats = fn vals ->
-      mean = mean_or_nan.(vals)
-      sd = sd_or_nan.(vals, mean)
-      {lower, upper} = interval_or_nan.(vals)
-      %{mean: mean, sd: sd, lower: lower, upper: upper}
+      cond do
+        m == 0 ->
+          %{mean: :nan, sd: :nan, lower: :nan, upper: :nan}
+
+        m == 1 ->
+          v = hd(vals)
+          %{mean: v, sd: :nan, lower: :nan, upper: :nan}
+
+        true ->
+          v_t = Nx.tensor(vals, type: {:f, 64})
+          sorted = Nx.sort(v_t)
+
+          lower = sorted |> Nx.slice([lower_idx], [1]) |> Nx.squeeze() |> Nx.to_number()
+          upper = sorted |> Nx.slice([upper_idx], [1]) |> Nx.squeeze() |> Nx.to_number()
+
+          %{
+            mean: v_t |> Nx.mean() |> Nx.to_number(),
+            sd: v_t |> Nx.standard_deviation(ddof: 1) |> Nx.to_number(),
+            lower: lower,
+            upper: upper
+          }
+      end
     end
 
     cum_stats = sum_stats.(result.cumulative_effects)
@@ -674,9 +700,9 @@ defmodule BstsNx.CausalImpact do
     # observation noise, and one unused.  Using 3 parts ensures process
     # and observation streams share no common ancestor from a single split,
     # consistent with the per-step splitting in generate_structured_counterfactual.
-    keys = Nx.Random.split(key, parts: 3)
-    key_process = split_key_at(keys, 0)
-    key_obs = split_key_at(keys, 1)
+    [key_process_row, key_obs_row] = Nx.Random.split(key, parts: 2) |> Nx.to_list()
+    key_process = Nx.tensor(key_process_row, type: Nx.type(key))
+    key_obs = Nx.tensor(key_obs_row, type: Nx.type(key))
     {process_noise, _} = Nx.Random.normal(key_process, 0.0, 1.0, shape: {n_steps})
     {obs_noise, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {n_steps})
 
@@ -710,18 +736,18 @@ defmodule BstsNx.CausalImpact do
     q_sds = Nx.sqrt(Nx.max(q_diag, Nx.tensor(0.0)))
     obs_sd = :math.sqrt(max(obs_var, 0.0))
 
-    # Pre-split keys for all steps
-    keys = Nx.Random.split(key, parts: n_steps + 1)
+    # Pre-extract all state/observation subkeys once to avoid per-step tensor slicing.
+    subkey_rows = Nx.Random.split(key, parts: n_steps * 2) |> Nx.to_list()
+    state_key_rows = Enum.take_every(subkey_rows, 2)
+    obs_key_rows = subkey_rows |> Enum.drop(1) |> Enum.take_every(2)
 
     # Iterate directly over post_h list to avoid O(n²) Enum.at access
-    {_, values, _} =
-      post_h
-      |> Enum.with_index()
-      |> Enum.reduce({Nx.flatten(final_state), [], keys}, fn {h_t, step}, {prev_state, acc, ks} ->
-        subkey = split_key_at(ks, step)
-        sub_keys = Nx.Random.split(subkey, parts: 2)
-        key_state = split_key_at(sub_keys, 0)
-        key_obs = split_key_at(sub_keys, 1)
+    {_, values} =
+      Enum.zip(post_h, Enum.zip(state_key_rows, obs_key_rows))
+      |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_t, {state_key_row, obs_key_row}},
+                                                       {prev_state, acc} ->
+        key_state = Nx.tensor(state_key_row, type: Nx.type(key))
+        key_obs = Nx.tensor(obs_key_row, type: Nx.type(key))
 
         # Process noise: sample N(0, I) then scale by sqrt(Q_diag)
         # Zero-variance dimensions get exactly zero noise
@@ -729,16 +755,16 @@ defmodule BstsNx.CausalImpact do
         process_noise = Nx.multiply(z_state, q_sds)
 
         # State transition: x_{t+1} = F * x_t + w_t
-        next_state = Nx.add(Nx.dot(f, prev_state), process_noise)
+        next_state = Nx.add(compat_dot(f, prev_state), process_noise)
 
         # Observation: y_t = H_t * x_t + v_t (using per-step H)
         h_row = if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
-        predicted_y = Nx.to_number(Nx.dot(h_row, next_state))
+        predicted_y = Nx.to_number(compat_dot(h_row, next_state))
 
         {z_obs, _} = Nx.Random.normal(key_obs, 0.0, 1.0)
         cf_obs = predicted_y + Nx.to_number(z_obs) * obs_sd
 
-        {next_state, [cf_obs | acc], ks}
+        {next_state, [cf_obs | acc]}
       end)
 
     Enum.reverse(values)
@@ -783,6 +809,17 @@ defmodule BstsNx.CausalImpact do
     end
   end
 
+  # Nx.dot handles all rank combinations used here; keep scalar/scalar explicit.
+  defp compat_dot(a, b) do
+    case {Nx.rank(a), Nx.rank(b)} do
+      {0, 0} ->
+        Nx.multiply(a, b)
+
+      _ ->
+        Nx.dot(a, b)
+    end
+  end
+
   defp require_h_coverage!(h_len, post_start_0based, n_post) do
     required_end = post_start_0based + n_post
 
@@ -795,11 +832,6 @@ defmodule BstsNx.CausalImpact do
 
   defp to_number(%Nx.Tensor{} = t), do: Nx.to_number(t)
   defp to_number(x) when is_number(x), do: x + 0.0
-
-  defp split_key_at(keys, idx) do
-    Nx.slice_along_axis(keys, idx, 1, axis: 0)
-    |> Nx.squeeze(axes: [0])
-  end
 
   defp take_time_slice_at(tensor, idx) do
     Nx.slice_along_axis(tensor, idx, 1, axis: 0)
