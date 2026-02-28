@@ -26,6 +26,7 @@ defmodule BstsNx.ShapleyAllocator do
   """
 
   import Bitwise
+  alias BstsNx.Utils
 
   @exact_threshold 12
 
@@ -119,7 +120,8 @@ defmodule BstsNx.ShapleyAllocator do
   def exact_shapley([], _value_fn), do: %{}
 
   def exact_shapley(spots, value_fn) do
-    n = length(spots)
+    ids = spots |> Enum.map(& &1.id) |> Enum.sort()
+    n = length(ids)
 
     if n > @exact_threshold do
       raise ArgumentError,
@@ -127,31 +129,34 @@ defmodule BstsNx.ShapleyAllocator do
               "got: #{n}; use monte_carlo_shapley/4 or allocate/4 for larger groups"
     end
 
-    ids = Enum.map(spots, & &1.id)
     factorials = precompute_factorials(n)
     n_fact = Map.fetch!(factorials, n)
+    num_coalitions = bsl(1, n)
+
+    coalition_cache =
+      Map.new(0..(num_coalitions - 1), fn mask ->
+        {mask, value_fn.(subset_from_mask(ids, mask))}
+      end)
 
     ids
     |> Enum.with_index()
     |> Enum.map(fn {player_id, player_idx} ->
-      others = List.delete_at(ids, player_idx)
-      m = length(others)
-      num_subsets = bsl(1, m)
+      player_bit = bsl(1, player_idx)
 
       shapley_value =
-        Enum.reduce(0..(num_subsets - 1), 0.0, fn mask, acc ->
-          subset = subset_from_mask(others, mask)
-          s_size = length(subset)
+        Enum.reduce(0..(num_coalitions - 1), 0.0, fn mask, acc ->
+          if band(mask, player_bit) == 0 do
+            s_size = popcount(mask)
 
-          weight =
-            Map.fetch!(factorials, s_size) *
-              Map.fetch!(factorials, n - s_size - 1) / n_fact
+            weight =
+              Map.fetch!(factorials, s_size) *
+                Map.fetch!(factorials, n - s_size - 1) / n_fact
 
-          with_player = Enum.sort([player_id | subset])
-          without_player = Enum.sort(subset)
-
-          marginal = value_fn.(with_player) - value_fn.(without_player)
-          acc + weight * marginal
+            marginal = Map.fetch!(coalition_cache, bor(mask, player_bit)) - Map.fetch!(coalition_cache, mask)
+            acc + weight * marginal
+          else
+            acc
+          end
         end)
 
       {player_id, shapley_value}
@@ -196,23 +201,20 @@ defmodule BstsNx.ShapleyAllocator do
 
     # Nx.Random doesn't support efficient permutation shuffling, so we derive
     # a deterministic :rand seed from the Nx key for tag-and-sort shuffling.
-    seed = key |> Nx.to_flat_list() |> :erlang.phash2()
-    initial_state = :rand.seed_s(:exsss, seed)
+    {a58, b58, c58} = key |> Nx.to_flat_list() |> Utils.derive_exsss_seed()
+    initial_state = :rand.seed_s(:exsss, {a58, b58, c58})
 
     {contributions, _final_state} =
       Enum.reduce(1..n_samples, {%{}, initial_state}, fn _sample, {acc, rand_state} ->
         {perm, new_rand_state} = shuffle_list(ids, rand_state)
 
-        {marginals, _coalition} =
-          Enum.reduce(perm, {%{}, []}, fn player_id, {marg, coalition} ->
-            sorted_without = Enum.sort(coalition)
-            sorted_with = Enum.sort([player_id | coalition])
-
-            v_with = value_fn.(sorted_with)
-            v_without = value_fn.(sorted_without)
+        {marginals, _coalition, _v_last} =
+          Enum.reduce(perm, {%{}, [], value_fn.([])}, fn player_id, {marg, coalition, v_without} ->
+            coalition_with = sorted_insert(coalition, player_id)
+            v_with = value_fn.(coalition_with)
             marginal = v_with - v_without
 
-            {Map.put(marg, player_id, marginal), [player_id | coalition]}
+            {Map.put(marg, player_id, marginal), coalition_with, v_with}
           end)
 
         new_acc =
@@ -262,6 +264,12 @@ defmodule BstsNx.ShapleyAllocator do
   @spec default_value_function(%{String.t() => float()}, keyword()) :: value_function()
   def default_value_function(spot_lifts, opts \\ []) do
     decay = Keyword.get(opts, :decay, 0.7)
+    max_rank = max(map_size(spot_lifts) - 1, 0)
+
+    decay_powers =
+      0..max_rank
+      |> Enum.map(&:math.pow(decay, &1))
+      |> List.to_tuple()
 
     fn sorted_ids ->
       # Sort by absolute lift descending (contribution rank) rather than by ID,
@@ -275,7 +283,15 @@ defmodule BstsNx.ShapleyAllocator do
       |> Enum.with_index()
       |> Enum.reduce(0.0, fn {id, rank}, acc ->
         lift = Map.get(spot_lifts, id, 0.0)
-        acc + lift * :math.pow(decay, rank)
+
+        decay_weight =
+          if rank <= max_rank do
+            elem(decay_powers, rank)
+          else
+            :math.pow(decay, rank)
+          end
+
+        acc + lift * decay_weight
       end)
     end
   end
@@ -455,5 +471,15 @@ defmodule BstsNx.ShapleyAllocator do
 
     shuffled = tagged |> Enum.sort_by(&elem(&1, 0)) |> Enum.map(&elem(&1, 1))
     {shuffled, final_state}
+  end
+
+  defp popcount(mask), do: popcount(mask, 0)
+  defp popcount(0, acc), do: acc
+  defp popcount(mask, acc), do: popcount(band(mask, mask - 1), acc + 1)
+
+  defp sorted_insert([], value), do: [value]
+
+  defp sorted_insert([h | t] = list, value) do
+    if value <= h, do: [value | list], else: [h | sorted_insert(t, value)]
   end
 end

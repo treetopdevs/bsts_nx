@@ -138,7 +138,7 @@ defmodule BstsNx.CovariateSelection do
       )
 
       y_raw = Nx.to_flat_list(target_t)
-      x_rows = Nx.to_flat_list(candidates) |> Enum.chunk_every(p)
+      x_rows = Nx.to_flat_list(candidates) |> Enum.chunk_every(p) |> Enum.map(&List.to_tuple/1)
       {y, _mean_y, _sd_y} = standardize(y_raw)
       y_var = variance(y)
 
@@ -156,7 +156,7 @@ defmodule BstsNx.CovariateSelection do
       else
         x_cols =
           Enum.map(0..(p - 1), fn j ->
-            col = Enum.map(x_rows, fn row -> Enum.at(row, j) end)
+            col = Enum.map(x_rows, &elem(&1, j))
             {scaled, _mean, _sd} = standardize(col)
             scaled
           end)
@@ -279,13 +279,21 @@ defmodule BstsNx.CovariateSelection do
         selected_matrix: nil
       }
     else
-      # Compute correlation for each candidate column
+      t_centered = Nx.subtract(target_t, Nx.mean(target_t))
+      c_centered = Nx.subtract(candidates, Nx.mean(candidates, axes: [0]))
+
+      numerators = Nx.dot(t_centered, c_centered)
+      t_ss = Nx.sum(Nx.multiply(t_centered, t_centered))
+      col_ss = Nx.sum(Nx.multiply(c_centered, c_centered), axes: [0])
+      denom = Nx.sqrt(Nx.multiply(t_ss, col_ss))
+      near_zero = Nx.less(denom, 1.0e-15)
+      corrs = Nx.select(near_zero, Nx.broadcast(0.0, {p}), Nx.divide(numerators, denom))
+
       correlations =
-        Enum.map(0..(p - 1), fn j ->
-          col = Nx.slice(candidates, [0, j], [n, 1]) |> Nx.flatten()
-          corr = pearson_correlation(target_t, col)
-          {j, corr}
-        end)
+        corrs
+        |> Nx.to_flat_list()
+        |> Enum.with_index()
+        |> Enum.map(fn {corr, j} -> {j, corr} end)
 
       # Sort by absolute correlation descending
       sorted = Enum.sort_by(correlations, fn {_j, corr} -> abs(corr) end, :desc)
@@ -317,12 +325,8 @@ defmodule BstsNx.CovariateSelection do
   defp build_selected_matrix(_candidates, _n, []), do: nil
 
   defp build_selected_matrix(candidates, n, selected_indices) do
-    cols =
-      Enum.map(selected_indices, fn j ->
-        Nx.slice(candidates, [0, j], [n, 1])
-      end)
-
-    Nx.concatenate(cols, axis: 1)
+    _ = n
+    Nx.take(candidates, Nx.tensor(selected_indices, type: {:s, 64}), axis: 1)
   end
 
   @doc """
@@ -555,8 +559,7 @@ defmodule BstsNx.CovariateSelection do
   end
 
   defp dot(xs, ys) do
-    Enum.zip(xs, ys)
-    |> Enum.reduce(0.0, fn {x, y}, acc -> acc + x * y end)
+    Enum.zip_reduce(xs, ys, 0.0, fn x, y, acc -> acc + x * y end)
   end
 
   defp add_scaled(vec, x, scale) do

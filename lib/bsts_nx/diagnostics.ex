@@ -100,13 +100,6 @@ defmodule BstsNx.Diagnostics do
         # Precompute centered values for O(1) access
         centered = :array.from_list(Enum.map(chain, &(&1 - mean)))
 
-        # Compute autocovariance at lag k using precomputed centered values
-        gamma = fn lag ->
-          Enum.reduce(0..(n - lag - 1), 0.0, fn i, acc ->
-            acc + :array.get(i, centered) * :array.get(i + lag, centered)
-          end) / n
-        end
-
         # Initial positive sequence: sum consecutive pairs of autocovariances
         # gamma(2k) + gamma(2k+1) for k = 0, 1, 2, ...
         max_k = div(n - 2, 2)
@@ -114,7 +107,9 @@ defmodule BstsNx.Diagnostics do
         # Build pair sums and apply initial positive sequence truncation
         {tau, _} =
           Enum.reduce_while(0..max_k, {0.0, :infinity}, fn k, {tau_acc, prev_pair} ->
-            pair_sum = gamma.(2 * k) + gamma.(2 * k + 1)
+            pair_sum =
+              autocovariance_at(centered, n, 2 * k) +
+                autocovariance_at(centered, n, 2 * k + 1)
 
             # Truncate at first non-positive pair sum
             if pair_sum <= 0.0 do
@@ -275,21 +270,22 @@ defmodule BstsNx.Diagnostics do
     end
 
     sorted = Enum.sort(samples)
+    sorted_t = List.to_tuple(sorted)
     n = length(sorted)
 
     if n == 1 do
-      v = hd(sorted)
+      v = elem(sorted_t, 0)
       {v, v}
     else
       window = max(trunc(Float.ceil(level * n)), 1)
 
       if window >= n do
-        {hd(sorted), List.last(sorted)}
+        {elem(sorted_t, 0), elem(sorted_t, n - 1)}
       else
         {best_low, best_high, _best_width} =
           Enum.reduce(0..(n - window), nil, fn i, best ->
-            low = Enum.at(sorted, i)
-            high = Enum.at(sorted, i + window - 1)
+            low = elem(sorted_t, i)
+            high = elem(sorted_t, i + window - 1)
             width = high - low
 
             case best do
@@ -340,18 +336,21 @@ defmodule BstsNx.Diagnostics do
 
         b =
           Enum.reduce(means, 0.0, fn mean_i, acc ->
-            acc + :math.pow(mean_i - overall_mean, 2)
+            d = mean_i - overall_mean
+            acc + d * d
           end) * n / (m - 1)
 
         w =
-          Enum.reduce(chains_n, 0.0, fn c, acc ->
-            mean_c = Enum.sum(c) / n
+          (Enum.zip(chains_n, means)
+           |> Enum.reduce(0.0, fn {c, mean_c}, acc ->
+             var_c =
+               Enum.reduce(c, 0.0, fn x, acc2 ->
+                 d = x - mean_c
+                 acc2 + d * d
+               end) / (n - 1)
 
-            var_c =
-              Enum.reduce(c, 0.0, fn x, acc2 -> acc2 + :math.pow(x - mean_c, 2) end) / (n - 1)
-
-            acc + var_c
-          end) / m
+             acc + var_c
+           end)) / m
 
         var_hat = (n - 1) / n * w + b / n
         {m, n, w, b, var_hat}
@@ -377,14 +376,7 @@ defmodule BstsNx.Diagnostics do
     n = length(samples)
     mean = Enum.sum(samples) / n
     centered = :array.from_list(Enum.map(samples, &(&1 - mean)))
-
-    gamma = fn lag ->
-      Enum.reduce(0..(n - lag - 1), 0.0, fn i, acc ->
-        acc + :array.get(i, centered) * :array.get(i + lag, centered)
-      end) / n
-    end
-
-    gamma_0 = gamma.(0)
+    gamma_0 = autocovariance_at(centered, n, 0)
 
     if gamma_0 <= 0.0 do
       0.0
@@ -397,12 +389,20 @@ defmodule BstsNx.Diagnostics do
         else
           Enum.reduce(1..used_lag, 0.0, fn lag, acc ->
             weight = 1.0 - lag / (used_lag + 1)
-            acc + 2.0 * weight * gamma.(lag)
+            acc + 2.0 * weight * autocovariance_at(centered, n, lag)
           end)
         end
 
       s0 = gamma_0 + gamma_sum
       if s0 > 0.0, do: s0, else: 0.0
     end
+  end
+
+  defp autocovariance_at(_centered, n, lag) when lag >= n, do: 0.0
+
+  defp autocovariance_at(centered, n, lag) do
+    Enum.reduce(0..(n - lag - 1), 0.0, fn i, acc ->
+      acc + :array.get(i, centered) * :array.get(i + lag, centered)
+    end) / n
   end
 end
