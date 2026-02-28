@@ -46,7 +46,7 @@ defmodule BstsNx.Validation do
     b = Nx.take(baseline, idx)
     errors = Nx.subtract(a, b)
 
-    rmse = errors |> Nx.pow(2) |> Nx.mean() |> Nx.sqrt() |> Nx.to_number()
+    rmse = errors |> Nx.multiply(errors) |> Nx.mean() |> Nx.sqrt() |> Nx.to_number()
 
     # MAPE: floor denominator at 1.0 to avoid division by zero
     abs_actual = a |> Nx.abs() |> Nx.max(1.0)
@@ -164,8 +164,8 @@ defmodule BstsNx.Validation do
     r_curr = Nx.slice(r, [1], [n - 1])
     diffs = Nx.subtract(r_curr, r_prev)
 
-    numerator = diffs |> Nx.pow(2) |> Nx.sum() |> Nx.to_number()
-    denominator = r |> Nx.pow(2) |> Nx.sum() |> Nx.to_number()
+    numerator = diffs |> Nx.multiply(diffs) |> Nx.sum() |> Nx.to_number()
+    denominator = r |> Nx.multiply(r) |> Nx.sum() |> Nx.to_number()
 
     statistic = if denominator > 0, do: numerator / denominator, else: 2.0
 

@@ -41,7 +41,28 @@ defmodule BstsNx.StateSpace do
     to_square_matrix(single)
   end
 
-  def block_diag(matrices) do
+  def block_diag(matrices) when is_list(matrices) do
+    if Enum.all?(matrices, &is_number/1) do
+      matrices
+      |> Nx.tensor(type: {:f, 64})
+      |> Nx.make_diagonal()
+    else
+      block_diag_matrix_impl(matrices)
+    end
+  end
+
+  defp block_diag_matrix_impl([a, b]) do
+    a_t = to_square_matrix(a)
+    b_t = to_square_matrix(b)
+    {n1, _} = Nx.shape(a_t)
+    {n2, _} = Nx.shape(b_t)
+
+    top = Nx.concatenate([a_t, Nx.broadcast(0.0, {n1, n2})], axis: 1)
+    bottom = Nx.concatenate([Nx.broadcast(0.0, {n2, n1}), b_t], axis: 1)
+    Nx.concatenate([top, bottom], axis: 0)
+  end
+
+  defp block_diag_matrix_impl(matrices) do
     mats = Enum.map(matrices, &to_square_matrix/1)
     sizes = Enum.map(mats, fn m -> Nx.shape(m) |> elem(0) end)
     total = Enum.sum(sizes)
