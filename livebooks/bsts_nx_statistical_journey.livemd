@@ -178,13 +178,17 @@ defmodule NotebookHelpers do
     width = Keyword.get(opts, :width, 900)
     height = Keyword.get(opts, :height, 320)
     title = Keyword.get(opts, :title)
+    legend_title = Keyword.get(opts, :legend_title, "series")
 
     Vl.new(width: width, height: height, title: title)
     |> Vl.data_from_values(rows)
     |> Vl.mark(:line)
     |> Vl.encode_field(:x, "t", type: :quantitative, title: "time index")
     |> Vl.encode_field(:y, "value", type: :quantitative)
-    |> Vl.encode_field(:color, "series", type: :nominal)
+    |> Vl.encode_field(:color, "series",
+      type: :nominal,
+      legend: [title: legend_title, orient: :bottom]
+    )
     |> Kino.VegaLite.new()
   end
 
@@ -192,6 +196,7 @@ defmodule NotebookHelpers do
     width = Keyword.get(opts, :width, 900)
     height = Keyword.get(opts, :height, 320)
     title = Keyword.get(opts, :title)
+    legend_title = Keyword.get(opts, :legend_title, "series")
 
     plot_rows =
       Enum.flat_map(rows, fn row ->
@@ -208,7 +213,10 @@ defmodule NotebookHelpers do
     |> Vl.mark(:line)
     |> Vl.encode_field(:x, "t", type: :quantitative, title: "time index")
     |> Vl.encode_field(:y, "value", type: :quantitative)
-    |> Vl.encode_field(:color, "series", type: :nominal)
+    |> Vl.encode_field(:color, "series",
+      type: :nominal,
+      legend: [title: legend_title, orient: :bottom]
+    )
     |> Kino.VegaLite.new()
   end
 
@@ -216,12 +224,17 @@ defmodule NotebookHelpers do
     width = Keyword.get(opts, :width, 900)
     height = Keyword.get(opts, :height, 320)
     title = Keyword.get(opts, :title)
+    legend_title = Keyword.get(opts, :legend_title, "category")
 
     Vl.new(width: width, height: height, title: title)
     |> Vl.data_from_values(rows)
     |> Vl.mark(:bar)
     |> Vl.encode_field(:x, "label", type: :nominal, title: "category")
     |> Vl.encode_field(:y, "value", type: :quantitative)
+    |> Vl.encode_field(:color, "label",
+      type: :nominal,
+      legend: [title: legend_title, orient: :bottom]
+    )
     |> Kino.VegaLite.new()
   end
 end
