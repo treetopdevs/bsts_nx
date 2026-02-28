@@ -297,20 +297,19 @@ defmodule BstsNx.GibbsSampler do
             "h vector length (#{length(h_vals)}) must match observations length (#{t})"
     end
 
+    obs_tensor = observations_to_filter_tensor(observations)
+    h_tensor = Nx.tensor(h_vals, type: {:f, 32})
+
     {_, _, samples_acc, _key_acc} =
       Enum.reduce(1..total_iters, {process_var_t, obs_var_t, [], key}, fn iter,
                                                                           {q_prev, r_prev, acc, k} ->
-        {filtered, predicted} =
-          KalmanFilter.filter_with_pred(observations, f_t, h, q_prev, r_prev, x0, p0)
+        {xs, ps} = KalmanFilter.filter_defn(obs_tensor, f_t, h_tensor, q_prev, r_prev, x0, p0)
+        {sxs, sps} = BstsNx.Smoother.rts_defn(xs, ps, f_t, q_prev)
 
-        smoothed = BstsNx.Smoother.rts(filtered, predicted, f_t)
+        {sampled_xs, new_key_smooth} =
+          BstsNx.Smoother.simulate_defn(sxs, sps, xs, ps, f_t, q_prev, k)
 
-        {sampled_states, new_key_smooth} =
-          BstsNx.Smoother.simulate_with_key(smoothed, filtered, predicted, f_t, key: k)
-
-        {_means, covs} = Enum.unzip(filtered)
-        # Batch conversion: stack all scalar state tensors and extract as flat list
-        x_list = sampled_states |> Nx.stack() |> Nx.to_flat_list()
+        x_list = Nx.to_flat_list(sampled_xs)
 
         {process_ss, num_diffs} = process_sum_of_squares(x_list, f_val)
         {obs_ss, t_steps} = obs_sum_of_squares(observations, x_list, h_vals)
@@ -327,8 +326,8 @@ defmodule BstsNx.GibbsSampler do
         acc2 =
           if iter > burn_in and rem(iter - burn_in, thin) == 0 do
             sample_map = %{
-              states: sampled_states,
-              state_covs: covs,
+              states: scalar_tensor_list(sampled_xs),
+              state_covs: scalar_tensor_list(ps),
               process_var: q_sample,
               obs_var: r_sample
             }
@@ -1417,6 +1416,22 @@ defmodule BstsNx.GibbsSampler do
   defp split_key_at(keys, idx) do
     Nx.slice_along_axis(keys, idx, 1, axis: 0)
     |> Nx.squeeze(axes: [0])
+  end
+
+  defp observations_to_filter_tensor(observations) do
+    nan = Nx.Constants.nan() |> Nx.to_number()
+
+    observations
+    |> Enum.map(fn y ->
+      if missing_observation?(y), do: nan, else: observation_to_number(y)
+    end)
+    |> Nx.tensor(type: {:f, 32})
+  end
+
+  defp scalar_tensor_list(tensor) do
+    tensor
+    |> Nx.to_flat_list()
+    |> Enum.map(&Nx.tensor/1)
   end
 
   defp observation_to_number(%Nx.Tensor{} = v), do: Nx.to_number(v)

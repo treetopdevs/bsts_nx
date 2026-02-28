@@ -176,6 +176,69 @@ defmodule BstsNx.Smoother do
     {sxs_out, sps_out, lag1_out}
   end
 
+  @doc """
+  Compiled scalar Carter-Kohn simulation smoother.
+
+  Draws one latent state trajectory from the posterior using the scalar
+  filtered/smoothed outputs returned by `filter_defn/7` and `rts_defn/4`.
+  The entire backward pass runs inside `Nx.Defn`.
+
+  Returns `{states, next_key}` where `states` has shape `{t}`.
+  """
+  @spec simulate_defn(
+          Nx.t(),
+          Nx.t(),
+          Nx.t(),
+          Nx.t(),
+          number | Nx.t(),
+          number | Nx.t(),
+          Nx.t()
+        ) :: {Nx.t(), Nx.t()}
+  def simulate_defn(smoothed_xs, smoothed_ps, filtered_xs, filtered_ps, f, q, key) do
+    f_t = to_tensor(f)
+    q_t = to_tensor(q)
+    simulate_defn_impl(smoothed_xs, smoothed_ps, filtered_xs, filtered_ps, f_t, q_t, key)
+  end
+
+  Nx.Defn.defn simulate_defn_impl(smoothed_xs, smoothed_ps, filtered_xs, filtered_ps, f, q, key) do
+    t = Nx.axis_size(smoothed_xs, 0)
+    {eps, key_out} = Nx.Random.normal(key, 0.0, 1.0, shape: {t})
+
+    states = Nx.broadcast(Nx.tensor(0.0), {t})
+    last_idx = t - 1
+
+    x_t_mean = take_scalar_at(smoothed_xs, last_idx)
+    p_t_cov = take_scalar_at(smoothed_ps, last_idx) |> Nx.max(1.0e-12)
+    x_t = x_t_mean + Nx.sqrt(p_t_cov) * take_scalar_at(eps, last_idx)
+    states = Nx.put_slice(states, [last_idx], Nx.reshape(x_t, {1}))
+
+    num_steps = t - 1
+
+    {_, states_out, _, _, _, _, _} =
+      while {k = Nx.tensor(0), states_acc = states, eps_in = eps, fxs = filtered_xs,
+             fps = filtered_ps, f_in = f, q_in = q},
+            k < num_steps do
+        i = last_idx - 1 - k
+        x_filt = take_scalar_at(fxs, i)
+        p_filt = take_scalar_at(fps, i)
+        x_pred_next = f_in * x_filt
+        p_pred_next = f_in * p_filt * f_in + q_in
+        near_zero_p = Nx.abs(p_pred_next) < 1.0e-15
+        safe_pred = Nx.select(near_zero_p, 1.0, p_pred_next)
+        j = Nx.select(near_zero_p, 0.0, p_filt * f_in / safe_pred)
+
+        x_next = take_scalar_at(states_acc, i + 1)
+        mean = x_filt + j * (x_next - x_pred_next)
+        cov = (p_filt * (1.0 - j * f_in)) |> Nx.max(1.0e-12)
+        x_i = mean + Nx.sqrt(cov) * take_scalar_at(eps_in, i)
+        states_new = Nx.put_slice(states_acc, [i], Nx.reshape(x_i, {1}))
+
+        {k + 1, states_new, eps_in, fxs, fps, f_in, q_in}
+      end
+
+    {states_out, key_out}
+  end
+
   Nx.Defn.defnp take_scalar_at(vec, idx) do
     Nx.slice(vec, [idx], [1]) |> Nx.squeeze()
   end

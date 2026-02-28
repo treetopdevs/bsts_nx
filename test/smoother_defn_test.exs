@@ -110,6 +110,51 @@ defmodule BstsNx.SmootherDefnTest do
     assert_in_delta(Nx.to_number(sps[0]), Nx.to_number(ps[0]), 1.0e-6)
   end
 
+  test "simulate_defn matches simulate_with_key for scalar systems with same key" do
+    obs = [1.0, 2.0, 2.5, 1.8, 2.2, 2.9]
+    f = 1.0
+    h = 1.0
+    q = 0.4
+    r = 0.8
+    x0 = 0.0
+    p0 = 1.0
+
+    obs_tensor = Nx.tensor(obs, type: {:f, 32})
+    {xs, ps} = KalmanFilter.filter_defn(obs_tensor, f, h, q, r, x0, p0)
+    {sxs, sps} = Smoother.rts_defn(xs, ps, f, q)
+
+    {filtered, predicted} = KalmanFilter.filter_with_pred(obs, f, h, q, r, x0, p0)
+    smoothed = Smoother.rts(filtered, predicted, f)
+
+    key = Nx.Random.key(1234)
+
+    {states_eager, key_eager} =
+      Smoother.simulate_with_key(smoothed, filtered, predicted, f, key: key)
+
+    {states_defn, key_defn} = Smoother.simulate_defn(sxs, sps, xs, ps, f, q, key)
+
+    eager_vals = Enum.map(states_eager, &Nx.to_number/1)
+    defn_vals = Nx.to_flat_list(states_defn)
+
+    Enum.zip(eager_vals, defn_vals)
+    |> Enum.each(fn {expected, actual} ->
+      assert_in_delta(expected, actual, 1.0e-5)
+    end)
+
+    assert Nx.to_flat_list(key_eager) == Nx.to_flat_list(key_defn)
+  end
+
+  test "simulate_defn returns a scalar trajectory for a single observation" do
+    obs_tensor = Nx.tensor([5.0], type: {:f, 32})
+    {xs, ps} = KalmanFilter.filter_defn(obs_tensor, 1.0, 1.0, 0.2, 0.5, 0.0, 1.0)
+    {sxs, sps} = Smoother.rts_defn(xs, ps, 1.0, 0.2)
+
+    {states, key_out} = Smoother.simulate_defn(sxs, sps, xs, ps, 1.0, 0.2, Nx.Random.key(77))
+
+    assert Nx.shape(states) == {1}
+    assert match?(%Nx.Tensor{}, key_out)
+  end
+
   test "smoothed variances are less than or equal to filtered variances" do
     obs = Enum.map(1..20, fn i -> i * 1.0 + :math.sin(i) end)
     obs_tensor = Nx.tensor(obs, type: {:f, 32})
