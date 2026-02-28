@@ -6,12 +6,12 @@ defmodule BstsNx.Utils do
   @doc """
   Converts numbers or lists into Nx tensors; leaves tensors unchanged.
 
-  Scalars are wrapped in a 1-element tensor and squeezed to a
-  0-dimensional tensor.  Lists are converted directly via `Nx.tensor/1`.
+  Scalars are converted directly to 0-dimensional tensors. Lists are
+  converted directly via `Nx.tensor/1`.
   """
   @spec to_tensor(number | list | Nx.t()) :: Nx.t()
   def to_tensor(%Nx.Tensor{} = t), do: t
-  def to_tensor(v) when is_number(v), do: Nx.tensor([v]) |> Nx.squeeze()
+  def to_tensor(v) when is_number(v), do: Nx.tensor(v)
   def to_tensor(list) when is_list(list), do: Nx.tensor(list)
 
   @doc """
@@ -46,9 +46,10 @@ defmodule BstsNx.Utils do
 
   defp cholesky_with_jitter(mat) do
     dim = Nx.shape(mat) |> elem(0)
+    eye = Nx.eye(dim)
 
     Enum.reduce_while([1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3], nil, fn jitter_scale, _acc ->
-      jitter = Nx.eye(dim) |> Nx.multiply(jitter_scale)
+      jitter = Nx.multiply(eye, jitter_scale)
 
       chol =
         try do
@@ -290,7 +291,8 @@ defmodule BstsNx.Utils do
     last = n - 1
     lower_idx = trunc(Float.floor(alpha / 2.0 * last))
     upper_idx = trunc(Float.ceil((1.0 - alpha / 2.0) * last))
-    {Enum.at(sorted, max(lower_idx, 0)), Enum.at(sorted, min(upper_idx, last))}
+    arr = List.to_tuple(sorted)
+    {elem(arr, max(lower_idx, 0)), elem(arr, min(upper_idx, last))}
   end
 
   # Precomputed two-tailed z-scores for common significance levels.

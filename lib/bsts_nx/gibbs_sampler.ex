@@ -288,7 +288,6 @@ defmodule BstsNx.GibbsSampler do
               "exceeds safety cap of #{max_iters}; reduce burn_in, num_samples or thin"
     end
 
-    f_val = Nx.to_number(f_t)
     t = length(observations)
     h_vals = h_to_number_list(h, t)
 
@@ -299,20 +298,19 @@ defmodule BstsNx.GibbsSampler do
 
     obs_tensor = observations_to_filter_tensor(observations)
     h_tensor = Nx.tensor(h_vals, type: {:f, 32})
+    obs_present_mask = Nx.equal(obs_tensor, obs_tensor)
+    t_steps = obs_present_mask |> Nx.sum() |> Nx.to_number() |> round()
+    num_diffs = max(t - 1, 0)
 
     {_, _, samples_acc, _key_acc} =
       Enum.reduce(1..total_iters, {process_var_t, obs_var_t, [], key}, fn iter,
                                                                           {q_prev, r_prev, acc, k} ->
         {xs, ps} = KalmanFilter.filter_defn(obs_tensor, f_t, h_tensor, q_prev, r_prev, x0, p0)
-        {sxs, sps} = BstsNx.Smoother.rts_defn(xs, ps, f_t, q_prev)
-
         {sampled_xs, new_key_smooth} =
-          BstsNx.Smoother.simulate_defn(sxs, sps, xs, ps, f_t, q_prev, k)
+          BstsNx.Smoother.simulate_from_filtered_defn(xs, ps, f_t, q_prev, k)
 
-        x_list = Nx.to_flat_list(sampled_xs)
-
-        {process_ss, num_diffs} = process_sum_of_squares(x_list, f_val)
-        {obs_ss, t_steps} = obs_sum_of_squares(observations, x_list, h_vals)
+        process_ss = process_sum_of_squares(sampled_xs, f_t)
+        obs_ss = obs_sum_of_squares(obs_tensor, sampled_xs, h_tensor, obs_present_mask)
 
         {q_sample, r_sample, next_key} =
           resample_variances(
@@ -1061,29 +1059,21 @@ defmodule BstsNx.GibbsSampler do
   end
 
   defp build_full_q_matrix(state_dim, struct_full_indices, q_struct) do
-    struct_map =
-      struct_full_indices
-      |> Enum.with_index()
-      |> Map.new(fn {full_idx, local_idx} -> {full_idx, local_idx} end)
+    n_struct = length(struct_full_indices)
 
-    q_struct_rows =
-      q_struct |> Nx.to_flat_list() |> Enum.chunk_every(max(length(struct_full_indices), 1))
+    if n_struct == 0 do
+      Nx.broadcast(0.0, {state_dim, state_dim})
+    else
+      base = Nx.broadcast(0.0, {state_dim, state_dim})
 
-    rows =
-      Enum.map(0..(state_dim - 1), fn i ->
-        Enum.map(0..(state_dim - 1), fn j ->
-          i_local = Map.get(struct_map, i)
-          j_local = Map.get(struct_map, j)
+      indices =
+        for full_i <- struct_full_indices, full_j <- struct_full_indices do
+          [full_i, full_j]
+        end
 
-          if i_local != nil and j_local != nil do
-            q_struct_rows |> Enum.at(i_local) |> Enum.at(j_local)
-          else
-            0.0
-          end
-        end)
-      end)
-
-    Nx.tensor(rows)
+      updates = Nx.reshape(q_struct, {n_struct * n_struct})
+      Nx.indexed_put(base, Nx.tensor(indices), updates)
+    end
   end
 
   defp build_full_state_trajectory(
@@ -1173,7 +1163,8 @@ defmodule BstsNx.GibbsSampler do
   end
 
   defp select_active_columns(rows, active) do
-    Enum.map(rows, fn row -> Enum.map(active, &Enum.at(row, &1)) end)
+    rows_t = Enum.map(rows, &List.to_tuple/1)
+    Enum.map(rows_t, fn row -> Enum.map(active, &elem(row, &1)) end)
   end
 
   defp put_active_values(base, indices, values) do
@@ -1237,13 +1228,15 @@ defmodule BstsNx.GibbsSampler do
       tensor
       |> Nx.to_flat_list()
       |> Enum.chunk_every(cols)
+      |> Enum.map(&List.to_tuple/1)
+      |> List.to_tuple()
 
     _ = rows
 
     row_indices
     |> Enum.map(fn r ->
-      row = Enum.at(row_data, r)
-      Enum.map(col_indices, &Enum.at(row, &1))
+      row = elem(row_data, r)
+      Enum.map(col_indices, &elem(row, &1))
     end)
     |> Nx.tensor()
   end
@@ -1269,56 +1262,54 @@ defmodule BstsNx.GibbsSampler do
   # Computes per-dimension sum of squares for process residuals.
   # Returns a map %{dim_index => sum_of_squares}.
   defp process_residuals_structured(sampled_states, f_t, q_specs) do
-    # sampled_states is a list of state tensors (vectors for multi-dim)
     t = length(sampled_states)
     state_dim = Nx.axis_size(f_t, 0)
 
     if t < 2 do
       Map.new(q_specs, fn qs -> {qs.dim_index, 0.0} end)
     else
-      initial_ss = Map.new(0..(state_dim - 1), fn d -> {d, 0.0} end)
+      states = Nx.stack(sampled_states)
+      prev_states = Nx.slice(states, [0, 0], [t - 1, state_dim])
+      next_states = Nx.slice(states, [1, 0], [t - 1, state_dim])
+      predicted = Nx.dot(prev_states, Nx.transpose(f_t))
+      residuals = Nx.subtract(next_states, predicted)
 
-      {final_ss, _prev_state} =
-        Enum.reduce(sampled_states, {initial_ss, nil}, fn x_curr, {ss_map, prev_state} ->
-          if prev_state == nil do
-            {ss_map, x_curr}
-          else
-            predicted = compat_dot(f_t, prev_state)
-            residual = Nx.subtract(x_curr, predicted) |> Nx.to_flat_list()
+      ss_vec =
+        residuals
+        |> Nx.multiply(residuals)
+        |> Nx.sum(axes: [0])
+        |> Nx.to_flat_list()
 
-            updated_ss =
-              Enum.with_index(residual)
-              |> Enum.reduce(ss_map, fn {val, d}, acc ->
-                Map.update!(acc, d, &(&1 + val * val))
-              end)
-
-            {updated_ss, x_curr}
-          end
-        end)
-
-      Map.new(q_specs, fn qs ->
-        {qs.dim_index, Map.get(final_ss, qs.dim_index, 0.0)}
-      end)
+      Map.new(q_specs, fn qs -> {qs.dim_index, Enum.at(ss_vec, qs.dim_index, 0.0)} end)
     end
   end
 
   # Computes observation sum of squares with multi-dimensional state support.
   # h_list is a list of per-timestep observation tensors.
   defp obs_residuals_structured(observations, sampled_states, h_list) do
-    observations
-    |> Enum.zip(sampled_states)
-    |> Enum.zip(h_list)
-    |> Enum.reduce({0.0, 0}, fn {{y, x_t}, h_t}, {acc_ss, acc_count} ->
-      if missing_observation?(y) do
-        {acc_ss, acc_count}
-      else
-        y_val = observation_to_number(y)
-        h_row = structured_h_row(h_t)
-        pred = Nx.to_number(compat_dot(h_row, Nx.flatten(x_t)))
-        diff = y_val - pred
-        {acc_ss + diff * diff, acc_count + 1}
-      end
-    end)
+    t = length(sampled_states)
+
+    if t == 0 do
+      {0.0, 0}
+    else
+      states = Nx.stack(sampled_states)
+      h_rows = h_list |> Enum.map(&structured_h_row/1) |> Enum.map(&Nx.flatten/1) |> Nx.stack()
+      preds = Nx.sum(Nx.multiply(h_rows, states), axes: [1])
+
+      obs_tensor = observations_to_filter_tensor(observations)
+      mask = Nx.equal(obs_tensor, obs_tensor)
+      diffs = Nx.subtract(obs_tensor, preds)
+
+      ss =
+        diffs
+        |> Nx.multiply(diffs)
+        |> then(&Nx.select(mask, &1, 0.0))
+        |> Nx.sum()
+        |> Nx.to_number()
+
+      count = mask |> Nx.sum() |> Nx.to_number() |> round()
+      {ss, count}
+    end
   end
 
   # Resamples each Q diagonal entry from its inverse-gamma posterior.
@@ -1337,12 +1328,14 @@ defmodule BstsNx.GibbsSampler do
 
   # Updates the diagonal entries of Q matrix after resampling.
   defp rebuild_q(q_prev, new_vals) do
-    Enum.reduce(new_vals, q_prev, fn {dim_idx, val}, q ->
-      # Create index tensor and update the diagonal entry
-      indices = Nx.tensor([[dim_idx, dim_idx]])
-      updates = Nx.tensor([val])
-      Nx.indexed_put(q, indices, updates)
-    end)
+    diag = Nx.take_diagonal(q_prev) |> Nx.to_flat_list()
+
+    updated_diag =
+      Enum.reduce(new_vals, diag, fn {dim_idx, val}, acc ->
+        List.replace_at(acc, dim_idx, val)
+      end)
+
+    Nx.tensor(updated_diag, type: Nx.type(q_prev)) |> Nx.make_diagonal()
   end
 
   # Normalizes spec.h into a per-timestep list of tensors for residual computation.
@@ -1488,37 +1481,33 @@ defmodule BstsNx.GibbsSampler do
   # -- Sum of squares helpers --------------------------------------------------
 
   # Process sum of squares with explicit transition parameter f
-  defp process_sum_of_squares(x_list, f_val) do
-    {ss, count, _prev} =
-      Enum.reduce(x_list, {0.0, 0, nil}, fn x_curr, {acc_ss, acc_count, prev} ->
-        if prev == nil do
-          {acc_ss, acc_count, x_curr}
-        else
-          diff = x_curr - f_val * prev
-          {acc_ss + diff * diff, acc_count + 1, x_curr}
-        end
-      end)
+  defp process_sum_of_squares(xs, f_t) do
+    t = Nx.axis_size(xs, 0)
 
-    {ss, count}
+    if t < 2 do
+      0.0
+    else
+      prev = Nx.slice(xs, [0], [t - 1])
+      curr = Nx.slice(xs, [1], [t - 1])
+
+      curr
+      |> Nx.subtract(Nx.multiply(f_t, prev))
+      |> then(&Nx.multiply(&1, &1))
+      |> Nx.sum()
+      |> Nx.to_number()
+    end
   end
 
   # Observation sum of squares with time-varying h
-  defp obs_sum_of_squares(observations, x_list, h_vals) do
-    {ss, count} =
-      observations
-      |> Enum.zip(x_list)
-      |> Enum.zip(h_vals)
-      |> Enum.reduce({0.0, 0}, fn {{y, x_t}, h_i}, {acc_ss, acc_count} ->
-        if missing_observation?(y) do
-          {acc_ss, acc_count}
-        else
-          y_val = observation_to_number(y)
-          diff = y_val - h_i * x_t
-          {acc_ss + diff * diff, acc_count + 1}
-        end
-      end)
+  defp obs_sum_of_squares(obs_tensor, xs, h_tensor, obs_present_mask) do
+    preds = Nx.multiply(h_tensor, xs)
+    diffs = Nx.subtract(obs_tensor, preds)
 
-    {ss, count}
+    diffs
+    |> then(&Nx.multiply(&1, &1))
+    |> then(&Nx.select(obs_present_mask, &1, 0.0))
+    |> Nx.sum()
+    |> Nx.to_number()
   end
 
   # Resample process and observation variances from inverse-gamma posteriors

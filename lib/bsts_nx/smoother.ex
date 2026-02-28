@@ -200,6 +200,20 @@ defmodule BstsNx.Smoother do
     simulate_defn_impl(smoothed_xs, smoothed_ps, filtered_xs, filtered_ps, f_t, q_t, key)
   end
 
+  @doc """
+  Compiled scalar Carter-Kohn sampler directly from filtered outputs.
+
+  This variant skips the separate RTS pass and performs one backward sampling
+  pass from `{filtered_xs, filtered_ps}`.
+  """
+  @spec simulate_from_filtered_defn(Nx.t(), Nx.t(), number | Nx.t(), number | Nx.t(), Nx.t()) ::
+          {Nx.t(), Nx.t()}
+  def simulate_from_filtered_defn(filtered_xs, filtered_ps, f, q, key) do
+    f_t = to_tensor(f)
+    q_t = to_tensor(q)
+    simulate_from_filtered_defn_impl(filtered_xs, filtered_ps, f_t, q_t, key)
+  end
+
   Nx.Defn.defn simulate_defn_impl(smoothed_xs, smoothed_ps, filtered_xs, filtered_ps, f, q, key) do
     t = Nx.axis_size(smoothed_xs, 0)
     {eps, key_out} = Nx.Random.normal(key, 0.0, 1.0, shape: {t})
@@ -209,6 +223,45 @@ defmodule BstsNx.Smoother do
 
     x_t_mean = take_scalar_at(smoothed_xs, last_idx)
     p_t_cov = take_scalar_at(smoothed_ps, last_idx) |> Nx.max(1.0e-12)
+    x_t = x_t_mean + Nx.sqrt(p_t_cov) * take_scalar_at(eps, last_idx)
+    states = Nx.put_slice(states, [last_idx], Nx.reshape(x_t, {1}))
+
+    num_steps = t - 1
+
+    {_, states_out, _, _, _, _, _} =
+      while {k = Nx.tensor(0), states_acc = states, eps_in = eps, fxs = filtered_xs,
+             fps = filtered_ps, f_in = f, q_in = q},
+            k < num_steps do
+        i = last_idx - 1 - k
+        x_filt = take_scalar_at(fxs, i)
+        p_filt = take_scalar_at(fps, i)
+        x_pred_next = f_in * x_filt
+        p_pred_next = f_in * p_filt * f_in + q_in
+        near_zero_p = Nx.abs(p_pred_next) < 1.0e-15
+        safe_pred = Nx.select(near_zero_p, 1.0, p_pred_next)
+        j = Nx.select(near_zero_p, 0.0, p_filt * f_in / safe_pred)
+
+        x_next = take_scalar_at(states_acc, i + 1)
+        mean = x_filt + j * (x_next - x_pred_next)
+        cov = (p_filt * (1.0 - j * f_in)) |> Nx.max(1.0e-12)
+        x_i = mean + Nx.sqrt(cov) * take_scalar_at(eps_in, i)
+        states_new = Nx.put_slice(states_acc, [i], Nx.reshape(x_i, {1}))
+
+        {k + 1, states_new, eps_in, fxs, fps, f_in, q_in}
+      end
+
+    {states_out, key_out}
+  end
+
+  Nx.Defn.defn simulate_from_filtered_defn_impl(filtered_xs, filtered_ps, f, q, key) do
+    t = Nx.axis_size(filtered_xs, 0)
+    {eps, key_out} = Nx.Random.normal(key, 0.0, 1.0, shape: {t})
+
+    states = Nx.broadcast(Nx.tensor(0.0), {t})
+    last_idx = t - 1
+
+    x_t_mean = take_scalar_at(filtered_xs, last_idx)
+    p_t_cov = take_scalar_at(filtered_ps, last_idx) |> Nx.max(1.0e-12)
     x_t = x_t_mean + Nx.sqrt(p_t_cov) * take_scalar_at(eps, last_idx)
     states = Nx.put_slice(states, [last_idx], Nx.reshape(x_t, {1}))
 
@@ -422,19 +475,7 @@ defmodule BstsNx.Smoother do
 
     x_sample_T =
       if Nx.rank(p_T_cov) == 0 do
-        p_T_val = Nx.to_number(p_T_cov)
-
-        safe_var =
-          if p_T_val < 0.0 do
-            Logger.warning(
-              "Simulation smoother: negative terminal variance #{p_T_val}, clamping to 1.0e-12"
-            )
-
-            Nx.tensor(1.0e-12)
-          else
-            Nx.max(p_T_cov, 1.0e-12)
-          end
-
+        safe_var = Nx.max(p_T_cov, Nx.tensor(1.0e-12))
         chol_T = Nx.sqrt(safe_var)
         Nx.add(x_T_mean, Nx.multiply(chol_T, eps_T))
       else
@@ -474,19 +515,7 @@ defmodule BstsNx.Smoother do
 
           x_k =
             if Nx.rank(cov) == 0 do
-              cov_val = Nx.to_number(cov)
-
-              safe_cov =
-                if cov_val < 0.0 do
-                  Logger.warning(
-                    "Simulation smoother: negative conditional variance #{cov_val} at step #{idx}, clamping to 1.0e-12"
-                  )
-
-                  Nx.tensor(1.0e-12)
-                else
-                  Nx.max(cov, 1.0e-12)
-                end
-
+              safe_cov = Nx.max(cov, Nx.tensor(1.0e-12))
               chol_k = Nx.sqrt(safe_cov)
               Nx.add(mean, Nx.multiply(chol_k, eps_k))
             else
@@ -515,24 +544,22 @@ defmodule BstsNx.Smoother do
   # For scalar systems uses division; for matrix systems uses solve+transpose.
   defp smoother_gain(p_filt, f_t, p_pred_next) do
     if Nx.rank(p_pred_next) == 0 do
-      if abs(Nx.to_number(p_pred_next)) < 1.0e-15 do
-        Nx.tensor(0.0)
-      else
-        p_filt |> Nx.multiply(f_t) |> Nx.divide(p_pred_next)
-      end
+      near_zero = Nx.less(Nx.abs(p_pred_next), 1.0e-15)
+      safe_pred = Nx.select(near_zero, Nx.tensor(1.0), p_pred_next)
+      gain = p_filt |> Nx.multiply(f_t) |> Nx.divide(safe_pred)
+      Nx.select(near_zero, Nx.tensor(0.0), gain)
     else
       rhs = compat_dot(f_t, p_filt)
 
       # Avoid LinAlg.solve for 1x1 systems to prevent version-specific
       # warnings and numeric jitter in older Nx/Elixir combinations.
       if Nx.shape(p_pred_next) == {1, 1} and Nx.shape(rhs) == {1, 1} do
-        denom = Nx.to_number(Nx.squeeze(p_pred_next))
-
-        if abs(denom) < 1.0e-15 do
-          Nx.tensor([[0.0]])
-        else
-          Nx.divide(rhs, p_pred_next)
-        end
+        p_scalar = Nx.squeeze(p_pred_next)
+        rhs_scalar = Nx.squeeze(rhs)
+        near_zero = Nx.less(Nx.abs(p_scalar), 1.0e-15)
+        safe_pred = Nx.select(near_zero, Nx.tensor(1.0), p_scalar)
+        gain_scalar = Nx.select(near_zero, Nx.tensor(0.0), Nx.divide(rhs_scalar, safe_pred))
+        Nx.reshape(gain_scalar, {1, 1})
       else
         safe_solve(p_pred_next, rhs) |> transpose()
       end

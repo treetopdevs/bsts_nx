@@ -51,16 +51,36 @@ defmodule BstsNx.Distributions do
   """
   @spec inv_gamma_sample(number | list | Nx.t(), number | list | Nx.t(), keyword()) :: Nx.t()
   def inv_gamma_sample(alpha, beta, opts \\ []) do
-    {a, b, max_value} = prepare_inv_gamma_inputs(alpha, beta, opts)
+    max_value = opts |> Keyword.get(:max_value, :infinity) |> parse_max_value()
 
-    case Keyword.get(opts, :key) do
-      nil ->
-        rand_state = :rand.seed_s(:exsss, :erlang.unique_integer([:positive]))
-        sample_with_rand_state(a, b, max_value, rand_state)
+    cond do
+      is_number(alpha) and is_number(beta) ->
+        alpha_f = alpha * 1.0
+        beta_f = beta * 1.0
 
-      key ->
-        {sample, _next_key} = sample_with_key(a, b, max_value, key)
-        sample
+        case Keyword.get(opts, :key) do
+          nil ->
+            rand_state = :rand.seed_s(:exsss, :erlang.unique_integer([:positive]))
+            {sample, _next_state} = inv_gamma_draw(alpha_f, beta_f, max_value, rand_state)
+            Nx.tensor(sample)
+
+          key ->
+            {sample, _next_key} = sample_with_key_scalar(alpha_f, beta_f, max_value, key)
+            sample
+        end
+
+      true ->
+        {a, b, _max} = prepare_inv_gamma_inputs(alpha, beta, opts)
+
+        case Keyword.get(opts, :key) do
+          nil ->
+            rand_state = :rand.seed_s(:exsss, :erlang.unique_integer([:positive]))
+            sample_with_rand_state(a, b, max_value, rand_state)
+
+          key ->
+            {sample, _next_key} = sample_with_key(a, b, max_value, key)
+            sample
+        end
     end
   end
 
@@ -84,8 +104,14 @@ defmodule BstsNx.Distributions do
             "pass the PRNG key as the third argument to inv_gamma_sample_with_key/4"
     end
 
-    {a, b, max_value} = prepare_inv_gamma_inputs(alpha, beta, opts)
-    sample_with_key(a, b, max_value, key)
+    max_value = opts |> Keyword.get(:max_value, :infinity) |> parse_max_value()
+
+    if is_number(alpha) and is_number(beta) do
+      sample_with_key_scalar(alpha * 1.0, beta * 1.0, max_value, key)
+    else
+      {a, b, _max} = prepare_inv_gamma_inputs(alpha, beta, opts)
+      sample_with_key(a, b, max_value, key)
+    end
   end
 
   @doc """
@@ -120,18 +146,26 @@ defmodule BstsNx.Distributions do
   """
   @spec mv_normal_sample(Nx.t(), Nx.t(), Nx.t()) :: {Nx.t(), Nx.t()}
   def mv_normal_sample(key, mean, cov) do
-    # Determine dimensionality from mean
-    dim = Nx.axis_size(mean, 0)
-    # Split key for noise vector and return key
-    keys = Nx.Random.split(key, parts: 2)
-    key_draw = split_key_at(keys, 0)
-    next_key = split_key_at(keys, 1)
-    # Draw standard normal vector of dimension dim
-    {noise, _unused} = Nx.Random.normal(key_draw, 0.0, 1.0, shape: {dim})
     # Compute Cholesky; add jitter if needed.
     # Uses NaN detection to handle backends (e.g. EXLA) that return NaN
     # instead of raising on non-positive-definite input.
     chol = BstsNx.Utils.safe_cholesky(cov)
+    mv_normal_sample_with_chol(key, mean, cov, chol)
+  end
+
+  @doc """
+  Draws a multivariate normal sample using a precomputed Cholesky factor.
+
+  This avoids recomputing `chol(cov)` when sampling repeatedly from the same
+  covariance matrix.
+  """
+  @spec mv_normal_sample_with_chol(Nx.t(), Nx.t(), Nx.t(), Nx.t()) :: {Nx.t(), Nx.t()}
+  def mv_normal_sample_with_chol(key, mean, _cov, chol) do
+    dim = Nx.axis_size(mean, 0)
+    keys = Nx.Random.split(key, parts: 2)
+    key_draw = split_key_at(keys, 0)
+    next_key = split_key_at(keys, 1)
+    {noise, _unused} = Nx.Random.normal(key_draw, 0.0, 1.0, shape: {dim})
 
     sample = Nx.add(mean, Nx.dot(chol, noise))
     {sample, next_key}
@@ -164,25 +198,34 @@ defmodule BstsNx.Distributions do
   end
 
   defp sample_with_key(a, b, max_value, key) do
-    validate_prng_key!(key)
+    ensure_valid_prng_key!(key)
     a_list = Nx.to_flat_list(a)
     b_list = Nx.to_flat_list(b)
     num_draws = length(a_list)
-    split_keys = Nx.Random.split(key, parts: num_draws + 1)
+    split_key_rows = Nx.Random.split(key, parts: num_draws + 1) |> Nx.to_list()
+    sample_keys = Enum.take(split_key_rows, num_draws)
 
     samples =
-      Enum.zip(a_list, b_list)
-      |> Enum.with_index()
-      |> Enum.map(fn {{alpha_i, beta_i}, idx} ->
-        subkey = split_key_at(split_keys, idx)
+      Enum.zip(Enum.zip(a_list, b_list), sample_keys)
+      |> Enum.map(fn {{alpha_i, beta_i}, subkey} ->
         rand_state = rand_state_from_key(subkey)
         {sample, _rs2} = inv_gamma_draw(alpha_i, beta_i, max_value, rand_state)
         sample
       end)
 
     sample_tensor = Nx.tensor(samples) |> Nx.reshape(Nx.shape(a))
-    next_key = split_key_at(split_keys, num_draws)
+    next_key = split_key_rows |> List.last() |> Nx.tensor(type: Nx.type(key))
     {sample_tensor, next_key}
+  end
+
+  defp sample_with_key_scalar(alpha, beta, max_value, key) do
+    ensure_valid_prng_key!(key)
+    keys = Nx.Random.split(key, parts: 2)
+    draw_key = split_key_at(keys, 0)
+    next_key = split_key_at(keys, 1)
+    rand_state = rand_state_from_key(draw_key)
+    {sample, _rs2} = inv_gamma_draw(alpha, beta, max_value, rand_state)
+    {Nx.tensor(sample), next_key}
   end
 
   defp inv_gamma_draw(alpha_i, beta_i, max_value, rand_state) do
@@ -193,20 +236,36 @@ defmodule BstsNx.Distributions do
     {sample, rs2}
   end
 
-  defp validate_prng_key!(key) do
-    case Nx.to_flat_list(key) do
-      [_i1, _i2] ->
-        :ok
+  defp rand_state_from_key(key) do
+    ints =
+      case key do
+        %Nx.Tensor{} = t ->
+          Nx.to_flat_list(t)
 
-      ints ->
+        [i1, i2] when is_integer(i1) and is_integer(i2) ->
+          [i1, i2]
+
+        other ->
+          raise ArgumentError, "Expected Nx.Random key with shape {2}, got: #{inspect(other)}"
+      end
+
+    case ints do
+      [_i1, _i2] ->
+        {a58, b58, c58} = derive_exsss_seed(ints)
+        :rand.seed_s(:exsss, {a58, b58, c58})
+
+      _ ->
         raise ArgumentError, "Expected Nx.Random key with shape {2}, got: #{inspect(ints)}"
     end
   end
 
-  defp rand_state_from_key(key) do
-    ints = Nx.to_flat_list(key)
-    {a58, b58, c58} = derive_exsss_seed(ints)
-    :rand.seed_s(:exsss, {a58, b58, c58})
+  defp ensure_valid_prng_key!(%Nx.Tensor{} = key) do
+    if Nx.shape(key) != {2} do
+      raise ArgumentError,
+            "Expected Nx.Random key with shape {2}, got: #{inspect(Nx.to_flat_list(key))}"
+    end
+
+    :ok
   end
 
   defp split_key_at(keys, idx) do
