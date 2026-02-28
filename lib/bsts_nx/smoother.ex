@@ -46,6 +46,19 @@ defmodule BstsNx.Smoother do
     rts_defn_impl(xs, ps, f_t, q_t)
   end
 
+  @doc """
+  Compiled RTS smoother for multi-dimensional state systems.
+
+  Accepts filtered means/covariances with shapes `{t, n}` and `{t, n, n}` and
+  returns `{smoothed_means, smoothed_covariances}` with the same shapes.
+  """
+  @spec rts_defn_matrix(Nx.t(), Nx.t(), number | Nx.t(), number | Nx.t()) :: {Nx.t(), Nx.t()}
+  def rts_defn_matrix(xs, ps, f, q) do
+    f_t = to_tensor(f)
+    q_t = to_tensor(q)
+    rts_defn_matrix_impl(xs, ps, f_t, q_t)
+  end
+
   Nx.Defn.defn rts_defn_impl(xs, ps, f, q) do
     t = Nx.axis_size(xs, 0)
     # Initialize output accumulators
@@ -84,6 +97,58 @@ defmodule BstsNx.Smoother do
         sxs_new = Nx.put_slice(sxs_acc, [i], Nx.reshape(x_smooth, {1}))
         sps_new = Nx.put_slice(sps_acc, [i], Nx.reshape(p_smooth, {1}))
         {k + 1, sxs_new, sps_new, xs_in, ps_in, f_in, q_in}
+      end
+
+    {sxs_out, sps_out}
+  end
+
+  Nx.Defn.defn rts_defn_matrix_impl(xs, ps, f, q) do
+    t = Nx.axis_size(xs, 0)
+    n = Nx.axis_size(xs, 1)
+
+    sxs = Nx.broadcast(0.0, {t, n})
+    sps = Nx.broadcast(0.0, {t, n, n})
+    i_n = Nx.eye(n)
+    eps = Nx.tensor(1.0e-6)
+
+    last_idx = t - 1
+    sxs = Nx.put_slice(sxs, [last_idx, 0], Nx.new_axis(take_vector_at(xs, last_idx), 0))
+    sps = Nx.put_slice(sps, [last_idx, 0, 0], Nx.new_axis(take_matrix_at(ps, last_idx), 0))
+
+    num_steps = t - 1
+
+    {_, sxs_out, sps_out, _, _, _, _, _, _} =
+      while {k = Nx.tensor(0), sxs_acc = sxs, sps_acc = sps, xs_in = xs, ps_in = ps, f_in = f,
+             q_in = q, i_eye = i_n, eps_in = eps},
+            k < num_steps do
+        i = last_idx - 1 - k
+
+        x_filt = take_vector_at(xs_in, i)
+        p_filt = take_matrix_at(ps_in, i)
+
+        x_pred_next = Nx.dot(f_in, x_filt)
+        p_pred_next = Nx.add(Nx.dot(Nx.dot(f_in, p_filt), Nx.transpose(f_in)), q_in)
+
+        p_pred_next_reg = Nx.add(p_pred_next, Nx.multiply(i_eye, eps_in))
+        rhs = Nx.dot(f_in, p_filt)
+        c = Nx.LinAlg.solve(p_pred_next_reg, rhs) |> Nx.transpose()
+
+        x_smooth_next = take_vector_at(sxs_acc, i + 1)
+        p_smooth_next = take_matrix_at(sps_acc, i + 1)
+
+        x_smooth = Nx.add(x_filt, Nx.dot(c, Nx.subtract(x_smooth_next, x_pred_next)))
+
+        p_smooth =
+          Nx.add(
+            p_filt,
+            Nx.dot(Nx.dot(c, Nx.subtract(p_smooth_next, p_pred_next)), Nx.transpose(c))
+          )
+          |> then(&Nx.multiply(Nx.add(&1, Nx.transpose(&1)), 0.5))
+
+        sxs_new = Nx.put_slice(sxs_acc, [i, 0], Nx.new_axis(x_smooth, 0))
+        sps_new = Nx.put_slice(sps_acc, [i, 0, 0], Nx.new_axis(p_smooth, 0))
+
+        {k + 1, sxs_new, sps_new, xs_in, ps_in, f_in, q_in, i_eye, eps_in}
       end
 
     {sxs_out, sps_out}
@@ -308,6 +373,14 @@ defmodule BstsNx.Smoother do
 
   Nx.Defn.defnp take_scalar_at(vec, idx) do
     Nx.slice(vec, [idx], [1]) |> Nx.squeeze()
+  end
+
+  Nx.Defn.defnp take_vector_at(mat, idx) do
+    Nx.take(mat, Nx.reshape(idx, {1}), axis: 0) |> Nx.squeeze(axes: [0])
+  end
+
+  Nx.Defn.defnp take_matrix_at(mat, idx) do
+    Nx.take(mat, Nx.reshape(idx, {1}), axis: 0) |> Nx.squeeze(axes: [0])
   end
 
   @doc """

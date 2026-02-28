@@ -294,6 +294,43 @@ defmodule BstsNx.KalmanFilter do
     filter_defn_vec(observations, f_t, h_vec, q_t, r_t, x0_t, p0_t)
   end
 
+  @doc """
+  Compiled Kalman filter for multi-dimensional state with scalar observations.
+
+  Inputs:
+    * `observations` shape `{t}` (missing values encoded as NaN)
+    * `f` shape `{n, n}`
+    * `h` static row shape `{n}` / `{1, n}` or time-varying shape `{t, n}`
+    * `q` shape `{n, n}` (or scalar when `n == 1`)
+    * `r` scalar
+    * `x0` shape `{n}` (or scalar when `n == 1`)
+    * `p0` shape `{n, n}` (or scalar when `n == 1`)
+
+  Returns `{xs, ps}` with shapes `{t, n}` and `{t, n, n}`.
+  """
+  @spec filter_defn_multi(
+          Nx.t(),
+          number | Nx.t(),
+          number | Nx.t(),
+          number | Nx.t(),
+          number | Nx.t(),
+          number | Nx.t(),
+          number | Nx.t()
+        ) :: {Nx.t(), Nx.t()}
+  def filter_defn_multi(observations, f, h, q, r, x0, p0) do
+    type = {:f, 32}
+    obs_t = Nx.as_type(observations, type)
+    t = Nx.axis_size(obs_t, 0)
+    f_t = to_tensor(f) |> Nx.as_type(type)
+    x0_t = to_tensor(x0) |> Nx.flatten() |> Nx.as_type(type)
+    n = Nx.axis_size(x0_t, 0)
+    h_t = normalize_h_multi(h, t, n) |> Nx.as_type(type)
+    q_t = q |> to_tensor() |> ensure_square_matrix_for_multi(n, "q") |> Nx.as_type(type)
+    p0_t = p0 |> to_tensor() |> ensure_square_matrix_for_multi(n, "p0") |> Nx.as_type(type)
+    r_t = to_tensor(r) |> squeeze_1x1() |> Nx.as_type(type)
+    filter_defn_multi_impl(obs_t, f_t, h_t, q_t, r_t, x0_t, p0_t)
+  end
+
   # compiled defn that accepts vector h for each time step and supports missing data via NaN sentinel.
   Nx.Defn.defn filter_defn_vec(observations, f_t, h_vec, q_t, r_t, x0, p0) do
     t = Nx.axis_size(observations, 0)
@@ -334,6 +371,66 @@ defmodule BstsNx.KalmanFilter do
         xs_updated = Nx.put_slice(xs_acc, [i], Nx.reshape(x_new, {1}))
         ps_updated = Nx.put_slice(ps_acc, [i], Nx.reshape(p_new, {1}))
         {i + 1, x_new, p_new, xs_updated, ps_updated, obs, h, f, q, r}
+      end
+
+    {xs_out, ps_out}
+  end
+
+  Nx.Defn.defn filter_defn_multi_impl(observations, f_t, h_t, q_t, r_t, x0, p0) do
+    t = Nx.axis_size(observations, 0)
+    n = Nx.axis_size(x0, 0)
+    xs = Nx.broadcast(0.0, {t, n})
+    ps = Nx.broadcast(0.0, {t, n, n})
+    i_n = Nx.eye(n, type: Nx.type(p0))
+
+    {_, _, _, xs_out, ps_out, _, _, _, _, _, _} =
+      while {i = 0, x = x0, p = p0, xs_acc = xs, ps_acc = ps, obs = observations, h = h_t,
+             f = f_t, q = q_t, r = r_t, i_eye = i_n},
+            i < t do
+        z = Nx.squeeze(Nx.slice(obs, [i], [1]))
+        h_i = Nx.take(h, Nx.reshape(i, {1}), axis: 0) |> Nx.squeeze(axes: [0])
+
+        x_pred = Nx.dot(f, x)
+        p_pred = Nx.add(Nx.dot(Nx.dot(f, p), Nx.transpose(f)), q)
+
+        h_row = Nx.new_axis(h_i, 0)
+        y = Nx.subtract(z, Nx.dot(h_i, x_pred))
+
+        s =
+          h_row
+          |> Nx.dot(p_pred)
+          |> Nx.dot(Nx.transpose(h_row))
+          |> Nx.squeeze()
+          |> Nx.add(r)
+
+        near_zero_s = Nx.less(Nx.abs(s), 1.0e-15)
+        safe_s = Nx.select(near_zero_s, Nx.tensor(1.0), s)
+        k_raw = p_pred |> Nx.dot(h_i) |> Nx.divide(safe_s)
+        zero_k = Nx.multiply(Nx.sum(p_pred, axes: [1]), 0.0)
+        k = Nx.select(near_zero_s, zero_k, k_raw)
+
+        x_updated = Nx.add(x_pred, Nx.multiply(k, y))
+
+        k_col = Nx.new_axis(k, 1)
+        kh = Nx.dot(k_col, h_row)
+        i_kh = Nx.subtract(i_eye, kh)
+        kr_kt = Nx.outer(k, k) |> Nx.multiply(r)
+
+        p_updated =
+          i_kh
+          |> Nx.dot(p_pred)
+          |> Nx.dot(Nx.transpose(i_kh))
+          |> Nx.add(kr_kt)
+          |> then(&Nx.multiply(Nx.add(&1, Nx.transpose(&1)), 0.5))
+
+        update_flag = Nx.equal(z, z)
+        x_new = Nx.select(update_flag, x_updated, x_pred)
+        p_new = Nx.select(update_flag, p_updated, p_pred)
+
+        xs_updated = Nx.put_slice(xs_acc, [i, 0], Nx.new_axis(x_new, 0))
+        ps_updated = Nx.put_slice(ps_acc, [i, 0, 0], Nx.new_axis(p_new, 0))
+
+        {i + 1, x_new, p_new, xs_updated, ps_updated, obs, h, f, q, r, i_eye}
       end
 
     {xs_out, ps_out}
@@ -448,6 +545,68 @@ defmodule BstsNx.KalmanFilter do
   end
 
   defp squeeze_1x1(t), do: t
+
+  defp ensure_square_matrix_for_multi(%Nx.Tensor{} = t, n, _name) do
+    cond do
+      Nx.rank(t) == 0 and n == 1 ->
+        Nx.reshape(t, {1, 1})
+
+      Nx.rank(t) == 2 and Nx.shape(t) == {n, n} ->
+        t
+
+      true ->
+        raise ArgumentError,
+              "expected square matrix shape {#{n}, #{n}}, got: #{inspect(Nx.shape(t))}"
+    end
+  end
+
+  defp normalize_h_multi(h, t, n) when is_number(h) do
+    if n != 1 do
+      raise ArgumentError,
+            "scalar h is only valid for one-dimensional state, got state dimension #{n}"
+    end
+
+    Nx.broadcast(Nx.tensor(h), {t, 1})
+  end
+
+  defp normalize_h_multi(%Nx.Tensor{} = h, t, n) do
+    cond do
+      Nx.rank(h) == 0 and n == 1 ->
+        Nx.broadcast(h, {t, 1})
+
+      Nx.rank(h) == 1 and Nx.axis_size(h, 0) == n ->
+        Nx.broadcast(h, {t, n})
+
+      Nx.rank(h) == 2 and Nx.shape(h) == {1, n} ->
+        Nx.broadcast(Nx.squeeze(h, axes: [0]), {t, n})
+
+      Nx.rank(h) == 2 and Nx.shape(h) == {t, n} ->
+        h
+
+      Nx.rank(h) == 2 and Nx.shape(h) == {n, 1} and n == 1 ->
+        Nx.broadcast(Nx.reshape(h, {1}), {t, 1})
+
+      true ->
+        raise ArgumentError,
+              "h must be shape {#{n}}, {1, #{n}}, or {#{t}, #{n}} for filter_defn_multi/7, got: #{inspect(Nx.shape(h))}"
+    end
+  end
+
+  defp normalize_h_multi(h, t, n) when is_list(h) do
+    h_t = Nx.tensor(h)
+
+    cond do
+      Nx.rank(h_t) == 1 and Nx.axis_size(h_t, 0) == n ->
+        Nx.broadcast(h_t, {t, n})
+
+      Nx.rank(h_t) == 2 and Nx.shape(h_t) == {t, n} ->
+        h_t
+
+      true ->
+        raise ArgumentError,
+              "list h must normalize to shape {#{n}} or {#{t}, #{n}} for filter_defn_multi/7"
+    end
+  end
 
   # Infers observation dimension from the first non-missing observation.
   # Scalars -> 1, vectors -> length, matrices -> row count.
