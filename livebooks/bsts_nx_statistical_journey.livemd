@@ -40,7 +40,11 @@ Mix.install([
   {:kino_vega_lite, "~> 0.1.13"}
 ])
 
+Nx.global_default_backend(Nx.BinaryBackend)
+
 IO.puts("Loaded bsts_nx from: #{inspect(project_root || :github)}")
+IO.puts("Nx default backend: #{inspect(Nx.default_backend())}")
+IO.puts("EXLA is strongly recommended for this notebook.")
 
 alias BstsNx.{
   CausalImpact,
@@ -78,6 +82,108 @@ defmodule NotebookHelpers do
   def seed!(seed \\ 42) do
     :rand.seed(:exsss, {seed, seed + 1, seed + 2})
     Nx.Random.key(seed)
+  end
+
+  defp loud_warning(lines) do
+    banner = String.duplicate("!", 92)
+    IO.puts("")
+    IO.puts(banner)
+    IO.puts("!!! EXLA WARNING: EXLA BACKEND IS NOT ACTIVE !!!")
+    Enum.each(lines, &IO.puts/1)
+    IO.puts(banner)
+    IO.puts("")
+  end
+
+  def backend_status do
+    process_count = :erlang.system_info(:process_count)
+    process_limit = :erlang.system_info(:process_limit)
+
+    %{
+      default_backend: Nx.default_backend(),
+      process_count: process_count,
+      process_limit: process_limit,
+      headroom: process_limit - process_count
+    }
+  end
+
+  def use_binary! do
+    Nx.global_default_backend(Nx.BinaryBackend)
+    backend_status()
+  end
+
+  def try_exla!(opts \\ []) do
+    min_headroom = Keyword.get(opts, :min_headroom, 10_000)
+    warn = Keyword.get(opts, :warn, true)
+    status = backend_status()
+
+    result =
+      if status.headroom < min_headroom do
+        Nx.global_default_backend(Nx.BinaryBackend)
+
+        backend_status()
+        |> Map.put(:exla_status, :skipped_low_headroom)
+        |> Map.put(:min_headroom, min_headroom)
+      else
+        try do
+          # Keep BinaryBackend for eager ops (loops in Smoother.rts, etc.)
+          # and use EXLA only as the defn compiler. This avoids spawning
+          # an EXLA CallbackServer for every small Nx operation in tight loops.
+          Nx.global_default_backend(Nx.BinaryBackend)
+          Nx.Defn.global_default_options(compiler: EXLA)
+          _ = Nx.backend_transfer(Nx.tensor([0.0]), EXLA.Backend)
+
+          backend_status()
+          |> Map.put(:exla_status, :enabled)
+          |> Map.put(:exla_mode, :compiler_only)
+        rescue
+          error ->
+            Nx.global_default_backend(Nx.BinaryBackend)
+            Nx.Defn.global_default_options(compiler: Nx.Defn.Evaluator)
+
+            backend_status()
+            |> Map.put(:exla_status, :fallback_binary)
+            |> Map.put(:exla_error, Exception.message(error))
+        catch
+          :exit, reason ->
+            Nx.global_default_backend(Nx.BinaryBackend)
+            Nx.Defn.global_default_options(compiler: Nx.Defn.Evaluator)
+
+            backend_status()
+            |> Map.put(:exla_status, :fallback_binary)
+            |> Map.put(:exla_error, inspect(reason))
+        end
+      end
+
+    if warn and result.exla_status != :enabled do
+      base_lines = [
+        "Current Nx backend: #{inspect(result.default_backend)}",
+        "Process usage: #{result.process_count}/#{result.process_limit} (headroom #{result.headroom})",
+        "Structured sections (7.2/9.2) will be much slower without EXLA."
+      ]
+
+      lines =
+        case result.exla_status do
+          :skipped_low_headroom ->
+            [
+              "EXLA activation skipped: low process headroom (< #{result.min_headroom})."
+              | base_lines
+            ]
+
+          :fallback_binary ->
+            [
+              "EXLA activation failed and backend fell back to BinaryBackend.",
+              "EXLA error: #{Map.get(result, :exla_error)}"
+              | base_lines
+            ]
+
+          other ->
+            ["EXLA unavailable (status #{inspect(other)})." | base_lines]
+        end
+
+      loud_warning(lines)
+    end
+
+    result
   end
 
   def mean(list) when is_list(list) and list != [] do
@@ -144,7 +250,9 @@ defmodule NotebookHelpers do
 
   def posterior_var(_), do: []
 
-  def per_t_bands(draws, alpha \\ 0.05) when is_list(draws) and draws != [] do
+  def per_t_bands(draws, alpha \\ 0.05)
+
+  def per_t_bands(draws, alpha) when is_list(draws) and draws != [] do
     Enum.zip_with(draws, fn vals ->
       sorted = Enum.sort(vals)
 
@@ -240,6 +348,7 @@ defmodule NotebookHelpers do
 end
 
 NotebookHelpers.seed!(2026)
+NotebookHelpers.try_exla!(min_headroom: 10_000, warn: true)
 ```
 
 ## 2) Mental model: what BSTS is doing
@@ -683,14 +792,16 @@ NotebookHelpers.interval_plot(rows,
 ### 9.2 Structured causal impact with controls (`estimate_structured/5`)
 
 ```elixir
+NotebookHelpers.try_exla!(min_headroom: 10_000)
+
 impact_structured =
   CausalImpact.estimate_structured(
     obs_hourly,
     pre_period,
     post_period,
     structured_spec,
-    num_samples: 50,
-    burn_in: 25,
+    num_samples: 30,
+    burn_in: 15,
     seed: 202
   )
 
