@@ -573,51 +573,6 @@ defmodule BstsNx.CovariateSelection do
   end
 
   defp inv_gamma_sample(alpha, beta, rng) do
-    {gamma, rng} = gamma_sample(alpha, 1.0, rng)
-    gamma_safe = max(gamma, 1.0e-300)
-    {beta / gamma_safe, rng}
-  end
-
-  # Marsaglia-Tsang gamma sampler with explicit state threading.
-  defp gamma_sample(alpha, _scale, _rng) when alpha <= 0.0 do
-    raise ArgumentError, "gamma_sample requires alpha > 0, got: #{alpha}"
-  end
-
-  defp gamma_sample(alpha, scale, rng) when alpha < 1.0 do
-    {u, rng} = :rand.uniform_s(rng)
-    {sample, rng} = gamma_sample(alpha + 1.0, scale, rng)
-    {sample * :math.pow(u, 1.0 / alpha), rng}
-  end
-
-  defp gamma_sample(alpha, scale, rng) do
-    d = alpha - 1.0 / 3.0
-    c = 1.0 / :math.sqrt(9.0 * d)
-    gamma_sample_loop(d, c, scale, rng, 10_000)
-  end
-
-  defp gamma_sample_loop(_d, _c, _scale, _rng, 0) do
-    raise RuntimeError, "gamma sampling failed to converge after 10,000 iterations"
-  end
-
-  defp gamma_sample_loop(d, c, scale, rng, remaining) do
-    {x, rng} = :rand.normal_s(rng)
-    v = 1.0 + c * x
-
-    if v <= 0.0 do
-      gamma_sample_loop(d, c, scale, rng, remaining - 1)
-    else
-      v3 = v * v * v
-      {u, rng} = :rand.uniform_s(rng)
-
-      accept =
-        u < 1.0 - 0.0331 * x * x * x * x or
-          :math.log(u) < 0.5 * x * x + d * (1.0 - v3 + :math.log(v3))
-
-      if accept do
-        {d * v3 * scale, rng}
-      else
-        gamma_sample_loop(d, c, scale, rng, remaining - 1)
-      end
-    end
+    BstsNx.Distributions.inv_gamma_sample_with_rand_state(alpha, beta, rng)
   end
 end

@@ -25,7 +25,7 @@ defmodule BstsNx.GibbsSampler do
 
   alias BstsNx.KalmanFilter
   alias BstsNx.ModelSpec
-  import BstsNx.Utils, only: [to_tensor: 1, missing_observation?: 1]
+  import BstsNx.Utils, only: [to_tensor: 1, missing_observation?: 1, compat_dot: 2]
   require Logger
 
   @type sample_result :: %{
@@ -161,9 +161,10 @@ defmodule BstsNx.GibbsSampler do
         is_list(seeds) and length(seeds) == num_chains ->
           # Explicit per-chain seeds; remove :key to avoid overriding
           opts_clean = opts |> Keyword.delete(:key) |> Keyword.delete(:seeds)
+          seeds_t = List.to_tuple(seeds)
 
           Enum.map(0..(num_chains - 1), fn idx ->
-            Keyword.put(opts_clean, :seed, Enum.at(seeds, idx))
+            Keyword.put(opts_clean, :seed, elem(seeds_t, idx))
           end)
 
         key_opt != nil ->
@@ -300,7 +301,7 @@ defmodule BstsNx.GibbsSampler do
     h_tensor = Nx.tensor(h_vals, type: {:f, 32})
     obs_present_mask = Nx.equal(obs_tensor, obs_tensor)
     t_steps = obs_present_mask |> Nx.sum() |> Nx.to_number() |> round()
-    num_diffs = max(t - 1, 0)
+    num_diffs = observed_transition_count(observations)
 
     {_, _, samples_acc, _key_acc} =
       Enum.reduce(1..total_iters, {process_var_t, obs_var_t, [], key}, fn iter,
@@ -391,6 +392,7 @@ defmodule BstsNx.GibbsSampler do
           [structured_result()]
   def sample_structured(observations, %ModelSpec{} = spec, num_samples, opts \\ []) do
     validate_positive!(:num_samples, num_samples)
+    spec = ModelSpec.validate!(spec)
 
     if Enum.any?(observations, &missing_observation?/1) do
       Logger.warning(
@@ -417,8 +419,11 @@ defmodule BstsNx.GibbsSampler do
 
     t = length(observations)
 
+    state_dim = Nx.axis_size(spec.f, 0)
+    validate_q_specs!(spec.q_specs, state_dim)
+
     # Build initial Q matrix from q_specs
-    q_matrix = build_initial_q(spec.q_specs, Nx.axis_size(spec.f, 0))
+    q_matrix = build_initial_q(spec.q_specs, state_dim)
     r_var = to_tensor(spec.obs_var)
 
     # Normalize H to a per-timestep list for residual computation
@@ -450,8 +455,7 @@ defmodule BstsNx.GibbsSampler do
           burn_in,
           thin,
           key,
-          total_iters,
-          t
+          total_iters
         )
     end
   end
@@ -506,9 +510,10 @@ defmodule BstsNx.GibbsSampler do
       cond do
         is_list(seeds) and length(seeds) == num_chains ->
           opts_clean = opts |> Keyword.delete(:key) |> Keyword.delete(:seeds)
+          seeds_t = List.to_tuple(seeds)
 
           Enum.map(0..(num_chains - 1), fn idx ->
-            Keyword.put(opts_clean, :seed, Enum.at(seeds, idx))
+            Keyword.put(opts_clean, :seed, elem(seeds_t, idx))
           end)
 
         key_opt != nil ->
@@ -568,14 +573,18 @@ defmodule BstsNx.GibbsSampler do
          burn_in,
          thin,
          key,
-         total_iters,
-         t
+         total_iters
        ) do
     # Convert inputs bounds into Nx.Tensors once
     obs_tensor = observations_to_filter_tensor(observations)
 
     # H list needs to be converted into a tensor {t, n} for filter_defn_multi
     h_tensor = Nx.stack(h_list)
+
+    h_rows_tensor =
+      h_list |> Enum.map(&structured_h_row/1) |> Enum.map(&Nx.flatten/1) |> Nx.stack()
+
+    num_diffs = observed_transition_count(observations)
 
     {_, _, samples_acc, _key_acc} =
       Enum.reduce(1..total_iters, {q_matrix, r_var, [], key}, fn iter, {q_prev, r_prev, acc, k} ->
@@ -601,20 +610,16 @@ defmodule BstsNx.GibbsSampler do
             k
           )
 
-        # Convert the {t, n} states tensor back into a list of 1-D tensors for residual calculations
-        sampled_states =
-          sampled_states_tensor
-          |> Nx.to_batched(1)
-          |> Enum.map(&Nx.squeeze(&1, axes: [0]))
-
         # 3. Process residuals: e_t = x_t - F * x_{t-1}
-        per_dim_ss = process_residuals_structured(sampled_states, spec.f, spec.q_specs)
+        per_dim_ss = process_residuals_structured(sampled_states_tensor, spec.f, spec.q_specs)
 
         # 4. Observation residuals: SS_obs = Σ (y_t - H_t · x_t)²
-        {obs_ss, t_obs} = obs_residuals_structured(observations, sampled_states, h_list)
+        {obs_ss, t_obs} =
+          obs_residuals_structured(observations, sampled_states_tensor, h_rows_tensor)
 
         # 5. Resample each Q diagonal entry independently
-        {q_new, key_after_q} = resample_q_components(spec.q_specs, per_dim_ss, t, new_key)
+        {q_new, key_after_q} =
+          resample_q_components(spec.q_specs, per_dim_ss, num_diffs, new_key)
 
         # 6. Rebuild Q matrix
         q_matrix_new = rebuild_q(q_prev, q_new)
@@ -629,12 +634,10 @@ defmodule BstsNx.GibbsSampler do
         acc2 =
           if iter > burn_in and rem(iter - burn_in, thin) == 0 do
             covs =
-              filtered_ps
-              |> Nx.to_batched(1)
-              |> Enum.map(&Nx.squeeze(&1, axes: [0]))
+              tensor_time_slices(filtered_ps)
 
             sample_map = %{
-              states: sampled_states,
+              states: tensor_time_slices(sampled_states_tensor),
               state_covs: covs,
               q_matrix: q_matrix_new,
               obs_var: r_sample,
@@ -667,6 +670,7 @@ defmodule BstsNx.GibbsSampler do
          total_iters
        ) do
     t = length(observations)
+    num_diffs = observed_transition_count(observations)
 
     ctx = prepare_spike_slab_context(spec, regression, h_list)
     q_struct0 = submatrix(q_matrix, ctx.struct_full_indices, ctx.struct_full_indices)
@@ -688,13 +692,12 @@ defmodule BstsNx.GibbsSampler do
                q_struct_prev, key_prev}
             else
               y_adjusted_tensor = observations_to_filter_tensor(y_adjusted)
-              h_struct_tensor = Nx.stack(ctx.h_struct_list)
 
               {filtered_xs, filtered_ps} =
                 KalmanFilter.filter_defn_multi(
                   y_adjusted_tensor,
                   ctx.f_struct,
-                  h_struct_tensor,
+                  ctx.h_struct_tensor,
                   q_struct_prev,
                   r_prev,
                   ctx.x0_struct,
@@ -711,20 +714,25 @@ defmodule BstsNx.GibbsSampler do
                 )
 
               sampled_states =
-                sampled_states_tensor
-                |> Nx.to_batched(1)
-                |> Enum.map(&Nx.squeeze(&1, axes: [0]))
+                tensor_time_slices(sampled_states_tensor)
 
               covs =
-                filtered_ps
-                |> Nx.to_batched(1)
-                |> Enum.map(&Nx.squeeze(&1, axes: [0]))
+                tensor_time_slices(filtered_ps)
 
               per_dim_ss =
-                process_residuals_structured(sampled_states, ctx.f_struct, ctx.q_specs_struct)
+                process_residuals_structured(
+                  sampled_states_tensor,
+                  ctx.f_struct,
+                  ctx.q_specs_struct
+                )
 
               {q_new_vals, key_after_q} =
-                resample_q_components(ctx.q_specs_struct, per_dim_ss, t, key_after_smooth)
+                resample_q_components(
+                  ctx.q_specs_struct,
+                  per_dim_ss,
+                  num_diffs,
+                  key_after_smooth
+                )
 
               {sampled_states, covs, rebuild_q(q_struct_prev, q_new_vals), key_after_q}
             end
@@ -870,6 +878,8 @@ defmodule BstsNx.GibbsSampler do
         Nx.tensor([row])
       end)
 
+    h_struct_tensor = Nx.stack(h_struct_list)
+
     x_rows = Enum.map(h_list, &extract_row_values(&1, reg_full_indices))
 
     %{
@@ -881,6 +891,7 @@ defmodule BstsNx.GibbsSampler do
       q_specs_struct: q_specs_struct,
       h_struct_rows: h_struct_rows,
       h_struct_list: h_struct_list,
+      h_struct_tensor: h_struct_tensor,
       x_rows: x_rows,
       f_struct: submatrix(spec.f, struct_full_indices, struct_full_indices),
       x0_struct: slice_vector(spec.x0, struct_full_indices),
@@ -974,7 +985,7 @@ defmodule BstsNx.GibbsSampler do
       p = length(gamma)
       log_prior_odds = :math.log(prior_inclusion / (1.0 - prior_inclusion))
       {u_vec, key_next} = Nx.Random.uniform(key, 0.0, 1.0, shape: {p})
-      uniforms = Nx.to_flat_list(u_vec)
+      uniforms = u_vec |> Nx.to_flat_list() |> List.to_tuple()
 
       gamma_new =
         Enum.reduce(0..(p - 1), gamma, fn j, gamma_curr ->
@@ -985,7 +996,7 @@ defmodule BstsNx.GibbsSampler do
           log_ml_on = log_marginal_g_prior(y_obs, x_obs_rows, gamma_on, sigma2, g_prior)
 
           prob_on = logistic(log_prior_odds + log_ml_on - log_ml_off)
-          gamma_j = if Enum.at(uniforms, j) < prob_on, do: 1, else: 0
+          gamma_j = if elem(uniforms, j) < prob_on, do: 1, else: 0
           List.replace_at(gamma_curr, j, gamma_j)
         end)
 
@@ -1139,13 +1150,17 @@ defmodule BstsNx.GibbsSampler do
       |> Map.new(fn {full_idx, local_idx} -> {full_idx, local_idx} end)
 
     beta_rows =
-      beta_cov |> Nx.to_flat_list() |> Enum.chunk_every(max(length(reg_full_indices), 1))
+      beta_cov
+      |> Nx.to_flat_list()
+      |> Enum.chunk_every(max(length(reg_full_indices), 1))
+      |> to_tuple_matrix()
 
     Enum.map(struct_covs, fn struct_cov ->
       struct_rows =
         struct_cov
         |> Nx.to_flat_list()
         |> Enum.chunk_every(max(length(struct_full_indices), 1))
+        |> to_tuple_matrix()
 
       rows =
         Enum.map(0..(state_dim - 1), fn i ->
@@ -1154,12 +1169,12 @@ defmodule BstsNx.GibbsSampler do
               Map.get(struct_map, i) != nil and Map.get(struct_map, j) != nil ->
                 i_local = Map.get(struct_map, i)
                 j_local = Map.get(struct_map, j)
-                struct_rows |> Enum.at(i_local) |> Enum.at(j_local)
+                struct_rows |> elem(i_local) |> elem(j_local)
 
               Map.get(reg_map, i) != nil and Map.get(reg_map, j) != nil ->
                 i_local = Map.get(reg_map, i)
                 j_local = Map.get(reg_map, j)
-                beta_rows |> Enum.at(i_local) |> Enum.at(j_local)
+                beta_rows |> elem(i_local) |> elem(j_local)
 
               true ->
                 0.0
@@ -1172,15 +1187,16 @@ defmodule BstsNx.GibbsSampler do
   end
 
   defp extract_row_values(h_t, indices) do
-    row = structured_h_row(h_t) |> Nx.to_flat_list()
-    Enum.map(indices, &Enum.at(row, &1))
+    row = structured_h_row(h_t) |> Nx.to_flat_list() |> List.to_tuple()
+    Enum.map(indices, &elem(row, &1))
   end
 
   defp transpose_rows([]), do: []
 
   defp transpose_rows(rows) do
-    p = rows |> hd() |> length()
-    Enum.map(0..(p - 1), fn j -> Enum.map(rows, &Enum.at(&1, j)) end)
+    rows_t = Enum.map(rows, &List.to_tuple/1)
+    p = rows_t |> hd() |> tuple_size()
+    Enum.map(0..(p - 1), fn j -> Enum.map(rows_t, &elem(&1, j)) end)
   end
 
   defp active_indices(gamma) do
@@ -1203,6 +1219,8 @@ defmodule BstsNx.GibbsSampler do
   end
 
   defp put_active_covariance(base_rows, active_indices, cov_rows) do
+    cov_rows_t = to_tuple_matrix(cov_rows)
+
     active_pos =
       active_indices
       |> Enum.with_index()
@@ -1216,7 +1234,7 @@ defmodule BstsNx.GibbsSampler do
         j_pos = Map.get(active_pos, j)
 
         if i_pos != nil and j_pos != nil do
-          cov_rows |> Enum.at(i_pos) |> Enum.at(j_pos)
+          cov_rows_t |> elem(i_pos) |> elem(j_pos)
         else
           0.0
         end
@@ -1229,28 +1247,17 @@ defmodule BstsNx.GibbsSampler do
     |> Enum.reduce(0.0, fn {x, y}, acc -> acc + x * y end)
   end
 
-  # Nx.dot handles all rank combinations used here; keep scalar/scalar explicit.
-  defp compat_dot(a, b) do
-    case {Nx.rank(a), Nx.rank(b)} do
-      {0, 0} ->
-        Nx.multiply(a, b)
-
-      _ ->
-        Nx.dot(a, b)
-    end
-  end
-
   defp slice_vector(_tensor, []), do: []
 
   defp slice_vector(tensor, indices) do
-    vals = tensor |> Nx.flatten() |> Nx.to_flat_list()
-    Enum.map(indices, &Enum.at(vals, &1))
+    vals = tensor |> Nx.flatten() |> Nx.to_flat_list() |> List.to_tuple()
+    Enum.map(indices, &elem(vals, &1))
   end
 
   defp submatrix(_tensor, [], []), do: Nx.broadcast(0.0, {0, 0})
 
   defp submatrix(tensor, row_indices, col_indices) do
-    {rows, cols} = Nx.shape(tensor)
+    {_rows, cols} = Nx.shape(tensor)
 
     row_data =
       tensor
@@ -1258,8 +1265,6 @@ defmodule BstsNx.GibbsSampler do
       |> Enum.chunk_every(cols)
       |> Enum.map(&List.to_tuple/1)
       |> List.to_tuple()
-
-    _ = rows
 
     row_indices
     |> Enum.map(fn r ->
@@ -1289,16 +1294,15 @@ defmodule BstsNx.GibbsSampler do
 
   # Computes per-dimension sum of squares for process residuals.
   # Returns a map %{dim_index => sum_of_squares}.
-  defp process_residuals_structured(sampled_states, f_t, q_specs) do
-    t = length(sampled_states)
+  defp process_residuals_structured(%Nx.Tensor{} = sampled_states, f_t, q_specs) do
+    t = Nx.axis_size(sampled_states, 0)
     state_dim = Nx.axis_size(f_t, 0)
 
     if t < 2 do
       Map.new(q_specs, fn qs -> {qs.dim_index, 0.0} end)
     else
-      states = Nx.stack(sampled_states)
-      prev_states = Nx.slice(states, [0, 0], [t - 1, state_dim])
-      next_states = Nx.slice(states, [1, 0], [t - 1, state_dim])
+      prev_states = Nx.slice(sampled_states, [0, 0], [t - 1, state_dim])
+      next_states = Nx.slice(sampled_states, [1, 0], [t - 1, state_dim])
       predicted = Nx.dot(prev_states, Nx.transpose(f_t))
       residuals = Nx.subtract(next_states, predicted)
 
@@ -1307,24 +1311,36 @@ defmodule BstsNx.GibbsSampler do
         |> Nx.multiply(residuals)
         |> Nx.sum(axes: [0])
         |> Nx.to_flat_list()
+        |> List.to_tuple()
 
       Map.new(q_specs, fn qs ->
-        {qs.dim_index, Enum.at(ss_vec, qs.dim_index, 0.0) |> Nx.to_number()}
+        ss_val =
+          if qs.dim_index < tuple_size(ss_vec), do: elem(ss_vec, qs.dim_index), else: 0.0
+
+        {qs.dim_index, ss_val |> safe_to_number()}
       end)
     end
   end
 
+  defp process_residuals_structured(sampled_states, f_t, q_specs) when is_list(sampled_states) do
+    sampled_states
+    |> Nx.stack()
+    |> process_residuals_structured(f_t, q_specs)
+  end
+
   # Computes observation sum of squares with multi-dimensional state support.
-  # h_list is a list of per-timestep observation tensors.
-  defp obs_residuals_structured(observations, sampled_states, h_list) do
-    t = length(sampled_states)
+  # h_rows is tensor {t, n}.
+  defp obs_residuals_structured(
+         observations,
+         %Nx.Tensor{} = sampled_states,
+         %Nx.Tensor{} = h_rows
+       ) do
+    t = Nx.axis_size(sampled_states, 0)
 
     if t == 0 do
       {0.0, 0}
     else
-      states = Nx.stack(sampled_states)
-      h_rows = h_list |> Enum.map(&structured_h_row/1) |> Enum.map(&Nx.flatten/1) |> Nx.stack()
-      preds = Nx.sum(Nx.multiply(h_rows, states), axes: [1])
+      preds = Nx.sum(Nx.multiply(h_rows, sampled_states), axes: [1])
 
       obs_tensor = observations_to_filter_tensor(observations)
       mask = Nx.equal(obs_tensor, obs_tensor)
@@ -1342,11 +1358,17 @@ defmodule BstsNx.GibbsSampler do
     end
   end
 
+  defp obs_residuals_structured(observations, sampled_states, h_list)
+       when is_list(sampled_states) and is_list(h_list) do
+    h_rows = h_list |> Enum.map(&structured_h_row/1) |> Enum.map(&Nx.flatten/1) |> Nx.stack()
+
+    observations
+    |> obs_residuals_structured(Nx.stack(sampled_states), h_rows)
+  end
+
   # Resamples each Q diagonal entry from its inverse-gamma posterior.
   # Returns {list_of_{dim_index, new_value}, next_key}.
-  defp resample_q_components(q_specs, per_dim_ss, t, key) do
-    num_diffs = max(t - 1, 0)
-
+  defp resample_q_components(q_specs, per_dim_ss, num_diffs, key) do
     Enum.map_reduce(q_specs, key, fn qs, key_acc ->
       ss = Map.get(per_dim_ss, qs.dim_index, 0.0) |> safe_to_number()
       shape = safe_to_number(qs.prior_shape) + num_diffs / 2
@@ -1358,9 +1380,9 @@ defmodule BstsNx.GibbsSampler do
 
   defp safe_to_number(%Nx.Tensor{} = t), do: Nx.to_number(t) |> safe_to_number()
   defp safe_to_number(val) when is_number(val), do: val
-  defp safe_to_number(:nan), do: 0.0
-  defp safe_to_number(:inf), do: 1.0e10
-  defp safe_to_number(:neg_inf), do: -1.0e10
+  defp safe_to_number(:nan), do: warn_and_coerce(:nan, 0.0)
+  defp safe_to_number(:inf), do: warn_and_coerce(:inf, 1.0e10)
+  defp safe_to_number(:neg_inf), do: warn_and_coerce(:neg_inf, -1.0e10)
 
   # Defensive fallback for backend-specific sentinels so structured sampling
   # remains robust instead of crashing on non-numeric values.
@@ -1372,16 +1394,36 @@ defmodule BstsNx.GibbsSampler do
     0.0
   end
 
+  defp warn_and_coerce(source, value) do
+    warn_key = {__MODULE__, :safe_to_number_warned}
+    warned = :persistent_term.get(warn_key, MapSet.new())
+
+    unless MapSet.member?(warned, source) do
+      Logger.warning(
+        "GibbsSampler.safe_to_number/1 coerced #{inspect(source)} to #{value}; " <>
+          "upstream numeric instability may be present"
+      )
+
+      :persistent_term.put(warn_key, MapSet.put(warned, source))
+    end
+
+    value
+  end
+
   # Updates the diagonal entries of Q matrix after resampling.
   defp rebuild_q(q_prev, new_vals) do
-    diag = Nx.take_diagonal(q_prev) |> Nx.to_flat_list()
+    diag = Nx.take_diagonal(q_prev)
 
-    updated_diag =
-      Enum.reduce(new_vals, diag, fn {dim_idx, val}, acc ->
-        List.replace_at(acc, dim_idx, val)
-      end)
+    case new_vals do
+      [] ->
+        q_prev
 
-    Nx.tensor(updated_diag, type: Nx.type(q_prev)) |> Nx.make_diagonal()
+      _ ->
+        {dim_indices, values} = Enum.unzip(new_vals)
+        index_tensor = dim_indices |> Enum.map(&[&1]) |> Nx.tensor(type: {:s, 64})
+        value_tensor = Nx.tensor(values, type: Nx.type(diag))
+        Nx.indexed_put(diag, index_tensor, value_tensor) |> Nx.make_diagonal()
+    end
   end
 
   # Normalizes spec.h into a per-timestep list of tensors for residual computation.
@@ -1422,6 +1464,17 @@ defmodule BstsNx.GibbsSampler do
 
         List.duplicate(h, t)
     end
+  end
+
+  defp validate_q_specs!(q_specs, state_dim) do
+    Enum.each(q_specs, fn qs ->
+      dim_index = Map.get(qs, :dim_index)
+
+      if not is_integer(dim_index) or dim_index < 0 or dim_index >= state_dim do
+        raise ArgumentError,
+              "q_specs dim_index must be in [0, #{state_dim - 1}], got: #{inspect(dim_index)}"
+      end
+    end)
   end
 
   # Converts a per-step H tensor into a row vector for scalar-observation residuals.
@@ -1471,6 +1524,25 @@ defmodule BstsNx.GibbsSampler do
     tensor
     |> Nx.to_flat_list()
     |> Enum.map(&Nx.tensor/1)
+  end
+
+  defp tensor_time_slices(tensor) do
+    tensor
+    |> Nx.to_batched(1)
+    |> Enum.map(&Nx.squeeze(&1, axes: [0]))
+  end
+
+  defp observed_transition_count(observations) do
+    observations
+    |> Enum.map(&(not missing_observation?(&1)))
+    |> Enum.chunk_every(2, 1, :discard)
+    |> Enum.count(fn [prev_present?, next_present?] -> prev_present? and next_present? end)
+  end
+
+  defp to_tuple_matrix(rows) do
+    rows
+    |> Enum.map(&List.to_tuple/1)
+    |> List.to_tuple()
   end
 
   defp observation_to_number(%Nx.Tensor{} = v), do: Nx.to_number(v)

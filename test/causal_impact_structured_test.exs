@@ -92,10 +92,16 @@ defmodule BstsNx.CausalImpactStructuredTest do
       end
     end
 
-    test "raises when post_period doesn't follow pre_period", %{spec: spec, obs: obs} do
-      assert_raise ArgumentError, ~r/post_period must immediately follow/, fn ->
-        CausalImpact.estimate_structured(obs, {1, 10}, {12, 20}, spec, seed: 1)
-      end
+    test "allows a gap between pre_period and post_period", %{spec: spec, obs: obs} do
+      result =
+        CausalImpact.estimate_structured(obs, {1, 10}, {12, 20}, spec,
+          num_samples: 5,
+          burn_in: 2,
+          seed: 1
+        )
+
+      assert result.post_period == {12, 20}
+      assert length(result.actual) == 9
     end
 
     test "raises when post_period exceeds observations", %{spec: spec, obs: obs} do

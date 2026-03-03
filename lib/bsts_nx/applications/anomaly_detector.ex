@@ -376,13 +376,13 @@ defmodule BstsNx.Applications.AnomalyDetector do
 
     preds =
       if is_list(h) do
-        h_rows = h |> Enum.map(&h_to_row_tensor/1) |> Nx.stack()
+        h_rows = h |> Enum.map(&BstsNx.Utils.h_to_row_tensor/1) |> Nx.stack()
 
         Nx.sum(Nx.multiply(states_t, Nx.reshape(h_rows, {1, t, Nx.axis_size(h_rows, 1)})),
           axes: [2]
         )
       else
-        Nx.dot(states_t, h_to_row_tensor(h))
+        Nx.dot(states_t, BstsNx.Utils.h_to_row_tensor(h))
       end
 
     means = preds |> Nx.mean(axes: [0]) |> Nx.to_flat_list()
@@ -421,21 +421,18 @@ defmodule BstsNx.Applications.AnomalyDetector do
     {means, sds}
   end
 
-  defp h_to_row_tensor(%Nx.Tensor{} = h_t) do
-    if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
-  end
-
   defp extrapolate_mean(%{posterior_mean: means}, idx) when is_list(means) do
     # For new observations beyond training, use the last fitted value
     Enum.at(means, idx) || List.last(means) || 0.0
   end
 
   defp extrapolate_sd(%{posterior_sd: sds}, idx) when is_list(sds) do
+    sds_len = length(sds)
     # For new observations, use the last fitted sd (grows with distance)
     base_sd = Enum.at(sds, idx) || List.last(sds) || 1.0
     # Increase uncertainty for extrapolation beyond training
-    if idx >= length(sds) do
-      extra_steps = idx - length(sds) + 1
+    if idx >= sds_len do
+      extra_steps = idx - sds_len + 1
       base_sd * :math.sqrt(1.0 + extra_steps * 0.1)
     else
       base_sd

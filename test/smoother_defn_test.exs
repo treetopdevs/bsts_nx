@@ -3,6 +3,7 @@ defmodule BstsNx.SmootherDefnTest do
 
   alias BstsNx.KalmanFilter
   alias BstsNx.Smoother
+  alias BstsNx.TestHelpers
 
   test "rts_defn matches rts on a simple constant series" do
     obs = [1.0, 2.0, 3.0, 2.5, 2.0]
@@ -153,6 +154,19 @@ defmodule BstsNx.SmootherDefnTest do
 
     assert Nx.shape(states) == {1}
     assert match?(%Nx.Tensor{}, key_out)
+  end
+
+  test "simulate_from_filtered_defn is deterministic for a fixed key" do
+    observations = [1.0, 2.0, 2.4, 2.2, 1.9]
+    {xs, ps} = TestHelpers.scalar_filter_outputs(observations, q: 0.3, r: 0.7, x0: 0.0, p0: 1.0)
+
+    key = Nx.Random.key(2026)
+    {path_a, key_a} = Smoother.simulate_from_filtered_defn(xs, ps, 1.0, 0.3, key)
+    {path_b, key_b} = Smoother.simulate_from_filtered_defn(xs, ps, 1.0, 0.3, key)
+
+    assert Nx.shape(path_a) == {length(observations)}
+    assert Nx.all_close(path_a, path_b, atol: 1.0e-6, rtol: 1.0e-6) |> Nx.to_number() == 1
+    assert Nx.to_flat_list(key_a) == Nx.to_flat_list(key_b)
   end
 
   test "smoothed variances are less than or equal to filtered variances" do

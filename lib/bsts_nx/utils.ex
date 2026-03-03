@@ -1,5 +1,10 @@
 defmodule BstsNx.Utils do
-  @moduledoc false
+  @moduledoc """
+  Shared numerical helpers used across BSTS modules.
+
+  This module centralizes robust linear algebra fallbacks and small tensor
+  utilities that are reused in filter/smoother/sampler code paths.
+  """
   import Bitwise
   require Logger
 
@@ -258,8 +263,11 @@ defmodule BstsNx.Utils do
     end
   end
 
-  # Nx.dot handles all rank combinations we use; keep scalar/scalar explicit.
-  defp compat_dot(a, b) do
+  @doc """
+  Compatibility wrapper over `Nx.dot/2` that also handles scalar/scalar input.
+  """
+  @spec compat_dot(Nx.t(), Nx.t()) :: Nx.t()
+  def compat_dot(a, b) do
     case {Nx.rank(a), Nx.rank(b)} do
       {0, 0} ->
         Nx.multiply(a, b)
@@ -267,6 +275,25 @@ defmodule BstsNx.Utils do
       _ ->
         Nx.dot(a, b)
     end
+  end
+
+  @doc """
+  Converts an observation-row tensor into a flat row vector.
+
+  Accepts either `{1, n}` or `{n}` and returns `{n}`.
+  """
+  @spec h_to_row_tensor(Nx.t()) :: Nx.t()
+  def h_to_row_tensor(%Nx.Tensor{} = h_t) do
+    if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
+  end
+
+  @doc """
+  Extracts a single element on the time axis from a tensor `{t, ...}`.
+  """
+  @spec take_time_slice_at(Nx.t(), non_neg_integer()) :: Nx.t()
+  def take_time_slice_at(tensor, idx) do
+    Nx.slice_along_axis(tensor, idx, 1, axis: 0)
+    |> Nx.squeeze(axes: [0])
   end
 
   @doc """

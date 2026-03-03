@@ -51,6 +51,7 @@ defmodule BstsNx.InterventionAnalysis do
 
   alias BstsNx.CausalImpact
   alias BstsNx.ModelBuilder
+  require Logger
 
   @type intervention_config :: %{
           pre_period: {pos_integer(), pos_integer()},
@@ -138,10 +139,27 @@ defmodule BstsNx.InterventionAnalysis do
     end
 
     {pre_start, pre_end} = pre_period
+    {post_start, post_end} = post_period
+    obs_count = length(observations)
 
-    if pre_start > pre_end do
+    if pre_start < 1 or pre_end < pre_start do
       raise ArgumentError,
-            "pre_period start must be <= end, got: {#{pre_start}, #{pre_end}}"
+            "pre_period must satisfy 1 <= start <= end, got: {#{pre_start}, #{pre_end}}"
+    end
+
+    if pre_end > obs_count do
+      raise ArgumentError,
+            "pre_period end (#{pre_end}) extends beyond observations (#{obs_count})"
+    end
+
+    if post_start <= pre_end or post_end < post_start do
+      raise ArgumentError,
+            "post_period must satisfy pre_end < start <= end, got: {#{post_start}, #{post_end}}"
+    end
+
+    if post_end > obs_count do
+      raise ArgumentError,
+            "post_period end (#{post_end}) extends beyond observations (#{obs_count})"
     end
 
     seasonality = Keyword.get(opts, :seasonality)
@@ -330,27 +348,42 @@ defmodule BstsNx.InterventionAnalysis do
       |> Keyword.put_new(:x0, 0.0)
       |> Keyword.put_new(:p0, 1.0)
 
-    summary =
-      if model_spec do
-        CausalImpact.estimate_structured_from_filter(
-          observations,
-          intervention_indices,
-          model_spec,
-          filter_opts
-        )
-      else
-        CausalImpact.estimate_from_filter(observations, intervention_indices, filter_opts)
-      end
+    try do
+      summary =
+        if model_spec do
+          CausalImpact.estimate_structured_from_filter(
+            observations,
+            intervention_indices,
+            model_spec,
+            filter_opts
+          )
+        else
+          CausalImpact.estimate_from_filter(observations, intervention_indices, filter_opts)
+        end
 
-    sig = is_significant_filter?(summary)
+      sig = is_significant_filter?(summary)
 
-    %{
-      impact: nil,
-      summary: summary,
-      significant?: sig,
-      alpha: alpha,
-      model_spec: model_spec
-    }
+      %{
+        impact: nil,
+        summary: summary,
+        significant?: sig,
+        alpha: alpha,
+        model_spec: model_spec
+      }
+    rescue
+      e in RuntimeError ->
+        if backend_lu_missing?(e) do
+          Logger.warning(
+            "Filter path requires Nx.Backend.lu/3 which is unavailable on the current backend; " <>
+              "falling back to MCMC analysis"
+          )
+
+          fallback = analyze_mcmc(observations, pre_period, {post_start, post_end}, alpha, opts)
+          %{fallback | impact: nil}
+        else
+          reraise(e, __STACKTRACE__)
+        end
+    end
   end
 
   defp resolve_model_spec(observations, {pre_start, _pre_end}, opts) do
@@ -374,6 +407,10 @@ defmodule BstsNx.InterventionAnalysis do
 
   defp is_significant_filter?(summary) do
     is_significant?(summary, 0.05)
+  end
+
+  defp backend_lu_missing?(%RuntimeError{message: message}) do
+    String.contains?(message, "Nx.Backend.lu/3 not implemented")
   end
 
   defp format_num(n), do: ModelBuilder.format_num(n)

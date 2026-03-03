@@ -1,5 +1,5 @@
 defmodule BstsNxUtilsSafeSolveTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: true
   alias BstsNx.Utils
 
   describe "safe_solve/2" do

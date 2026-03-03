@@ -8,7 +8,7 @@ defmodule BstsNxEdgeCasesTest do
   - Series data is constant (zero variance)
   - Series is very short
   """
-  use ExUnit.Case
+  use ExUnit.Case, async: true
 
   alias BstsNx.CausalImpact
   alias BstsNx.Diagnostics
@@ -24,7 +24,7 @@ defmodule BstsNxEdgeCasesTest do
       :rand.seed(:exsss, {1, 2, 3})
       observations = Enum.map(1..10, fn _ -> :rand.uniform() * 10 end)
 
-      assert_raise ArgumentError, ~r/post_period must immediately follow/, fn ->
+      assert_raise ArgumentError, ~r/post_period must satisfy/, fn ->
         CausalImpact.estimate(observations, {1, 10}, {11, 10})
       end
     end
@@ -46,14 +46,19 @@ defmodule BstsNxEdgeCasesTest do
       end
     end
 
-    test "raises when post_period doesn't immediately follow pre_period" do
+    test "allows a gap between pre_period and post_period" do
       :rand.seed(:exsss, {7, 8, 9})
       observations = Enum.map(1..20, fn _ -> :rand.uniform() * 10 end)
 
-      assert_raise ArgumentError, ~r/post_period must immediately follow/, fn ->
-        # Gap between pre (1..5) and post (7..10)
-        CausalImpact.estimate(observations, {1, 5}, {7, 10})
-      end
+      result =
+        CausalImpact.estimate(observations, {1, 5}, {7, 10},
+          num_samples: 5,
+          burn_in: 2,
+          seed: 11
+        )
+
+      assert length(result.actual) == 4
+      assert result.post_period == {7, 10}
     end
 
     test "works with minimal valid periods (2 pre, 1 post)" do

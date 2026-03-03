@@ -24,6 +24,7 @@ defmodule BstsNx.CausalImpact do
   """
 
   alias BstsNx.GibbsSampler
+  import Nx.Defn
 
   @type impact_result :: %{
           point_effects: list(list(float())),
@@ -48,7 +49,7 @@ defmodule BstsNx.CausalImpact do
     `1 <= start_index <= end_index <= length(observations)`.
   * `post_period` – tuple `{start_index, end_index}` (1-based) indicating
     the inclusive range of observations over which impact is assessed.
-    Must follow immediately after `pre_period`.
+    Must satisfy `pre_end < start_index <= end_index`.
   * `opts` – keyword list forwarded to `GibbsSampler.sample/7`.  Options
     include `:num_samples`, `:burn_in`, `:thin`, `:seed`, etc.
 
@@ -80,19 +81,18 @@ defmodule BstsNx.CausalImpact do
             "pre_period end (#{pre_end}) extends beyond observations (#{obs_count})"
     end
 
-    if post_start != pre_end + 1 or post_end < post_start do
-      raise ArgumentError, "post_period must immediately follow pre_period and have end >= start"
-    end
-
     if post_end > obs_count do
       raise ArgumentError,
             "post_period end (#{post_end}) extends beyond observations (#{obs_count})"
     end
 
+    if post_start <= pre_end or post_end < post_start do
+      raise ArgumentError, "post_period must satisfy pre_end < start <= end"
+    end
+
     # Extract pre and post subsets
-    {pre_obs, post_obs} = Enum.split(observations, pre_end)
-    pre_data = pre_obs |> Enum.drop(pre_start - 1)
-    post_data = post_obs |> Enum.take(post_end - pre_end)
+    pre_data = Enum.slice(observations, pre_start - 1, pre_end - pre_start + 1)
+    post_data = Enum.slice(observations, post_start - 1, post_end - post_start + 1)
     # Determine number of samples
     num_samples = Keyword.get(opts, :num_samples, 200)
     burn_in = Keyword.get(opts, :burn_in, div(num_samples, 2))
@@ -123,7 +123,7 @@ defmodule BstsNx.CausalImpact do
       )
 
     # Determine number of post steps
-    n_post = post_end - pre_end
+    n_post = post_end - post_start + 1
     # Create Nx.Random key for counterfactual simulation (consistent PRNG approach)
     seed_base = Keyword.get(opts, :seed, System.os_time())
     cf_base_key = Keyword.get(opts, :key, Nx.Random.key(seed_base))
@@ -216,8 +216,8 @@ defmodule BstsNx.CausalImpact do
             "pre_period end (#{pre_end}) extends beyond observations (#{obs_count})"
     end
 
-    if post_start != pre_end + 1 or post_end < post_start do
-      raise ArgumentError, "post_period must immediately follow pre_period and have end >= start"
+    if post_start <= pre_end or post_end < post_start do
+      raise ArgumentError, "post_period must satisfy pre_end < start <= end"
     end
 
     if post_end > obs_count do
@@ -225,9 +225,8 @@ defmodule BstsNx.CausalImpact do
             "post_period end (#{post_end}) extends beyond observations (#{obs_count})"
     end
 
-    {pre_obs, post_obs} = Enum.split(observations, pre_end)
-    pre_data = pre_obs |> Enum.drop(pre_start - 1)
-    post_data = post_obs |> Enum.take(post_end - pre_end)
+    pre_data = Enum.slice(observations, pre_start - 1, pre_end - pre_start + 1)
+    post_data = Enum.slice(observations, post_start - 1, post_end - post_start + 1)
 
     num_samples = Keyword.get(opts, :num_samples, 200)
     burn_in = Keyword.get(opts, :burn_in, div(num_samples, 2))
@@ -243,13 +242,13 @@ defmodule BstsNx.CausalImpact do
     pre_spec = slice_spec_h(spec, pre_start - 1, length(pre_data))
     pre_samples = GibbsSampler.sample_structured(pre_data, pre_spec, num_samples, gibbs_opts)
 
-    n_post = post_end - pre_end
+    n_post = post_end - post_start + 1
     seed_base = Keyword.get(opts, :seed, System.os_time())
     cf_base_key = Keyword.get(opts, :key, Nx.Random.key(seed_base))
     cf_keys = Nx.Random.split(cf_base_key, parts: length(pre_samples))
 
     # Get post-period H entries for counterfactual forward simulation
-    post_h = post_period_h(spec.h, pre_end, n_post)
+    post_h = post_period_h(spec.h, post_start - 1, n_post)
 
     effects =
       Enum.with_index(pre_samples)
@@ -328,8 +327,8 @@ defmodule BstsNx.CausalImpact do
   def summary(result) do
     n_post = length(result.actual)
     m = length(result.point_effects)
-    lower_idx = trunc(Float.floor(0.025 * max(m - 1, 0)))
-    upper_idx = trunc(Float.ceil(0.975 * max(m - 1, 0)))
+    lower_q = 0.025
+    upper_q = 0.975
 
     point_summaries =
       cond do
@@ -351,19 +350,13 @@ defmodule BstsNx.CausalImpact do
             if m < 2 do
               {List.duplicate(:nan, n_post), List.duplicate(:nan, n_post)}
             else
-              sorted = Nx.sort(effects_t, axis: 0)
+              effect_columns =
+                result.point_effects
+                |> Enum.zip()
+                |> Enum.map(&Tuple.to_list/1)
 
-              lower =
-                sorted
-                |> Nx.slice([lower_idx, 0], [1, n_post])
-                |> Nx.squeeze(axes: [0])
-                |> Nx.to_flat_list()
-
-              upper =
-                sorted
-                |> Nx.slice([upper_idx, 0], [1, n_post])
-                |> Nx.squeeze(axes: [0])
-                |> Nx.to_flat_list()
+              lower = Enum.map(effect_columns, &percentile_linear(&1, lower_q))
+              upper = Enum.map(effect_columns, &percentile_linear(&1, upper_q))
 
               {lower, upper}
             end
@@ -389,16 +382,12 @@ defmodule BstsNx.CausalImpact do
 
         true ->
           v_t = Nx.tensor(vals, type: {:f, 64})
-          sorted = Nx.sort(v_t)
-
-          lower = sorted |> Nx.slice([lower_idx], [1]) |> Nx.squeeze() |> Nx.to_number()
-          upper = sorted |> Nx.slice([upper_idx], [1]) |> Nx.squeeze() |> Nx.to_number()
 
           %{
             mean: v_t |> Nx.mean() |> Nx.to_number(),
             sd: v_t |> Nx.standard_deviation(ddof: 1) |> Nx.to_number(),
-            lower: lower,
-            upper: upper
+            lower: percentile_linear(vals, lower_q),
+            upper: percentile_linear(vals, upper_q)
           }
       end
     end
@@ -485,7 +474,13 @@ defmodule BstsNx.CausalImpact do
       # No valid intervention indices — return zero-effect result
       %{
         point_effects: %{mean: [], lower: [], upper: []},
-        cumulative_effect: %{mean: 0.0, sd: 0.0, lower: 0.0, upper: 0.0},
+        cumulative_effect: %{
+          mean: 0.0,
+          sd: 0.0,
+          lower: 0.0,
+          upper: 0.0,
+          cross_cov_included: false
+        },
         relative_effect: %{mean: 0.0, sd: 0.0, lower: 0.0, upper: 0.0},
         actual: [],
         baseline: []
@@ -709,12 +704,11 @@ defmodule BstsNx.CausalImpact do
       }
     else
       # Extract fixed structural matrices from priors.
-      # Extract fixed structural matrices from priors.
       # For fast filter we use the mode/mean of the prior distributions.
       # ModelSpec stores `prior_scale` and `prior_shape` for each diagonal Q entry.
       q_diag_map =
         Enum.map(spec.q_specs, fn q_spec ->
-          {q_spec.dim_index, q_spec.prior_scale / q_spec.prior_shape}
+          {q_spec.dim_index, q_spec.prior_scale / (q_spec.prior_shape + 1.0)}
         end)
         |> Map.new()
 
@@ -724,7 +718,7 @@ defmodule BstsNx.CausalImpact do
 
       q_matrix = Nx.make_diagonal(Nx.tensor(q_diag, type: {:f, 64}))
 
-      r_val = spec.obs_prior_scale / spec.obs_prior_shape
+      r_val = spec.obs_prior_scale / (spec.obs_prior_shape + 1.0)
       r_tensor = Nx.tensor(r_val, type: {:f, 64})
 
       x0 = Nx.broadcast(0.0, {state_dim})
@@ -786,16 +780,32 @@ defmodule BstsNx.CausalImpact do
       point_effects_mean =
         Enum.zip(actual_vals, baseline_vals) |> Enum.map(fn {a, b} -> a - b end)
 
-      # Observation-level variance: H_t * P_t * H_t^T + R
-      # already {n, 1, dim}
-      batch_h = h_interventions
-      batch_p = sps_interventions
-      batch_ht = Nx.transpose(batch_h, axes: [0, 2, 1])
+      # Observation-level variance: H_t * P_t * H_t^T + R.
+      # Compute this with explicit batched multiplies to avoid backend-specific
+      # broadcasting differences in Nx.dot for rank-3 tensors.
+      h_rows =
+        case Nx.rank(h_interventions) do
+          2 ->
+            h_interventions
+
+          3 ->
+            cond do
+              Nx.axis_size(h_interventions, 1) == 1 ->
+                Nx.squeeze(h_interventions, axes: [1])
+
+              Nx.axis_size(h_interventions, 2) == 1 ->
+                Nx.squeeze(h_interventions, axes: [2])
+
+              true ->
+                raise ArgumentError, "expected singleton observation axis in structured H rows"
+            end
+        end
+
+      # (P * h^T) for each time step -> {n, dim}
+      ph = Nx.sum(Nx.multiply(sps_interventions, Nx.new_axis(h_rows, 1)), axes: [2])
 
       p_projected_vars =
-        Nx.dot(Nx.dot(batch_h, batch_p), batch_ht)
-        # {n}
-        |> Nx.squeeze()
+        Nx.sum(Nx.multiply(ph, h_rows), axes: [1])
         |> Nx.add(r_tensor)
 
       # Ensure no negative variances due to precision
@@ -832,7 +842,8 @@ defmodule BstsNx.CausalImpact do
           mean: cum_mean,
           sd: cum_sd,
           lower: cum_mean - z * cum_sd,
-          upper: cum_mean + z * cum_sd
+          upper: cum_mean + z * cum_sd,
+          cross_cov_included: false
         },
         relative_effect: %{
           mean: rel_mean,
@@ -942,8 +953,6 @@ defmodule BstsNx.CausalImpact do
     Nx.to_flat_list(cf_obs_t)
   end
 
-  import Nx.Defn
-
   defnp take_time_slice_defn(tensor, idx) do
     Nx.slice_along_axis(tensor, idx, 1, axis: 0) |> Nx.squeeze(axes: [0])
   end
@@ -967,7 +976,7 @@ defmodule BstsNx.CausalImpact do
     key_state = take_time_slice_defn(keys, 0)
     key_obs = take_time_slice_defn(keys, 1)
 
-    {z_state, key_out_temp} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {n_steps, state_dim})
+    {z_state, key_out} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {n_steps, state_dim})
     {z_obs, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {n_steps})
 
     cf_obs = Nx.broadcast(0.0, {n_steps})
@@ -994,7 +1003,7 @@ defmodule BstsNx.CausalImpact do
         {i + 1, next_state, new_obs_acc, z_s, z_o, h_tensor, f, q_s, o_s}
       end
 
-    {final_obs, key_out_temp}
+    {final_obs, key_out}
   end
 
   # Returns a copy of spec with H sliced for the pre-period.
@@ -1029,7 +1038,7 @@ defmodule BstsNx.CausalImpact do
 
           # Slice the time axis then split into a list of per-step tensors
           sliced = Nx.slice_along_axis(t, post_start_0based, n_post, axis: 0)
-          Enum.map(0..(n_post - 1), fn i -> take_time_slice_at(sliced, i) end)
+          Enum.map(0..(n_post - 1), fn i -> BstsNx.Utils.take_time_slice_at(sliced, i) end)
         else
           List.duplicate(t, n_post)
         end
@@ -1049,13 +1058,35 @@ defmodule BstsNx.CausalImpact do
   defp to_number(%Nx.Tensor{} = t), do: Nx.to_number(t)
   defp to_number(x) when is_number(x), do: x + 0.0
 
-  defp split_key_at(keys, idx) do
-    Nx.slice_along_axis(keys, idx, 1, axis: 0)
-    |> Nx.squeeze(axes: [0])
+  defp percentile_linear(values, quantile) when is_list(values) do
+    sorted =
+      values
+      |> Enum.map(&to_number/1)
+      |> Enum.sort()
+
+    case sorted do
+      [] ->
+        :nan
+
+      [v] ->
+        v
+
+      _ ->
+        n = length(sorted)
+        position = quantile * (n - 1)
+        lo = trunc(Float.floor(position))
+        hi = trunc(Float.ceil(position))
+        weight = position - lo
+
+        sorted_t = List.to_tuple(sorted)
+        lo_v = elem(sorted_t, lo)
+        hi_v = elem(sorted_t, hi)
+        lo_v + weight * (hi_v - lo_v)
+    end
   end
 
-  defp take_time_slice_at(tensor, idx) do
-    Nx.slice_along_axis(tensor, idx, 1, axis: 0)
+  defp split_key_at(keys, idx) do
+    Nx.slice_along_axis(keys, idx, 1, axis: 0)
     |> Nx.squeeze(axes: [0])
   end
 end

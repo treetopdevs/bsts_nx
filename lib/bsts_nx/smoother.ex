@@ -12,8 +12,11 @@ defmodule BstsNx.Smoother do
   transition matrix `F` as input.
   """
 
-  import Nx, only: [dot: 2, transpose: 1, subtract: 2, add: 2]
-  import BstsNx.Utils, only: [to_tensor: 1, safe_solve: 2, has_non_finite?: 1]
+  import Nx, only: [transpose: 1, subtract: 2, add: 2]
+
+  import BstsNx.Utils,
+    only: [to_tensor: 1, safe_solve: 2, has_non_finite?: 1, compat_dot: 2, take_time_slice_at: 2]
+
   require Nx.Defn
   require Logger
 
@@ -297,7 +300,12 @@ defmodule BstsNx.Smoother do
   def simulate_from_filtered_defn_matrix(filtered_xs, filtered_ps, f, q, key) do
     f_t = to_tensor(f)
     q_t = to_tensor(q)
-    simulate_from_filtered_defn_matrix_impl(filtered_xs, filtered_ps, f_t, q_t, key)
+
+    if backend_supports_lu?() do
+      simulate_from_filtered_defn_matrix_impl_solve(filtered_xs, filtered_ps, f_t, q_t, key)
+    else
+      simulate_from_filtered_defn_matrix_impl_pinv(filtered_xs, filtered_ps, f_t, q_t, key)
+    end
   end
 
   @doc """
@@ -392,7 +400,7 @@ defmodule BstsNx.Smoother do
     {states_out, key_out}
   end
 
-  Nx.Defn.defn simulate_from_filtered_defn_matrix_impl(filtered_xs, filtered_ps, f, q, key) do
+  Nx.Defn.defn simulate_from_filtered_defn_matrix_impl_solve(filtered_xs, filtered_ps, f, q, key) do
     t = Nx.axis_size(filtered_xs, 0)
     n = Nx.axis_size(filtered_xs, 1)
 
@@ -431,10 +439,10 @@ defmodule BstsNx.Smoother do
         x_pred_next = Nx.dot(f_in, x_filt)
         p_pred_next = Nx.add(Nx.dot(Nx.dot(f_in, p_filt), Nx.transpose(f_in)), q_in)
 
-        # compute J gain. P_{k+1|k} * J^T = F * P_k => J^T = pinv(P_pred) * F * P_k
+        # compute J gain using the same regularized solve approach as RTS.
         p_pred_next_reg = Nx.add(p_pred_next, Nx.multiply(i_eye, c_eps))
         rhs = Nx.dot(f_in, p_filt)
-        j = Nx.dot(Nx.LinAlg.pinv(p_pred_next_reg), rhs) |> Nx.transpose()
+        j = Nx.LinAlg.solve(p_pred_next_reg, rhs) |> Nx.transpose()
 
         x_next = take_vector_at(states_acc, i + 1)
         mean = Nx.add(x_filt, Nx.dot(j, Nx.subtract(x_next, x_pred_next)))
@@ -456,6 +464,72 @@ defmodule BstsNx.Smoother do
       end
 
     {states_out, key_out}
+  end
+
+  Nx.Defn.defn simulate_from_filtered_defn_matrix_impl_pinv(filtered_xs, filtered_ps, f, q, key) do
+    t = Nx.axis_size(filtered_xs, 0)
+    n = Nx.axis_size(filtered_xs, 1)
+
+    {eps_tensor, key_out} = Nx.Random.normal(key, 0.0, 1.0, shape: {t, n})
+
+    states = Nx.broadcast(0.0, {t, n})
+    i_n = Nx.eye(n, type: Nx.type(filtered_ps))
+    eps_reg = Nx.tensor(1.0e-6, type: Nx.type(filtered_ps))
+
+    last_idx = t - 1
+
+    x_T_mean = take_vector_at(filtered_xs, last_idx)
+    p_T_cov = take_matrix_at(filtered_ps, last_idx) |> symmetrize()
+    p_T_reg = Nx.add(p_T_cov, Nx.multiply(i_n, eps_reg))
+    chol_T = Nx.LinAlg.cholesky(p_T_reg)
+
+    eps_T = take_vector_at(eps_tensor, last_idx)
+    x_T = Nx.add(x_T_mean, Nx.dot(chol_T, eps_T))
+    states = Nx.put_slice(states, [last_idx, 0], Nx.new_axis(x_T, 0))
+
+    num_steps = t - 1
+
+    {_, states_out, _, _, _, _, _, _, _} =
+      while {k = Nx.tensor(0), states_acc = states, eps_in = eps_tensor, fxs = filtered_xs,
+             fps = filtered_ps, f_in = f, q_in = q, i_eye = i_n, c_eps = eps_reg},
+            k < num_steps do
+        i = last_idx - 1 - k
+
+        x_filt = take_vector_at(fxs, i)
+        p_filt = take_matrix_at(fps, i)
+
+        x_pred_next = Nx.dot(f_in, x_filt)
+        p_pred_next = Nx.add(Nx.dot(Nx.dot(f_in, p_filt), Nx.transpose(f_in)), q_in)
+
+        # Fallback for backends that don't support LU-based solve in defn.
+        p_pred_next_reg = Nx.add(p_pred_next, Nx.multiply(i_eye, c_eps))
+        rhs = Nx.dot(f_in, p_filt)
+        j = Nx.dot(Nx.LinAlg.pinv(p_pred_next_reg), rhs) |> Nx.transpose()
+
+        x_next = take_vector_at(states_acc, i + 1)
+        mean = Nx.add(x_filt, Nx.dot(j, Nx.subtract(x_next, x_pred_next)))
+        j_p_jt = Nx.dot(Nx.dot(j, p_pred_next), Nx.transpose(j))
+        cov = Nx.subtract(p_filt, j_p_jt) |> symmetrize()
+
+        cov_reg = Nx.add(cov, Nx.multiply(i_eye, c_eps))
+        chol_i = Nx.LinAlg.cholesky(cov_reg)
+
+        eps_i = take_vector_at(eps_in, i)
+        x_i = Nx.add(mean, Nx.dot(chol_i, eps_i))
+        states_new = Nx.put_slice(states_acc, [i, 0], Nx.new_axis(x_i, 0))
+
+        {k + 1, states_new, eps_in, fxs, fps, f_in, q_in, i_eye, c_eps}
+      end
+
+    {states_out, key_out}
+  end
+
+  defp backend_supports_lu? do
+    case Nx.default_backend() do
+      EMLX.Backend -> false
+      {EMLX.Backend, _opts} -> false
+      _ -> true
+    end
   end
 
   Nx.Defn.defnp take_scalar_at(vec, idx) do
@@ -611,7 +685,6 @@ defmodule BstsNx.Smoother do
   end
 
   def simulate_with_key(smoothed, filtered, predicted, f, opts) do
-    Process.put(:bsts_smoother_non_pd_logged, false)
     f_t = to_tensor(f)
     t = length(smoothed)
     # Convert inputs to :array for O(1) access
@@ -677,7 +750,8 @@ defmodule BstsNx.Smoother do
 
           cov =
             if Nx.rank(p_filt) == 0 do
-              Nx.multiply(p_filt, Nx.subtract(1.0, Nx.multiply(j, f_t)))
+              p_raw = Nx.multiply(p_filt, Nx.subtract(1.0, Nx.multiply(j, f_t)))
+              Nx.max(p_raw, Nx.tensor(0.0, type: Nx.type(p_raw)))
             else
               # Prefer the symmetric form for numerical robustness:
               # Cov(x_k | x_{k+1}, y_{1:T}) = P_k - J_k P_{k+1|k} J_k^T
@@ -707,13 +781,7 @@ defmodule BstsNx.Smoother do
 
     # Convert array to list in time order
     sampled_states = Enum.map(0..(t - 1), fn i -> :array.get(i, states_arr) end)
-    Process.delete(:bsts_smoother_non_pd_logged)
     {sampled_states, key_out}
-  end
-
-  defp take_time_slice_at(tensor, idx) do
-    Nx.slice_along_axis(tensor, idx, 1, axis: 0)
-    |> Nx.squeeze(axes: [0])
   end
 
   # Computes the smoother gain C_k = P_filt * F^T * P_pred^{-1}.
@@ -739,17 +807,6 @@ defmodule BstsNx.Smoother do
       else
         safe_solve(p_pred_next, rhs) |> transpose()
       end
-    end
-  end
-
-  # Nx.dot handles all rank combinations used here; keep scalar/scalar explicit.
-  defp compat_dot(a, b) do
-    case {Nx.rank(a), Nx.rank(b)} do
-      {0, 0} ->
-        Nx.multiply(a, b)
-
-      _ ->
-        dot(a, b)
     end
   end
 

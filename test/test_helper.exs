@@ -32,6 +32,11 @@ case requested_backend do
     raise "Unsupported BSTS_NX_TEST_BACKEND=#{inspect(other)} (expected exla, emlx, or native)"
 end
 
+__DIR__
+|> Path.join("support/**/*.exs")
+|> Path.wildcard()
+|> Enum.each(&Code.require_file/1)
+
 if requested_backend in ["exla", "emlx"] do
   ExUnit.start(exclude: [:slow], max_cases: 1, timeout: 300_000)
 else

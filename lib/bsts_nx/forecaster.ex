@@ -250,7 +250,7 @@ defmodule BstsNx.Forecaster do
     fitted =
       cond do
         is_list(h) ->
-          h_rows = h |> Enum.map(&h_to_row_tensor/1) |> Nx.stack()
+          h_rows = h |> Enum.map(&BstsNx.Utils.h_to_row_tensor/1) |> Nx.stack()
 
           h_rows
           |> Nx.multiply(mean_states_t)
@@ -259,7 +259,7 @@ defmodule BstsNx.Forecaster do
           |> Enum.take(t)
 
         true ->
-          h_row = h_to_row_tensor(h)
+          h_row = BstsNx.Utils.h_to_row_tensor(h)
           mean_states_t |> Nx.dot(h_row) |> Nx.to_flat_list() |> Enum.take(t)
       end
 
@@ -299,7 +299,7 @@ defmodule BstsNx.Forecaster do
           List.duplicate(static_h, horizon)
       end
 
-    h_rows = Enum.map(h_list, &h_to_row_tensor/1)
+    h_rows = Enum.map(h_list, &BstsNx.Utils.h_to_row_tensor/1)
 
     Enum.zip(samples, sample_key_rows)
     |> Enum.map(fn {sample, sample_key_row} ->
@@ -325,9 +325,12 @@ defmodule BstsNx.Forecaster do
         |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_row, {proc_row, z_obs}},
                                                          {state, acc} ->
           next_state =
-            Nx.add(compat_dot(spec.f, state), Nx.tensor(proc_row, type: Nx.type(state)))
+            Nx.add(
+              BstsNx.Utils.compat_dot(spec.f, state),
+              Nx.tensor(proc_row, type: Nx.type(state))
+            )
 
-          y_mean = Nx.to_number(compat_dot(h_row, next_state))
+          y_mean = Nx.to_number(BstsNx.Utils.compat_dot(h_row, next_state))
           y = y_mean + z_obs * obs_sd
           {next_state, [y | acc]}
         end)
@@ -461,21 +464,6 @@ defmodule BstsNx.Forecaster do
     |> Nx.flatten()
     |> Nx.to_flat_list()
     |> Enum.map(&(&1 + 0.0))
-  end
-
-  defp h_to_row_tensor(%Nx.Tensor{} = h_t) do
-    if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
-  end
-
-  # Nx.dot handles all rank combinations used here; keep scalar/scalar explicit.
-  defp compat_dot(a, b) do
-    case {Nx.rank(a), Nx.rank(b)} do
-      {0, 0} ->
-        Nx.multiply(a, b)
-
-      _ ->
-        Nx.dot(a, b)
-    end
   end
 
   # Observation coercion delegated to ModelBuilder.coerce_obs/1

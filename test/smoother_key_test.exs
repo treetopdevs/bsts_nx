@@ -1,5 +1,5 @@
 defmodule BstsNxSmootherKeyTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: true
   alias BstsNx.KalmanFilter
   alias BstsNx.Smoother
 

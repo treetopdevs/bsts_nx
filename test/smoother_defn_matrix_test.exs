@@ -51,4 +51,30 @@ defmodule BstsNx.SmootherDefnMatrixTest do
     assert Nx.shape(path) == {3}
     assert Nx.shape(key_out) == {2}
   end
+
+  if @emlx_backend? do
+    @tag skip:
+           "EMLX backend does not implement Nx.Backend.lu/3 required by matrix simulation path"
+  end
+
+  test "simulate_from_filtered_defn_matrix returns deterministic samples for a fixed key" do
+    observations = Nx.tensor([1.0, 1.4, 1.9, 2.2], type: {:f, 32})
+
+    f = Nx.tensor([[1.0, 1.0], [0.0, 1.0]])
+    h = Nx.tensor([[1.0, 0.0]])
+    q = Nx.tensor([[0.1, 0.0], [0.0, 0.02]])
+    r = Nx.tensor(0.15)
+    x0 = Nx.tensor([0.0, 0.0])
+    p0 = Nx.eye(2)
+
+    {xs, ps} = KalmanFilter.filter_defn_multi(observations, f, h, q, r, x0, p0)
+
+    key = Nx.Random.key(404)
+    {states_a, key_a} = Smoother.simulate_from_filtered_defn_matrix(xs, ps, f, q, key)
+    {states_b, key_b} = Smoother.simulate_from_filtered_defn_matrix(xs, ps, f, q, key)
+
+    assert Nx.shape(states_a) == {4, 2}
+    assert Nx.all_close(states_a, states_b, atol: 1.0e-6, rtol: 1.0e-6) |> Nx.to_number() == 1
+    assert Nx.to_flat_list(key_a) == Nx.to_flat_list(key_b)
+  end
 end

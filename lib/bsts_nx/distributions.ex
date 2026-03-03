@@ -42,10 +42,6 @@ defmodule BstsNx.Distributions do
       finite positive number truncates the sampled value and changes the
       implied posterior target.
 
-    * `:max_value` – optional upper bound for samples.  When set to a number,
-      each sample is clamped to `min(sample, max_value)`.  Defaults to
-      `:infinity` (no clamping).
-
   ## Examples
 
       iex> x = BstsNx.Distributions.inv_gamma_sample(2.0, 3.0)
@@ -180,6 +176,14 @@ defmodule BstsNx.Distributions do
       end
 
     {Nx.reshape(sample_flat, Nx.shape(a)), next_key}
+  end
+
+  @doc false
+  @spec inv_gamma_sample_with_rand_state(number(), number(), :rand.state()) ::
+          {float(), :rand.state()}
+  def inv_gamma_sample_with_rand_state(alpha, beta, rand_state)
+      when is_number(alpha) and is_number(beta) do
+    inv_gamma_draw(alpha * 1.0, beta * 1.0, :infinity, rand_state)
   end
 
   Nx.Defn.defn inv_gamma_sample_defn_impl(alpha, beta, key, cap_value, apply_cap) do

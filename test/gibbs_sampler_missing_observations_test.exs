@@ -1,5 +1,5 @@
 defmodule BstsNxGibbsSamplerMissingObservationsTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: true
   import ExUnit.CaptureLog
   alias BstsNx.Components
   alias BstsNx.GibbsSampler

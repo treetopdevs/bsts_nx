@@ -1,5 +1,5 @@
 defmodule BstsNxDistributionsInvGammaTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: true
   alias BstsNx.Distributions
 
   describe "inv_gamma_sample max_value option" do

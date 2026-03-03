@@ -174,12 +174,13 @@ defmodule BstsNx.BCT.ARForecaster do
 
   defp build_lagged_dataset(observations, order) do
     t = length(observations)
+    obs_tuple = List.to_tuple(observations)
 
     rows =
       Enum.map(order..(t - 1), fn idx ->
         lags =
           Enum.map(1..order, fn lag ->
-            Enum.at(observations, idx - lag)
+            elem(obs_tuple, idx - lag)
           end)
 
         [1.0 | lags]

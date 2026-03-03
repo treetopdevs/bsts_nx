@@ -76,7 +76,7 @@ mix format --check-formatted        # Check formatting without modifying
 
 ## Dependencies
 
-- `nx ~> 0.6` — Core numerical computing
+- `nx ~> 0.11` — Core numerical computing
 - `exla ~> 0.6` (optional) — JIT compilation and hardware acceleration
 - `stream_data ~> 1.0` (test/dev) — Property-based testing
 - `ex_doc ~> 0.34` (dev) — Documentation generation

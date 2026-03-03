@@ -2,15 +2,16 @@ defmodule BstsNx.CausalImpactFilterTest do
   use ExUnit.Case, async: true
 
   alias BstsNx.CausalImpact
+  alias BstsNx.Components
+  alias BstsNx.TestHelpers
+
+  @emlx_backend? match?(EMLX.Backend, Nx.default_backend()) or
+                   match?({EMLX.Backend, _}, Nx.default_backend())
 
   test "estimate_from_filter detects a constant uplift" do
     # 100 time steps: baseline of 10.0, then a +5.0 uplift on indices 50-79
     on_air = Enum.to_list(50..79)
-
-    obs =
-      Enum.map(0..99, fn idx ->
-        if idx in on_air, do: 15.0, else: 10.0
-      end)
+    obs = TestHelpers.uplift_series(100, on_air, 10.0, 5.0)
 
     result =
       CausalImpact.estimate_from_filter(obs, on_air,
@@ -109,5 +110,26 @@ defmodule BstsNx.CausalImpactFilterTest do
     assert length(result.actual) == 2
     assert length(result.baseline) == 2
     assert length(result.point_effects.mean) == 2
+  end
+
+  if @emlx_backend? do
+    @tag skip:
+           "EMLX backend does not implement Nx.Backend.lu/3 required by structured filter smoothing"
+  end
+
+  test "estimate_structured_from_filter returns structured summary fields" do
+    observations = TestHelpers.uplift_series(60, Enum.to_list(40..49), 20.0, 4.0)
+    intervention_indices = Enum.to_list(40..49)
+    spec = Components.local_level_spec(initial_state: 20.0, initial_cov: 1.0, process_var: 0.1)
+
+    result =
+      CausalImpact.estimate_structured_from_filter(observations, intervention_indices, spec,
+        alpha: 0.05
+      )
+
+    assert is_map(result.point_effects)
+    assert length(result.actual) == 10
+    assert length(result.baseline) == 10
+    assert result.cumulative_effect.cross_cov_included == false
   end
 end

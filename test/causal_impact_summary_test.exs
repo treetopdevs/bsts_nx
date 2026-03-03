@@ -1,5 +1,5 @@
 defmodule BstsNxCausalImpactSummaryTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: true
   alias BstsNx.CausalImpact
 
   test "summary returns :nan bounds with a single sample" do

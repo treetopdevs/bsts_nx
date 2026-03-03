@@ -1,5 +1,5 @@
 defmodule BstsNxKalmanFilterLengthTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: true
   alias BstsNx.KalmanFilter
 
   test "raises when h list length mismatches observations" do

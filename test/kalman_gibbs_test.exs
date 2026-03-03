@@ -1,5 +1,5 @@
 defmodule BstsNxKalmanGibbsTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: true
   import Nx, only: [to_number: 1]
   alias BstsNx.KalmanFilter
   alias BstsNx.GibbsSampler
