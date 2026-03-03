@@ -15,7 +15,7 @@ Everything is reproducible and seeded.
 
 ## Narrative Thread: "Operation Midnight Spike"
 
-You are the lead web engineer at **Northstar Commerce**. Last night, a high-profile TV campaign aired during a championship game and sessions spiked hard.
+You are the lead analyst at **Northstar Commerce**. Last night, a high-profile TV campaign aired during a championship game and sessions spiked hard.
 
 By tomorrow morning, leadership wants answers:
 
@@ -32,19 +32,25 @@ _Story beat:_ 08:00 AM. The war room opens, and we load the tooling before touch
 ```elixir
 project_root = "/Users/nicholas/develop/bsts_nx"
 
-Mix.install([
-  {:nx, "~> 0.11.0"},
-  {:exla, "~> 0.11.0"},
-  {:xla, "~> 0.10.0"},
-  {:bsts_nx, path: project_root},
-  {:kino_vega_lite, "~> 0.1.13"}
-])
+Mix.install(
+  [
+    {:nx, "~> 0.11.0"},
+    {:emlx, "~> 0.2.0"},
+    {:exla, "~> 0.11.0"},
+    {:xla, "~> 0.10.0"},
+    {:bsts_nx, path: project_root},
+    {:kino_vega_lite, "~> 0.1.13"}
+  ],
+  force: true
+)
 
 Nx.global_default_backend(Nx.BinaryBackend)
 
 IO.puts("Loaded bsts_nx from: #{inspect(project_root || :github)}")
 IO.puts("Nx default backend: #{inspect(Nx.default_backend())}")
-IO.puts("EXLA is strongly recommended for this notebook.")
+IO.puts("EMLX is preferred for this notebook; EXLA is the fallback compiled path.")
+IO.puts("Notebook revision: 2026-03-01 (EMLX-first, safe_to_number guard)")
+IO.puts("GibbsSampler source: #{BstsNx.GibbsSampler.module_info(:compile)[:source]}")
 
 alias BstsNx.{
   CausalImpact,
@@ -84,11 +90,11 @@ defmodule NotebookHelpers do
     Nx.Random.key(seed)
   end
 
-  defp loud_warning(lines) do
+  defp loud_warning(lines, label \\ "BACKEND") do
     banner = String.duplicate("!", 92)
     IO.puts("")
     IO.puts(banner)
-    IO.puts("!!! EXLA WARNING: EXLA BACKEND IS NOT ACTIVE !!!")
+    IO.puts("!!! #{label} WARNING: REQUESTED BACKEND IS NOT ACTIVE !!!")
     Enum.each(lines, &IO.puts/1)
     IO.puts(banner)
     IO.puts("")
@@ -109,6 +115,69 @@ defmodule NotebookHelpers do
   def use_binary! do
     Nx.global_default_backend(Nx.BinaryBackend)
     backend_status()
+  end
+
+  def try_emlx!(opts \\ []) do
+    warn = Keyword.get(opts, :warn, true)
+
+    result =
+      if Code.ensure_loaded?(EMLX.Backend) do
+        try do
+          Nx.global_default_backend(EMLX.Backend)
+          Nx.Defn.global_default_options(compiler: Nx.Defn.Evaluator)
+          _ = Nx.backend_transfer(Nx.tensor([0.0]), EMLX.Backend)
+
+          backend_status()
+          |> Map.put(:emlx_status, :enabled)
+        rescue
+          error ->
+            Nx.global_default_backend(Nx.BinaryBackend)
+            Nx.Defn.global_default_options(compiler: Nx.Defn.Evaluator)
+
+            backend_status()
+            |> Map.put(:emlx_status, :fallback_binary)
+            |> Map.put(:emlx_error, Exception.message(error))
+        catch
+          :exit, reason ->
+            Nx.global_default_backend(Nx.BinaryBackend)
+            Nx.Defn.global_default_options(compiler: Nx.Defn.Evaluator)
+
+            backend_status()
+            |> Map.put(:emlx_status, :fallback_binary)
+            |> Map.put(:emlx_error, inspect(reason))
+        end
+      else
+        backend_status()
+        |> Map.put(:emlx_status, :unavailable)
+      end
+
+    if warn and result.emlx_status != :enabled do
+      base_lines = [
+        "Current Nx backend: #{inspect(result.default_backend)}",
+        "EMLX status: #{inspect(result.emlx_status)}",
+        "Structured sections (7.2/9.2) may be slower without a compiled backend."
+      ]
+
+      lines =
+        case result.emlx_status do
+          :fallback_binary ->
+            [
+              "EMLX activation failed and backend fell back to BinaryBackend.",
+              "EMLX error: #{Map.get(result, :emlx_error)}"
+              | base_lines
+            ]
+
+          :unavailable ->
+            ["EMLX is unavailable in this environment." | base_lines]
+
+          other ->
+            ["EMLX unavailable (status #{inspect(other)})." | base_lines]
+        end
+
+      loud_warning(lines, "EMLX")
+    end
+
+    result
   end
 
   def try_exla!(opts \\ []) do
@@ -180,10 +249,96 @@ defmodule NotebookHelpers do
             ["EXLA unavailable (status #{inspect(other)})." | base_lines]
         end
 
-      loud_warning(lines)
+      loud_warning(lines, "EXLA")
     end
 
     result
+  end
+
+  def try_compiled_backend!(opts \\ []) do
+    warn = Keyword.get(opts, :warn, true)
+    emlx_result = try_emlx!(Keyword.put(opts, :warn, false))
+
+    if emlx_result.emlx_status == :enabled do
+      emlx_result
+      |> Map.put(:compiled_backend, :emlx)
+    else
+      exla_result = try_exla!(Keyword.put(opts, :warn, false))
+
+      compiled_backend =
+        if exla_result.exla_status == :enabled do
+          :exla
+        else
+          :binary
+        end
+
+      result =
+        exla_result
+        |> Map.put(:compiled_backend, compiled_backend)
+        |> Map.put(:emlx_status, emlx_result.emlx_status)
+        |> Map.put(:emlx_error, Map.get(emlx_result, :emlx_error))
+
+      if warn and compiled_backend == :binary do
+        lines = [
+          "Current Nx backend: #{inspect(result.default_backend)}",
+          "EMLX status: #{inspect(result.emlx_status)}",
+          "EXLA status: #{inspect(result.exla_status)}",
+          "Structured sections (7.2/9.2) will be slower on BinaryBackend."
+        ]
+
+        loud_warning(lines, "COMPILED BACKEND")
+      end
+
+      result
+    end
+  end
+
+  def assert_gibbs_sampler_runtime!(project_root) do
+    source = to_string(BstsNx.GibbsSampler.module_info(:compile)[:source] || "")
+
+    source_ok? =
+      String.starts_with?(source, project_root) and
+        String.ends_with?(source, "/lib/bsts_nx/gibbs_sampler.ex")
+
+    beam = :code.which(BstsNx.GibbsSampler)
+
+    has_nan_clause? =
+      case :beam_lib.chunks(beam, [:abstract_code]) do
+        {:ok, {_, [{:abstract_code, {:raw_abstract_v1, forms}}]}} ->
+          case Enum.find(forms, fn
+                 {:function, _, :safe_to_number, 1, _} -> true
+                 _ -> false
+               end) do
+            {:function, _, :safe_to_number, 1, clauses} ->
+              Enum.any?(clauses, fn
+                {:clause, _, [{:atom, _, :nan}], _, _} -> true
+                _ -> false
+              end)
+
+            _ ->
+              false
+          end
+
+        _ ->
+          false
+      end
+
+    unless source_ok? and has_nan_clause? do
+      raise """
+      Livebook loaded stale BstsNx bytecode (missing safe_to_number(:nan) protection).
+      Source seen: #{source}
+      Expected project root: #{project_root}
+
+      Fix:
+      1) Runtime -> Disconnect and Reconnect
+      2) Reopen this notebook from disk:
+         /Users/nicholas/develop/bsts_nx/livebooks/bsts_nx_statistical_journey.livemd
+      3) Run setup cell again and confirm:
+         Notebook revision: 2026-03-01 (EMLX-first, safe_to_number guard)
+      """
+    end
+
+    :ok
   end
 
   def mean(list) when is_list(list) and list != [] do
@@ -348,7 +503,11 @@ defmodule NotebookHelpers do
 end
 
 NotebookHelpers.seed!(2026)
-NotebookHelpers.try_exla!(min_headroom: 10_000, warn: true)
+backend_setup = NotebookHelpers.try_compiled_backend!(min_headroom: 10_000, warn: true)
+NotebookHelpers.assert_gibbs_sampler_runtime!(project_root)
+IO.puts("Compiled backend selected: #{inspect(backend_setup.compiled_backend)}")
+IO.puts("Active Nx backend after setup: #{inspect(Nx.default_backend())}")
+backend_setup
 ```
 
 ## 2) Mental model: what BSTS is doing
@@ -391,10 +550,10 @@ The solution is a **data generating process (DGP)**: you write code that produce
 
 Our DGP here simulates 6 days of hourly web traffic with:
 
-- A **baseline** that has an intercept (~80 sessions/hour), a slight upward trend, and daily + weekly Fourier seasonality — the kind of cyclical patterns real web traffic shows.
-- **TV spots** that fire in specific time windows during the post-period. Each spot's raw impulse is transformed through adstock (carry-over) and Hill saturation (diminishing returns) before being scaled by a coefficient.
-- **Control series** — correlated but unaffected time series (think: organic search, a sister brand's traffic) that help the model separate the baseline from noise.
-- **Gaussian noise** with known standard deviation.
+* A **baseline** that has an intercept (~80 sessions/hour), a slight upward trend, and daily + weekly Fourier seasonality — the kind of cyclical patterns real web traffic shows.
+* **TV spots** that fire in specific time windows during the post-period. Each spot's raw impulse is transformed through adstock (carry-over) and Hill saturation (diminishing returns) before being scaled by a coefficient.
+* **Control series** — correlated but unaffected time series (think: organic search, a sister brand's traffic) that help the model separate the baseline from noise.
+* **Gaussian noise** with known standard deviation.
 
 We split the 144 hours into a **pre-period** (hours 1-96, 4 days) where no TV aired, and a **post-period** (hours 97-144, 2 days) where the campaign ran. The model will only see the pre-period during training.
 
@@ -569,16 +728,16 @@ The output at each step is a Gaussian posterior: a mean (best estimate) and a co
 
 The filter requires a model with two equations:
 
-- **State equation**: `x(t) = F * x(t-1) + process_noise` — how the hidden state evolves. `F` is the transition matrix, and process noise has variance `Q`.
-- **Observation equation**: `y(t) = H * x(t) + obs_noise` — how the hidden state maps to what you measure. `H` is the observation matrix, and observation noise has variance `R`.
+* **State equation**: `x(t) = F * x(t-1) + process_noise` — how the hidden state evolves. `F` is the transition matrix, and process noise has variance `Q`.
+* **Observation equation**: `y(t) = H * x(t) + obs_noise` — how the hidden state maps to what you measure. `H` is the observation matrix, and observation noise has variance `R`.
 
 For a simple "local level" model (used here), `F = 1`, `H = 1` — the state is just a slowly-drifting level. The filter parameters `Q = 0.8` and `R = 4.0` say: "the level can drift a bit each step (Q), and observations are noisy around it (R)."
 
 ### What to look for in the chart
 
-- The **one-step prediction** is the filter's guess *before* seeing each data point — it lags behind sudden changes.
-- The **filtered mean** is the estimate *after* incorporating each observation — it snaps closer to the data.
-- The **defn filtered mean** is the same algorithm compiled via `Nx.Defn` (JIT-compiled for speed) — it should match the eager version exactly.
+* The **one-step prediction** is the filter's guess *before* seeing each data point — it lags behind sudden changes.
+* The **filtered mean** is the estimate *after* incorporating each observation — it snaps closer to the data.
+* The **defn filtered mean** is the same algorithm compiled via `Nx.Defn` (JIT-compiled for speed) — it should match the eager version exactly.
 
 The gap between prediction and filtered mean shows the Kalman gain in action. The metrics below quantify how much the posterior correction improves accuracy.
 
@@ -639,8 +798,9 @@ The Kalman filter processes data **left to right** — at time `t`, it only know
 
 **RTS (Rauch-Tung-Striebel) smoothing** fixes this with a backward pass. After the forward filter finishes, the smoother walks *backward* through time, using the filtered and predicted estimates to compute a refined posterior at each step that conditions on *the entire sequence*. The result:
 
-- **Filtered estimate at time t**: p(state_t | observations_1..t) — uses past + present
-- **Smoothed estimate at time t**: p(state_t | observations_1..T) — uses past + present + future
+* **Filtered estimate at time t**: p(state_t | observations_1..t) — uses past + present
+
+* **Smoothed estimate at time t**: p(state_t | observations_1..T) — uses past + present + future
 
 Smoothed estimates always have equal or lower uncertainty than filtered estimates. The improvement is greatest in the middle of the series and vanishes at the last time step (where filter and smoother are identical).
 
@@ -652,9 +812,9 @@ These draws are the building blocks of the Gibbs sampler in the next section. Th
 
 ### What to look for in the chart
 
-- The **smoothed mean** should hug the true baseline more tightly than the filtered mean, especially in the middle of the series.
-- The **posterior state draw** is one random sample — it's noisier than the mean but represents a single "what if this was the real trajectory" scenario.
-- The RMSE comparison below quantifies the **hindsight gain**: how much accuracy improves when you use the full series.
+* The **smoothed mean** should hug the true baseline more tightly than the filtered mean, especially in the middle of the series.
+* The **posterior state draw** is one random sample — it's noisier than the mean but represents a single "what if this was the real trajectory" scenario.
+* The RMSE comparison below quantifies the **hindsight gain**: how much accuracy improves when you use the full series.
 
 ```elixir
 smoothed = Smoother.rts(filtered, predicted, 1.0)
@@ -755,9 +915,9 @@ NotebookHelpers.line_plot(rows,
 
 A single MCMC chain can get stuck in a local mode and give you false confidence. Running **multiple chains** from different random starting points lets you check convergence:
 
-- **R-hat (Gelman-Rubin statistic)**: Compares the variance *within* each chain to the variance *between* chains. If all chains are exploring the same distribution, these should be similar and R-hat approaches 1.0. Values above 1.05 suggest the chains haven't converged.
-- **Effective Sample Size (ESS)**: MCMC samples are autocorrelated (each sample is similar to its neighbor), so 100 MCMC draws don't carry as much information as 100 independent draws. ESS estimates the number of *independent* samples you effectively have. Low ESS means you need to run longer chains.
-- **Split R-hat**: Splits each chain in half and treats the halves as separate chains. This catches within-chain non-stationarity (e.g., a chain that drifts slowly).
+* **R-hat (Gelman-Rubin statistic)**: Compares the variance *within* each chain to the variance *between* chains. If all chains are exploring the same distribution, these should be similar and R-hat approaches 1.0. Values above 1.05 suggest the chains haven't converged.
+* **Effective Sample Size (ESS)**: MCMC samples are autocorrelated (each sample is similar to its neighbor), so 100 MCMC draws don't carry as much information as 100 independent draws. ESS estimates the number of *independent* samples you effectively have. Low ESS means you need to run longer chains.
+* **Split R-hat**: Splits each chain in half and treats the halves as separate chains. This catches within-chain non-stationarity (e.g., a chain that drifts slowly).
 
 The rule of thumb: R-hat < 1.05 and ESS > 100 per parameter suggests adequate convergence.
 
@@ -813,9 +973,9 @@ The scalar model from Section 7 treats the baseline as a single drifting level. 
 
 A **structured state-space model** decomposes the baseline into interpretable components. Each component has its own state variables and dynamics:
 
-- **Local linear trend**: Two state variables — *level* (where the metric is) and *slope* (how fast it's growing). The level can drift randomly each step, and the slope can change too, capturing trend acceleration or deceleration.
-- **Seasonality**: A set of state variables that capture repeating cycles. An 8-season component rotates through 8 phases, allowing the model to learn daily patterns in hourly data.
-- **Regression**: External control series enter as time-varying regressors with learned coefficients. If organic search traffic correlates with your metric in the pre-period, the model uses that relationship to build a better counterfactual.
+* **Local linear trend**: Two state variables — *level* (where the metric is) and *slope* (how fast it's growing). The level can drift randomly each step, and the slope can change too, capturing trend acceleration or deceleration.
+* **Seasonality**: A set of state variables that capture repeating cycles. An 8-season component rotates through 8 phases, allowing the model to learn daily patterns in hourly data.
+* **Regression**: External control series enter as time-varying regressors with learned coefficients. If organic search traffic correlates with your metric in the pre-period, the model uses that relationship to build a better counterfactual.
 
 ### Composition via block-diagonal matrices
 
@@ -827,7 +987,7 @@ This composability is the engineering power of BSTS: you snap together component
 
 The structured sampler extends the scalar Gibbs sampler to handle the multi-dimensional state. Instead of sampling a single Q, it resamples each diagonal entry of Q independently (each component's noise variance). The `q_specs` in the model spec tell the sampler which state dimensions map to which variance parameter and what prior to use.
 
-For interactive Livebook runs on `Nx.BinaryBackend`, we intentionally keep this section lighter (fewer samples). For larger structured models, prefer EXLA for meaningful speedups.
+For interactive Livebook runs on `Nx.BinaryBackend`, we intentionally keep this section lighter (fewer samples). For larger structured models, prefer EMLX (with EXLA fallback) for meaningful speedups.
 
 ```elixir
 regressors = controls_hourly |> Nx.tensor() |> Nx.transpose()
@@ -885,8 +1045,8 @@ The simplest version uses the scalar sampler with a local-level model. It has no
 ```elixir
 impact_scalar =
   CausalImpact.estimate(obs_hourly, pre_period, post_period,
-    num_samples: 80,
-    burn_in: 40,
+    num_samples: 20,
+    burn_in: 10,
     seed: 999
   )
 
@@ -928,7 +1088,7 @@ Now we use the full structured model from Section 8 — trend, seasonality, and 
 We compare the scalar and structured estimates against the known true lift from our synthetic DGP. In general, the structured model should recover the truth more accurately because it correctly accounts for patterns that the scalar model conflates with the effect.
 
 ```elixir
-NotebookHelpers.try_exla!(min_headroom: 10_000)
+NotebookHelpers.try_compiled_backend!(min_headroom: 10_000)
 
 impact_structured =
   CausalImpact.estimate_structured(
@@ -936,8 +1096,8 @@ impact_structured =
     pre_period,
     post_period,
     structured_spec,
-    num_samples: 30,
-    burn_in: 15,
+    num_samples: 10,
+    burn_in: 5,
     seed: 202
   )
 
@@ -1007,13 +1167,27 @@ _Story beat:_ Leadership wants a one-command summary, not a statistical deep div
 
 This is the API you'd expose to non-statistician stakeholders. The `significant?` flag answers the executive question directly: "Did this intervention have a statistically credible effect, or could the observed change be explained by normal variation?"
 
+For interactivity, this section uses the fast `:filter` path by default so it returns quickly on any backend. For deeper posterior analysis, switch `method: :mcmc` and increase `num_samples`/`burn_in`.
+
 ```elixir
-analysis =
-  InterventionAnalysis.analyze(obs_hourly, %{pre_period: pre_period, post_period: post_period},
+analysis_opts =
+  [
     seasonality: 24,
-    num_samples: 50,
-    burn_in: 25,
+    method: :filter,
+    f: 1.0,
+    h: 1.0,
+    q: 0.8,
+    r: 4.0,
+    x0: List.first(obs_hourly),
+    p0: 10.0,
     seed: 42
+  ]
+
+analysis =
+  InterventionAnalysis.analyze(
+    obs_hourly,
+    %{pre_period: pre_period, post_period: post_period},
+    analysis_opts
   )
 
 %{
@@ -1229,8 +1403,8 @@ The BSTS approach to forecasting has a key advantage over point-forecast methods
 
 Two metrics to evaluate forecasts:
 
-- **MAE (Mean Absolute Error)**: How far off is the point forecast on average? Lower is better.
-- **Interval coverage**: What fraction of actual values fell inside the 95% prediction interval? If the intervals are well-calibrated, this should be close to 95%.
+* **MAE (Mean Absolute Error)**: How far off is the point forecast on average? Lower is better.
+* **Interval coverage**: What fraction of actual values fell inside the 95% prediction interval? If the intervals are well-calibrated, this should be close to 95%.
 
 ### 14.1 Generic `Forecaster`
 
@@ -1287,9 +1461,9 @@ forecast_coverage =
 
 When you have external signals that predict your metric (e.g., weather predicts ice cream demand, promotional calendars predict retail traffic), including them as regressors can dramatically improve forecast accuracy. `DemandForecaster` extends the base forecaster with:
 
-- **Training regressors**: Control series observed during the training period, used to learn the regression relationship.
-- **Future regressors**: The same control series projected into the forecast horizon. You must provide these — the model can't forecast without knowing the future values of its inputs.
-- **Safety stock calculation**: A supply-chain feature that computes buffer inventory given a target service level (probability of not stocking out) and lead time. It uses the upper quantile of the forecast distribution, not just the mean, so the buffer accounts for forecast uncertainty.
+* **Training regressors**: Control series observed during the training period, used to learn the regression relationship.
+* **Future regressors**: The same control series projected into the forecast horizon. You must provide these — the model can't forecast without knowing the future values of its inputs.
+* **Safety stock calculation**: A supply-chain feature that computes buffer inventory given a target service level (probability of not stocking out) and lead time. It uses the upper quantile of the forecast distribution, not just the mean, so the buffer accounts for forecast uncertainty.
 
 ```elixir
 full_regressors = controls_hourly |> Nx.tensor() |> Nx.transpose()
@@ -1478,8 +1652,8 @@ _Story beat:_ The same causal machinery now evaluates campaigns and product inte
 
 The underlying statistical method — BSTS + counterfactual — is domain-agnostic. What changes across use cases is the *interface*: what inputs a user provides and how results are labeled.
 
-- **`MarketingLift`**: Takes a campaign descriptor (channel, start/end indices, baseline period) and reports lift in marketing terms (cumulative lift, significance). Designed for digital marketing teams measuring incrementality of email, paid social, or display campaigns.
-- **`PolicyEvaluator`**: Takes an intervention descriptor (policy name, intervention date, outcome metric) and reports results in interrupted time series (ITS) terms. This is the same framework used in public health to evaluate policy changes — the statistical logic is identical to causal impact, but the API speaks the language of policy evaluation.
+* **`MarketingLift`**: Takes a campaign descriptor (channel, start/end indices, baseline period) and reports lift in marketing terms (cumulative lift, significance). Designed for digital marketing teams measuring incrementality of email, paid social, or display campaigns.
+* **`PolicyEvaluator`**: Takes an intervention descriptor (policy name, intervention date, outcome metric) and reports results in interrupted time series (ITS) terms. This is the same framework used in public health to evaluate policy changes — the statistical logic is identical to causal impact, but the API speaks the language of policy evaluation.
 
 Both wrappers accept the same tuning options (seasonality, num_samples, burn_in, seed) and internally delegate to `CausalImpact`.
 
@@ -1610,8 +1784,8 @@ assessment =
 
 The ultimate sanity check: generate a completely new synthetic dataset with a known lift (40.0 units injected into the post-period), run the full causal impact estimator on it, and check:
 
-- Does the 95% credible interval **cover** the true lift? (If not, the intervals are miscalibrated.)
-- How close is the **posterior mean** to the true value? (The `relative_error` measures this as a fraction of the true lift.)
+* Does the 95% credible interval **cover** the true lift? (If not, the intervals are miscalibrated.)
+* How close is the **posterior mean** to the true value? (The `relative_error` measures this as a fraction of the true lift.)
 
 This is distinct from the DGP in Section 3 — it uses a simple local-level model with fresh random data, testing the method's ability to recover a *different* ground truth in a *different* setting.
 
@@ -1697,19 +1871,19 @@ _Story beat:_ Debrief complete. You now have a full campaign-measurement playboo
 
 If you completed this notebook, you have built up the following statistical concepts layer by layer:
 
-| Section | Statistical concept | What you learned |
-|---------|-------------------|------------------|
-| 3 | Data generating process | Why synthetic data with known truth is essential for validating statistical methods |
-| 4 | Adstock + Hill saturation | How marketing effects carry over in time and saturate with intensity |
-| 5 | Kalman filtering | Online Bayesian state estimation — the predict/update cycle that tracks latent state |
-| 6 | RTS smoothing | How conditioning on the full series (hindsight) improves latent state estimates |
-| 7 | Gibbs sampling / MCMC | How to sample from a joint posterior when no closed-form solution exists |
-| 8 | Structured state-space models | Composing trend, seasonality, and regression into an interpretable baseline model |
-| 9 | Causal impact | The counterfactual approach to causal inference — actual minus "what would have happened" |
-| 11 | Covariate selection | Screening controls to avoid overfitting while improving counterfactual accuracy |
-| 12 | Shapley values | Fair credit assignment across overlapping interventions using cooperative game theory |
-| 14 | Bayesian forecasting | Posterior predictive distributions with calibrated uncertainty intervals |
-| 15 | Anomaly detection | Using filter prediction errors as z-scores for statistical process control |
-| 18 | Validation | Placebo tests, coverage checks, residual diagnostics, and calibration to build trust |
+| Section | Statistical concept           | What you learned                                                                            |
+| ------- | ----------------------------- | ------------------------------------------------------------------------------------------- |
+| 3       | Data generating process       | Why synthetic data with known truth is essential for validating statistical methods         |
+| 4       | Adstock + Hill saturation     | How marketing effects carry over in time and saturate with intensity                        |
+| 5       | Kalman filtering              | Online Bayesian state estimation — the predict/update cycle that tracks latent state      |
+| 6       | RTS smoothing                 | How conditioning on the full series (hindsight) improves latent state estimates             |
+| 7       | Gibbs sampling / MCMC         | How to sample from a joint posterior when no closed-form solution exists                    |
+| 8       | Structured state-space models | Composing trend, seasonality, and regression into an interpretable baseline model           |
+| 9       | Causal impact                 | The counterfactual approach to causal inference — actual minus "what would have happened" |
+| 11      | Covariate selection           | Screening controls to avoid overfitting while improving counterfactual accuracy             |
+| 12      | Shapley values                | Fair credit assignment across overlapping interventions using cooperative game theory       |
+| 14      | Bayesian forecasting          | Posterior predictive distributions with calibrated uncertainty intervals                    |
+| 15      | Anomaly detection             | Using filter prediction errors as z-scores for statistical process control                  |
+| 18      | Validation                    | Placebo tests, coverage checks, residual diagnostics, and calibration to build trust        |
 
 That is the core and advanced statistical surface area of this library. Each section builds on the previous ones — the Kalman filter feeds the smoother, the smoother feeds the Gibbs sampler, the sampler feeds causal impact, and the validation checks close the loop by stress-testing the whole chain.

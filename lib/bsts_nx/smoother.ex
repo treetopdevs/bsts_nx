@@ -54,9 +54,11 @@ defmodule BstsNx.Smoother do
   """
   @spec rts_defn_matrix(Nx.t(), Nx.t(), number | Nx.t(), number | Nx.t()) :: {Nx.t(), Nx.t()}
   def rts_defn_matrix(xs, ps, f, q) do
-    f_t = to_tensor(f)
-    q_t = to_tensor(q)
-    rts_defn_matrix_impl(xs, ps, f_t, q_t)
+    xs_t = Nx.as_type(xs, {:f, 64})
+    ps_t = Nx.as_type(ps, {:f, 64})
+    f_t = Nx.as_type(f, {:f, 64})
+    q_t = Nx.as_type(q, {:f, 64})
+    rts_defn_matrix_impl(xs_t, ps_t, f_t, q_t)
   end
 
   Nx.Defn.defn rts_defn_impl(xs, ps, f, q) do
@@ -106,10 +108,10 @@ defmodule BstsNx.Smoother do
     t = Nx.axis_size(xs, 0)
     n = Nx.axis_size(xs, 1)
 
-    sxs = Nx.broadcast(0.0, {t, n})
-    sps = Nx.broadcast(0.0, {t, n, n})
-    i_n = Nx.eye(n)
-    eps = Nx.tensor(1.0e-6)
+    sxs = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(xs)), {t, n})
+    sps = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(ps)), {t, n, n})
+    i_n = Nx.eye(n, type: Nx.type(ps))
+    eps = Nx.tensor(1.0e-6, type: Nx.type(ps))
 
     last_idx = t - 1
     sxs = Nx.put_slice(sxs, [last_idx, 0], Nx.new_axis(take_vector_at(xs, last_idx), 0))
@@ -280,6 +282,25 @@ defmodule BstsNx.Smoother do
   end
 
   @doc """
+  Compiled Carter-Kohn sampler directly from filtered outputs for multi-dimensional states.
+
+  Accepts filtered means/covariances with shapes `{t, n}` and `{t, n, n}` and
+  returns `{sampled_states, key}` where `sampled_states` has shape `{t, n}`.
+  """
+  @spec simulate_from_filtered_defn_matrix(
+          Nx.t(),
+          Nx.t(),
+          number | Nx.t(),
+          number | Nx.t(),
+          Nx.t()
+        ) :: {Nx.t(), Nx.t()}
+  def simulate_from_filtered_defn_matrix(filtered_xs, filtered_ps, f, q, key) do
+    f_t = to_tensor(f)
+    q_t = to_tensor(q)
+    simulate_from_filtered_defn_matrix_impl(filtered_xs, filtered_ps, f_t, q_t, key)
+  end
+
+  @doc """
   Runs scalar RTS smoothing and then scalar simulation smoothing from the same
   filtered trajectories.
 
@@ -366,6 +387,72 @@ defmodule BstsNx.Smoother do
         states_new = Nx.put_slice(states_acc, [i], Nx.reshape(x_i, {1}))
 
         {k + 1, states_new, eps_in, fxs, fps, f_in, q_in}
+      end
+
+    {states_out, key_out}
+  end
+
+  Nx.Defn.defn simulate_from_filtered_defn_matrix_impl(filtered_xs, filtered_ps, f, q, key) do
+    t = Nx.axis_size(filtered_xs, 0)
+    n = Nx.axis_size(filtered_xs, 1)
+
+    # Draw standard normal perturbations for all time steps
+    {eps_tensor, key_out} = Nx.Random.normal(key, 0.0, 1.0, shape: {t, n})
+
+    states = Nx.broadcast(0.0, {t, n})
+    i_n = Nx.eye(n, type: Nx.type(filtered_ps))
+    eps_reg = Nx.tensor(1.0e-6, type: Nx.type(filtered_ps))
+
+    last_idx = t - 1
+
+    x_T_mean = take_vector_at(filtered_xs, last_idx)
+    p_T_cov = take_matrix_at(filtered_ps, last_idx) |> symmetrize()
+
+    # safe Cholesky proxy: P = P + epsilon * I
+    p_T_reg = Nx.add(p_T_cov, Nx.multiply(i_n, eps_reg))
+    chol_T = Nx.LinAlg.cholesky(p_T_reg)
+
+    eps_T = take_vector_at(eps_tensor, last_idx)
+    x_T = Nx.add(x_T_mean, Nx.dot(chol_T, eps_T))
+
+    states = Nx.put_slice(states, [last_idx, 0], Nx.new_axis(x_T, 0))
+
+    num_steps = t - 1
+
+    {_, states_out, _, _, _, _, _, _, _} =
+      while {k = Nx.tensor(0), states_acc = states, eps_in = eps_tensor, fxs = filtered_xs,
+             fps = filtered_ps, f_in = f, q_in = q, i_eye = i_n, c_eps = eps_reg},
+            k < num_steps do
+        i = last_idx - 1 - k
+
+        x_filt = take_vector_at(fxs, i)
+        p_filt = take_matrix_at(fps, i)
+
+        x_pred_next = Nx.dot(f_in, x_filt)
+        p_pred_next = Nx.add(Nx.dot(Nx.dot(f_in, p_filt), Nx.transpose(f_in)), q_in)
+
+        # compute J gain. P_{k+1|k} * J^T = F * P_k => J^T = pinv(P_pred) * F * P_k
+        p_pred_next_reg = Nx.add(p_pred_next, Nx.multiply(i_eye, c_eps))
+        rhs = Nx.dot(f_in, p_filt)
+        j = Nx.dot(Nx.LinAlg.pinv(p_pred_next_reg), rhs) |> Nx.transpose()
+
+        x_next = take_vector_at(states_acc, i + 1)
+        mean = Nx.add(x_filt, Nx.dot(j, Nx.subtract(x_next, x_pred_next)))
+
+        # cov = P_filt - J * P_pred * J^T
+        # computed symmetrically for stability
+        j_p_jt = Nx.dot(Nx.dot(j, p_pred_next), Nx.transpose(j))
+        cov = Nx.subtract(p_filt, j_p_jt) |> symmetrize()
+
+        cov_reg = Nx.add(cov, Nx.multiply(i_eye, c_eps))
+        chol_i = Nx.LinAlg.cholesky(cov_reg)
+
+        eps_i = take_vector_at(eps_in, i)
+        x_i = Nx.add(mean, Nx.dot(chol_i, eps_i))
+
+        states_new = Nx.put_slice(states_acc, [i, 0], Nx.new_axis(x_i, 0))
+
+        {k + 1, states_new, eps_in, fxs, fps, f_in, q_in, i_eye, c_eps}
       end
 
     {states_out, key_out}
@@ -666,7 +753,7 @@ defmodule BstsNx.Smoother do
     end
   end
 
-  defp symmetrize(matrix), do: Nx.multiply(Nx.add(matrix, Nx.transpose(matrix)), 0.5)
+  Nx.Defn.defnp(symmetrize(matrix), do: Nx.multiply(Nx.add(matrix, Nx.transpose(matrix)), 0.5))
 
   defp safe_cholesky_or_zero(cov, _context) do
     cov_sym = symmetrize(cov)

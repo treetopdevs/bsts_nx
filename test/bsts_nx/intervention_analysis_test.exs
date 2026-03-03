@@ -298,15 +298,17 @@ defmodule BstsNx.InterventionAnalysisTest do
       end
     end
 
-    test "rejects control_series with filter method" do
-      assert_raise ArgumentError, ~r/control_series is not supported with method: :filter/, fn ->
+    test "accepts control_series with filter method (fast structured path)" do
+      result =
         InterventionAnalysis.analyze(
           [1.0, 2.0, 3.0, 4.0, 5.0],
           %{pre_period: {1, 3}, post_period: {4, 5}},
           control_series: [[10.0, 20.0, 30.0, 40.0, 50.0]],
           method: :filter
         )
-      end
+
+      assert result.model_spec != nil
+      assert is_map(result.summary)
     end
   end
 end

@@ -571,49 +571,67 @@ defmodule BstsNx.GibbsSampler do
          total_iters,
          t
        ) do
+    # Convert inputs bounds into Nx.Tensors once
+    obs_tensor = observations_to_filter_tensor(observations)
+
+    # H list needs to be converted into a tensor {t, n} for filter_defn_multi
+    h_tensor = Nx.stack(h_list)
+
     {_, _, samples_acc, _key_acc} =
       Enum.reduce(1..total_iters, {q_matrix, r_var, [], key}, fn iter, {q_prev, r_prev, acc, k} ->
-        # 1. Kalman filter
-        {filtered, predicted} =
-          KalmanFilter.filter_with_pred(
-            observations,
+        # 1. Kalman filter (multi-dimensional) via compiled Defn
+        {filtered_xs, filtered_ps} =
+          KalmanFilter.filter_defn_multi(
+            obs_tensor,
             spec.f,
-            spec.h,
+            h_tensor,
             q_prev,
             r_prev,
             spec.x0,
             spec.p0
           )
 
-        # 2. RTS smoother
-        smoothed = BstsNx.Smoother.rts(filtered, predicted, spec.f)
+        # 2. Carter-Kohn simulation smoother via compiled Defn
+        {sampled_states_tensor, new_key} =
+          BstsNx.Smoother.simulate_from_filtered_defn_matrix(
+            filtered_xs,
+            filtered_ps,
+            spec.f,
+            q_prev,
+            k
+          )
 
-        # 3. Carter-Kohn simulation smoother
-        {sampled_states, new_key} =
-          BstsNx.Smoother.simulate_with_key(smoothed, filtered, predicted, spec.f, key: k)
+        # Convert the {t, n} states tensor back into a list of 1-D tensors for residual calculations
+        sampled_states =
+          sampled_states_tensor
+          |> Nx.to_batched(1)
+          |> Enum.map(&Nx.squeeze(&1, axes: [0]))
 
-        # 4. Process residuals: e_t = x_t - F * x_{t-1}
+        # 3. Process residuals: e_t = x_t - F * x_{t-1}
         per_dim_ss = process_residuals_structured(sampled_states, spec.f, spec.q_specs)
 
-        # 5. Observation residuals: SS_obs = Σ (y_t - H_t · x_t)²
+        # 4. Observation residuals: SS_obs = Σ (y_t - H_t · x_t)²
         {obs_ss, t_obs} = obs_residuals_structured(observations, sampled_states, h_list)
 
-        # 6. Resample each Q diagonal entry independently
+        # 5. Resample each Q diagonal entry independently
         {q_new, key_after_q} = resample_q_components(spec.q_specs, per_dim_ss, t, new_key)
 
-        # 7. Rebuild Q matrix
+        # 6. Rebuild Q matrix
         q_matrix_new = rebuild_q(q_prev, q_new)
 
         # 8. Resample observation variance
-        shape_r = spec.obs_prior_shape + t_obs / 2
-        scale_r = spec.obs_prior_scale + obs_ss / 2
+        shape_r = safe_to_number(spec.obs_prior_shape) + safe_to_number(t_obs) / 2
+        scale_r = safe_to_number(spec.obs_prior_scale) + safe_to_number(obs_ss) / 2
 
         {r_sample, next_key} =
           BstsNx.Distributions.inv_gamma_sample_with_key(shape_r, scale_r, key_after_q)
 
         acc2 =
           if iter > burn_in and rem(iter - burn_in, thin) == 0 do
-            {_means, covs} = Enum.unzip(filtered)
+            covs =
+              filtered_ps
+              |> Nx.to_batched(1)
+              |> Enum.map(&Nx.squeeze(&1, axes: [0]))
 
             sample_map = %{
               states: sampled_states,
@@ -669,29 +687,38 @@ defmodule BstsNx.GibbsSampler do
               {List.duplicate(Nx.tensor([]), t), List.duplicate(Nx.tensor([[]]), t),
                q_struct_prev, key_prev}
             else
-              {filtered, predicted} =
-                KalmanFilter.filter_with_pred(
-                  y_adjusted,
+              y_adjusted_tensor = observations_to_filter_tensor(y_adjusted)
+              h_struct_tensor = Nx.stack(ctx.h_struct_list)
+
+              {filtered_xs, filtered_ps} =
+                KalmanFilter.filter_defn_multi(
+                  y_adjusted_tensor,
                   ctx.f_struct,
-                  ctx.h_struct_list,
+                  h_struct_tensor,
                   q_struct_prev,
                   r_prev,
                   ctx.x0_struct,
                   ctx.p0_struct
                 )
 
-              smoothed = BstsNx.Smoother.rts(filtered, predicted, ctx.f_struct)
-
-              {sampled_states, key_after_smooth} =
-                BstsNx.Smoother.simulate_with_key(
-                  smoothed,
-                  filtered,
-                  predicted,
+              {sampled_states_tensor, key_after_smooth} =
+                BstsNx.Smoother.simulate_from_filtered_defn_matrix(
+                  filtered_xs,
+                  filtered_ps,
                   ctx.f_struct,
-                  key: key_prev
+                  q_struct_prev,
+                  key_prev
                 )
 
-              {_means, covs} = Enum.unzip(filtered)
+              sampled_states =
+                sampled_states_tensor
+                |> Nx.to_batched(1)
+                |> Enum.map(&Nx.squeeze(&1, axes: [0]))
+
+              covs =
+                filtered_ps
+                |> Nx.to_batched(1)
+                |> Enum.map(&Nx.squeeze(&1, axes: [0]))
 
               per_dim_ss =
                 process_residuals_structured(sampled_states, ctx.f_struct, ctx.q_specs_struct)
@@ -742,8 +769,8 @@ defmodule BstsNx.GibbsSampler do
               beta_new
             )
 
-          shape_r = spec.obs_prior_shape + t_obs / 2
-          scale_r = spec.obs_prior_scale + obs_ss / 2
+          shape_r = safe_to_number(spec.obs_prior_shape) + safe_to_number(t_obs) / 2
+          scale_r = safe_to_number(spec.obs_prior_scale) + safe_to_number(obs_ss) / 2
 
           {r_sample, key_next} =
             BstsNx.Distributions.inv_gamma_sample_with_key(shape_r, scale_r, key_after_beta)
@@ -1281,7 +1308,9 @@ defmodule BstsNx.GibbsSampler do
         |> Nx.sum(axes: [0])
         |> Nx.to_flat_list()
 
-      Map.new(q_specs, fn qs -> {qs.dim_index, Enum.at(ss_vec, qs.dim_index, 0.0)} end)
+      Map.new(q_specs, fn qs ->
+        {qs.dim_index, Enum.at(ss_vec, qs.dim_index, 0.0) |> Nx.to_number()}
+      end)
     end
   end
 
@@ -1319,12 +1348,28 @@ defmodule BstsNx.GibbsSampler do
     num_diffs = max(t - 1, 0)
 
     Enum.map_reduce(q_specs, key, fn qs, key_acc ->
-      ss = Map.get(per_dim_ss, qs.dim_index, 0.0)
-      shape = qs.prior_shape + num_diffs / 2
-      scale = qs.prior_scale + ss / 2
+      ss = Map.get(per_dim_ss, qs.dim_index, 0.0) |> safe_to_number()
+      shape = safe_to_number(qs.prior_shape) + num_diffs / 2
+      scale = safe_to_number(qs.prior_scale) + ss / 2
       {sample, key_next} = BstsNx.Distributions.inv_gamma_sample_with_key(shape, scale, key_acc)
-      {{qs.dim_index, Nx.to_number(sample)}, key_next}
+      {{qs.dim_index, safe_to_number(sample)}, key_next}
     end)
+  end
+
+  defp safe_to_number(%Nx.Tensor{} = t), do: Nx.to_number(t) |> safe_to_number()
+  defp safe_to_number(val) when is_number(val), do: val
+  defp safe_to_number(:nan), do: 0.0
+  defp safe_to_number(:inf), do: 1.0e10
+  defp safe_to_number(:neg_inf), do: -1.0e10
+
+  # Defensive fallback for backend-specific sentinels so structured sampling
+  # remains robust instead of crashing on non-numeric values.
+  defp safe_to_number(other) do
+    Logger.warning(
+      "GibbsSampler.safe_to_number/1 received unsupported value #{inspect(other)}; coercing to 0.0"
+    )
+
+    0.0
   end
 
   # Updates the diagonal entries of Q matrix after resampling.

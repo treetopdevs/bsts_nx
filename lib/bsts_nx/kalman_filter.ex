@@ -583,6 +583,9 @@ defmodule BstsNx.KalmanFilter do
       Nx.rank(h) == 2 and Nx.shape(h) == {t, n} ->
         h
 
+      Nx.rank(h) == 3 and Nx.shape(h) == {t, 1, n} ->
+        Nx.squeeze(h, axes: [1])
+
       Nx.rank(h) == 2 and Nx.shape(h) == {n, 1} and n == 1 ->
         Nx.broadcast(Nx.reshape(h, {1}), {t, 1})
 

@@ -162,11 +162,8 @@ defmodule BstsNx.InterventionAnalysis do
     # If control_series is provided, delegate to ModelBuilder for regression composition
     controls = Keyword.get(opts, :control_series)
 
-    if controls != nil and controls != [] and method == :filter do
-      raise ArgumentError,
-            ":control_series is not supported with method: :filter " <>
-              "(filter ignores model_spec; use method: :mcmc for regression)"
-    end
+    # Note: control_series is now supported with method: :filter by routing
+    # to estimate_structured_from_filter.
 
     effective_opts =
       case controls do
@@ -306,18 +303,45 @@ defmodule BstsNx.InterventionAnalysis do
     }
   end
 
-  defp analyze_filter(observations, {_pre_start, _pre_end}, {post_start, post_end}, alpha, opts) do
+  defp analyze_filter(
+         observations,
+         {_pre_start, _pre_end} = pre_period,
+         {post_start, post_end},
+         alpha,
+         opts
+       ) do
     # Convert 1-based inclusive periods to 0-based intervention indices
     intervention_indices = Enum.to_list((post_start - 1)..(post_end - 1))
 
+    # Resolve model spec to check if we need the structured fast path
+    model_spec = resolve_model_spec(observations, pre_period, opts)
+
     filter_opts =
       opts
-      |> Keyword.drop([:model_spec, :seasonality, :method, :num_samples, :burn_in])
+      |> Keyword.drop([
+        :model_spec,
+        :seasonality,
+        :method,
+        :num_samples,
+        :burn_in,
+        :control_series
+      ])
       |> Keyword.put(:alpha, alpha)
       |> Keyword.put_new(:x0, 0.0)
       |> Keyword.put_new(:p0, 1.0)
 
-    summary = CausalImpact.estimate_from_filter(observations, intervention_indices, filter_opts)
+    summary =
+      if model_spec do
+        CausalImpact.estimate_structured_from_filter(
+          observations,
+          intervention_indices,
+          model_spec,
+          filter_opts
+        )
+      else
+        CausalImpact.estimate_from_filter(observations, intervention_indices, filter_opts)
+      end
+
     sig = is_significant_filter?(summary)
 
     %{
@@ -325,7 +349,7 @@ defmodule BstsNx.InterventionAnalysis do
       summary: summary,
       significant?: sig,
       alpha: alpha,
-      model_spec: nil
+      model_spec: model_spec
     }
   end
 

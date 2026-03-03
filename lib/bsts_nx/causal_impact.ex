@@ -655,6 +655,197 @@ defmodule BstsNx.CausalImpact do
     end
   end
 
+  @doc """
+  Non-MCMC causal impact estimation for structured models using the
+  compiled Kalman filter and RTS matrix smoother.
+
+  This provides a fast path for `estimate_structured/5` without Gibbs sampling.
+  It computes the block-diagonal F, Q, and observation variance R from the
+  priors (or initialized values) of the `.model_spec` and executes a single
+  pass of the state-space smoother.
+
+  * `observations` – list or tensor of observations.
+  * `intervention_indices` – list of 0-based index marking the on-air period.
+  * `spec` – A `%BstsNx.ModelSpec{}` defining the state space architecture.
+  * `opts` – keyword list of options.
+
+  Returns the standard impact summary map.
+  """
+  @spec estimate_structured_from_filter(
+          Nx.t() | [number()],
+          [non_neg_integer()],
+          BstsNx.ModelSpec.t(),
+          keyword()
+        ) :: map()
+  def estimate_structured_from_filter(observations, intervention_indices, spec, opts \\ []) do
+    obs_tensor =
+      case observations do
+        %Nx.Tensor{} -> observations
+        list when is_list(list) -> Nx.tensor(list, type: {:f, 32})
+      end
+
+    t = Nx.axis_size(obs_tensor, 0)
+    alpha = Keyword.get(opts, :alpha, 0.05)
+
+    if not is_number(alpha) or alpha <= 0 or alpha >= 1 do
+      raise ArgumentError, "alpha must be in (0, 1), got: #{inspect(alpha)}"
+    end
+
+    z = BstsNx.Utils.z_score(alpha)
+
+    valid_indices =
+      intervention_indices
+      |> Enum.filter(fn idx -> idx >= 0 and idx < t end)
+      |> Enum.uniq()
+      |> Enum.sort()
+
+    if valid_indices == [] do
+      %{
+        point_effects: %{mean: [], lower: [], upper: []},
+        cumulative_effect: %{mean: 0.0, sd: 0.0, lower: 0.0, upper: 0.0},
+        relative_effect: %{mean: 0.0, sd: 0.0, lower: 0.0, upper: 0.0},
+        actual: [],
+        baseline: []
+      }
+    else
+      # Extract fixed structural matrices from priors.
+      # Extract fixed structural matrices from priors.
+      # For fast filter we use the mode/mean of the prior distributions.
+      # ModelSpec stores `prior_scale` and `prior_shape` for each diagonal Q entry.
+      q_diag_map =
+        Enum.map(spec.q_specs, fn q_spec ->
+          {q_spec.dim_index, q_spec.prior_scale / q_spec.prior_shape}
+        end)
+        |> Map.new()
+
+      # Any dimension not given in q_specs has 0.0 variance
+      state_dim = Nx.axis_size(spec.f, 0)
+      q_diag = Enum.map(0..(state_dim - 1), fn dim -> Map.get(q_diag_map, dim, 0.0) end)
+
+      q_matrix = Nx.make_diagonal(Nx.tensor(q_diag, type: {:f, 64}))
+
+      r_val = spec.obs_prior_scale / spec.obs_prior_shape
+      r_tensor = Nx.tensor(r_val, type: {:f, 64})
+
+      x0 = Nx.broadcast(0.0, {state_dim})
+      # Diffuse prior for start
+      p0 = Nx.eye(state_dim) |> Nx.multiply(100.0)
+
+      # Build NaN mask for intervention period
+      mask_flags = :array.new(t, default: 0)
+
+      mask_flags =
+        Enum.reduce(valid_indices, mask_flags, fn idx, arr ->
+          :array.set(idx, 1, arr)
+        end)
+
+      mask_list = Enum.map(0..(t - 1), fn i -> :array.get(i, mask_flags) end)
+      mask = Nx.equal(Nx.tensor(mask_list, type: {:u, 8}), 1)
+      nan_vec = Nx.broadcast(Nx.Constants.nan(), {t})
+      masked_obs = Nx.select(mask, nan_vec, obs_tensor)
+
+      # Use the same list-to-tensor or tensor padding logic for H
+      h_tensor =
+        case spec.h do
+          list when is_list(list) ->
+            list |> Enum.map(&BstsNx.Utils.to_tensor/1) |> Nx.stack()
+
+          %Nx.Tensor{} = static_h ->
+            # Broadcast static H to the time dimension
+            Nx.broadcast(static_h, {t, Nx.axis_size(static_h, 0), Nx.axis_size(static_h, 1)})
+        end
+
+      # Filter
+      {filt_xs, filt_ps} =
+        BstsNx.KalmanFilter.filter_defn_multi(
+          masked_obs,
+          spec.f,
+          h_tensor,
+          q_matrix,
+          r_tensor,
+          x0,
+          p0
+        )
+
+      # Smooth
+      {sxs, sps} = BstsNx.Smoother.rts_defn_matrix(filt_xs, filt_ps, spec.f, q_matrix)
+
+      # Extract intervention period values
+      idx_tensor = Nx.tensor(valid_indices, type: {:s, 64})
+      actual_vals = Nx.take(obs_tensor, idx_tensor) |> Nx.to_flat_list()
+
+      # Project smoothed states through H at each valid interval
+      h_interventions = Nx.take(h_tensor, idx_tensor)
+      sxs_interventions = Nx.take(sxs, idx_tensor)
+      sps_interventions = Nx.take(sps, idx_tensor)
+
+      # Baseline: H_t * x_t (H is row vector per step, so dot(H, x) = scalar)
+      baseline_vals =
+        Nx.sum(Nx.multiply(h_interventions, sxs_interventions), axes: [1]) |> Nx.to_flat_list()
+
+      point_effects_mean =
+        Enum.zip(actual_vals, baseline_vals) |> Enum.map(fn {a, b} -> a - b end)
+
+      # Observation-level variance: H_t * P_t * H_t^T + R
+      # already {n, 1, dim}
+      batch_h = h_interventions
+      batch_p = sps_interventions
+      batch_ht = Nx.transpose(batch_h, axes: [0, 2, 1])
+
+      p_projected_vars =
+        Nx.dot(Nx.dot(batch_h, batch_p), batch_ht)
+        # {n}
+        |> Nx.squeeze()
+        |> Nx.add(r_tensor)
+
+      # Ensure no negative variances due to precision
+      p_projected_vars =
+        Nx.select(Nx.less(p_projected_vars, 0.0), Nx.tensor(0.0), p_projected_vars)
+
+      point_sds = Nx.sqrt(p_projected_vars) |> Nx.to_flat_list()
+
+      point_lower =
+        Enum.zip(point_effects_mean, point_sds) |> Enum.map(fn {m, s} -> m - z * s end)
+
+      point_upper =
+        Enum.zip(point_effects_mean, point_sds) |> Enum.map(fn {m, s} -> m + z * s end)
+
+      cum_mean = Enum.sum(point_effects_mean)
+      diag_var = Nx.sum(p_projected_vars) |> Nx.to_number()
+
+      # For cross-covariance approximation in structured multidimensional filters,
+      # we skip the full backward RTS lag-covariance pass for speed, adopting independence
+      # assumption of the prediction errors. This is standard in highly paramaterized fast causal impact.
+      cum_sd = :math.sqrt(diag_var)
+
+      baseline_sum = Enum.sum(baseline_vals)
+      rel_mean = if abs(baseline_sum) < 1.0e-10, do: 0.0, else: cum_mean / baseline_sum
+      rel_sd = if abs(baseline_sum) < 1.0e-10, do: 0.0, else: cum_sd / abs(baseline_sum)
+
+      %{
+        point_effects: %{
+          mean: point_effects_mean,
+          lower: point_lower,
+          upper: point_upper
+        },
+        cumulative_effect: %{
+          mean: cum_mean,
+          sd: cum_sd,
+          lower: cum_mean - z * cum_sd,
+          upper: cum_mean + z * cum_sd
+        },
+        relative_effect: %{
+          mean: rel_mean,
+          sd: rel_sd,
+          lower: rel_mean - z * rel_sd,
+          upper: rel_mean + z * rel_sd
+        },
+        actual: actual_vals,
+        baseline: baseline_vals
+      }
+    end
+  end
+
   defp r_to_number(r) when is_number(r), do: r * 1.0
   defp r_to_number(%Nx.Tensor{} = r), do: Nx.to_number(r)
 
@@ -699,84 +890,111 @@ defmodule BstsNx.CausalImpact do
     sd_process = :math.sqrt(max(process_var, 0.0))
     sd_obs = :math.sqrt(max(obs_var, 0.0))
 
-    # Split into 3 independent sub-keys: one for process noise, one for
-    # observation noise, and one unused.  Using 3 parts ensures process
-    # and observation streams share no common ancestor from a single split,
-    # consistent with the per-step splitting in generate_structured_counterfactual.
+    # Split into 2 independent sub-keys: one for process noise, one for
+    # observation noise. Sharing no common ancestor from a single split
+    # ensures mathematical safety against PRNG collision.
     keys = Nx.Random.split(key, parts: 2)
     key_process = split_key_at(keys, 0)
     key_obs = split_key_at(keys, 1)
-    {process_noise, _} = Nx.Random.normal(key_process, 0.0, 1.0, shape: {n_steps})
-    {obs_noise, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {n_steps})
 
-    process_noise_list = Nx.to_flat_list(process_noise)
-    obs_noise_list = Nx.to_flat_list(obs_noise)
+    {z_process, _} = Nx.Random.normal(key_process, 0.0, 1.0, shape: {n_steps})
+    {z_obs, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {n_steps})
 
-    {_, values} =
-      Enum.zip(process_noise_list, obs_noise_list)
-      |> Enum.reduce({initial_state, []}, fn {pn, on}, {prev, acc} ->
-        next_state = prev + pn * sd_process
-        cf_obs = next_state + on * sd_obs
-        {next_state, [cf_obs | acc]}
-      end)
+    # Vectorized state simulation: x_t = x_0 + sum_{i=1}^t w_i
+    process_noise = Nx.multiply(z_process, sd_process)
+    states = Nx.add(initial_state, Nx.cumulative_sum(process_noise))
 
-    Enum.reverse(values)
+    # Vectorized observation simulation: y_t = x_t + v_t
+    obs_noise = Nx.multiply(z_obs, sd_obs)
+    cf_obs = Nx.add(states, obs_noise)
+
+    Nx.to_flat_list(cf_obs)
   end
 
-  # Forward-simulates a multi-dimensional state-space model for counterfactual
-  # generation: x_{t+1} = F * x_t + w_t,  y_t = H_t * x_t + v_t.
-  #
-  # Uses diagonal sampling for process noise (Q is always diagonal in the
-  # structured sampler) to correctly handle zero-variance dimensions like
-  # the lagged seasonal states.
-  #
-  # `post_h` is a list of {1,n} tensors, one per post-period time step.
-  defp generate_structured_counterfactual(final_state, f, post_h, q_matrix, obs_var, n_steps, key) do
-    state_dim = Nx.axis_size(f, 0)
-
-    # Diagonal Q sampling: sqrt of each diagonal entry
-    q_diag = Nx.take_diagonal(q_matrix)
-    q_sds = Nx.sqrt(Nx.max(q_diag, Nx.tensor(0.0)))
-    obs_sd = :math.sqrt(max(obs_var, 0.0))
-
-    # Pre-extract all state/observation subkeys once while preserving the
-    # previous split-per-step key semantics.
-    step_key_rows = Nx.Random.split(key, parts: n_steps) |> Nx.to_list()
-
-    state_obs_rows =
-      Enum.map(step_key_rows, fn step_key_row ->
-        step_key = Nx.tensor(step_key_row, type: Nx.type(key))
-        [state_key_row, obs_key_row] = Nx.Random.split(step_key, parts: 2) |> Nx.to_list()
-        {state_key_row, obs_key_row}
+  defp generate_structured_counterfactual(
+         final_state,
+         f,
+         post_h,
+         q_matrix,
+         obs_var,
+         _n_steps,
+         key
+       ) do
+    # Convert list of post-period H tensors into a single stacked tensor {n_steps, state_dim}
+    # This enables running the entire simulation gracefully inside a compiled Nx.Defn.while loop
+    post_h_tensor =
+      post_h
+      |> Enum.map(fn h_t ->
+        if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
       end)
+      |> Nx.stack()
 
-    # Iterate directly over post_h list to avoid O(n²) Enum.at access
-    {_, values} =
-      Enum.zip(post_h, state_obs_rows)
-      |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_t, {state_key_row, obs_key_row}},
-                                                       {prev_state, acc} ->
-        key_state = Nx.tensor(state_key_row, type: Nx.type(key))
-        key_obs = Nx.tensor(obs_key_row, type: Nx.type(key))
+    {cf_obs_t, _key} =
+      generate_structured_counterfactual_defn(
+        Nx.flatten(final_state),
+        f,
+        post_h_tensor,
+        q_matrix,
+        obs_var,
+        key
+      )
 
-        # Process noise: sample N(0, I) then scale by sqrt(Q_diag)
-        # Zero-variance dimensions get exactly zero noise
-        {z_state, _} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {state_dim})
-        process_noise = Nx.multiply(z_state, q_sds)
+    Nx.to_flat_list(cf_obs_t)
+  end
+
+  import Nx.Defn
+
+  defnp take_time_slice_defn(tensor, idx) do
+    Nx.slice_along_axis(tensor, idx, 1, axis: 0) |> Nx.squeeze(axes: [0])
+  end
+
+  defn generate_structured_counterfactual_defn(
+         final_state,
+         f_mat,
+         post_h_tensor,
+         q_matrix,
+         obs_var,
+         key
+       ) do
+    state_dim = Nx.axis_size(f_mat, 0)
+    {n_steps, _} = Nx.shape(post_h_tensor)
+
+    q_diag = Nx.take_diagonal(q_matrix)
+    q_sds = Nx.sqrt(Nx.max(q_diag, 0.0))
+    obs_sd = Nx.sqrt(Nx.max(obs_var, 0.0))
+
+    keys = Nx.Random.split(key, parts: 2)
+    key_state = take_time_slice_defn(keys, 0)
+    key_obs = take_time_slice_defn(keys, 1)
+
+    {z_state, key_out_temp} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {n_steps, state_dim})
+    {z_obs, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {n_steps})
+
+    cf_obs = Nx.broadcast(0.0, {n_steps})
+
+    {_, _, final_obs, _, _, _, _, _, _} =
+      while {i = 0, prev_state = final_state, obs_acc = cf_obs, z_s = z_state, z_o = z_obs,
+             h_tensor = post_h_tensor, f = f_mat, q_s = q_sds, o_s = obs_sd},
+            i < n_steps do
+        z_s_i = take_time_slice_defn(z_s, i)
+        process_noise = Nx.multiply(z_s_i, q_s)
 
         # State transition: x_{t+1} = F * x_t + w_t
-        next_state = Nx.add(compat_dot(f, prev_state), process_noise)
+        next_state = Nx.add(Nx.dot(f, prev_state), process_noise)
 
-        # Observation: y_t = H_t * x_t + v_t (using per-step H)
-        h_row = if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
-        predicted_y = Nx.to_number(compat_dot(h_row, next_state))
+        # Observation: y_t = H_t * x_t + v_t
+        h_row = take_time_slice_defn(h_tensor, i)
+        predicted_y = Nx.dot(h_row, next_state)
 
-        {z_obs, _} = Nx.Random.normal(key_obs, 0.0, 1.0)
-        cf_obs = predicted_y + Nx.to_number(z_obs) * obs_sd
+        z_o_i = take_time_slice_defn(z_o, i)
+        cf_obs_i = Nx.add(predicted_y, Nx.multiply(z_o_i, o_s))
 
-        {next_state, [cf_obs | acc]}
-      end)
+        new_obs_acc = Nx.put_slice(obs_acc, [i], Nx.new_axis(Nx.squeeze(cf_obs_i), 0))
 
-    Enum.reverse(values)
+        {i + 1, next_state, new_obs_acc, z_s, z_o, h_tensor, f, q_s, o_s}
+      end
+
+    {final_obs, key_out_temp}
   end
 
   # Returns a copy of spec with H sliced for the pre-period.
@@ -815,17 +1033,6 @@ defmodule BstsNx.CausalImpact do
         else
           List.duplicate(t, n_post)
         end
-    end
-  end
-
-  # Nx.dot handles all rank combinations used here; keep scalar/scalar explicit.
-  defp compat_dot(a, b) do
-    case {Nx.rank(a), Nx.rank(b)} do
-      {0, 0} ->
-        Nx.multiply(a, b)
-
-      _ ->
-        Nx.dot(a, b)
     end
   end
 
