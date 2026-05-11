@@ -222,14 +222,69 @@ defmodule BstsNx.Applications.AnomalyDetectorTest do
           seed: 42
         )
 
-      # Score the same data — known promo effects should not be anomalies
-      scores = AnomalyDetector.score(detector, obs)
+      # Score the same data with matching known future effects.
+      scores = AnomalyDetector.score(detector, obs, future_regressors: regressors)
       assert length(scores) == 30
 
       Enum.each(scores, fn s ->
         assert is_float(s.predicted)
         assert is_float(s.z_score)
       end)
+    end
+
+    test "score/2 with regression detector requires future regressors" do
+      promo = Enum.map(1..12, fn i -> if rem(i, 4) == 0, do: 1.0, else: 0.0 end)
+      obs = Enum.map(promo, fn p -> 50.0 + p * 20.0 end)
+      regressors = Nx.tensor(Enum.map(promo, fn p -> [p] end))
+
+      detector =
+        AnomalyDetector.fit(obs,
+          regressors: regressors,
+          num_samples: 6,
+          burn_in: 3,
+          seed: 42
+        )
+
+      assert_raise ArgumentError, ~r/future_regressors are required/, fn ->
+        AnomalyDetector.score(detector, obs)
+      end
+    end
+  end
+
+  describe "structured forward uncertainty" do
+    test "score/2 accumulates state covariance over the horizon" do
+      spec =
+        BstsNx.Components.local_level_spec(
+          initial_state: 0.0,
+          initial_cov: 1.0,
+          process_var: 1.0,
+          obs_var: 0.25
+        )
+
+      detector = %{
+        method: :mcmc,
+        z_threshold: 3.0,
+        posterior_mean: nil,
+        posterior_sd: nil,
+        posterior_samples: [
+          %{
+            states: [Nx.tensor([0.0])],
+            q_matrix: Nx.tensor([[1.0]]),
+            obs_var: Nx.tensor(0.25)
+          }
+        ],
+        mcmc_model: :structured,
+        spec: spec
+      }
+
+      scores = AnomalyDetector.score(detector, [0.0, 0.0, 0.0])
+      sds = Enum.map(scores, & &1.predicted_sd)
+
+      assert Enum.at(sds, 0) < Enum.at(sds, 1)
+      assert Enum.at(sds, 1) < Enum.at(sds, 2)
+      assert_in_delta Enum.at(sds, 0), :math.sqrt(1.25), 1.0e-10
+      assert_in_delta Enum.at(sds, 1), :math.sqrt(2.25), 1.0e-10
+      assert_in_delta Enum.at(sds, 2), :math.sqrt(3.25), 1.0e-10
     end
   end
 end

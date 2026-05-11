@@ -166,7 +166,12 @@ defmodule BstsNx.BCT.ARForecaster do
   @spec fit_predict([number() | Nx.t()], pos_integer(), keyword()) :: forecast_result()
   def fit_predict(observations, horizon, opts \\ []) do
     fit_result = fit(observations, opts)
-    predict_opts = Keyword.put(opts, :horizon, horizon)
+
+    predict_opts =
+      opts
+      |> derive_predict_prng_opts()
+      |> Keyword.put(:horizon, horizon)
+
     predict(fit_result, predict_opts)
   end
 
@@ -219,6 +224,21 @@ defmodule BstsNx.BCT.ARForecaster do
   defp fallback_coefficients(n_features, targets) do
     intercept = if targets == [], do: 0.0, else: Enum.sum(targets) / length(targets)
     [intercept | List.duplicate(0.0, n_features - 1)]
+  end
+
+  defp derive_predict_prng_opts(opts) do
+    case Keyword.get(opts, :key) do
+      %Nx.Tensor{} = key ->
+        split_keys = Nx.Random.split(key, parts: 2)
+        predict_key = Nx.slice_along_axis(split_keys, 1, 1, axis: 0) |> Nx.squeeze(axes: [0])
+        opts |> Keyword.put(:key, predict_key) |> Keyword.delete(:seed)
+
+      _ ->
+        case Keyword.get(opts, :seed) do
+          seed when is_integer(seed) -> Keyword.put(opts, :seed, seed + 1)
+          _ -> opts
+        end
+    end
   end
 
   defp finite_number?(x) when is_number(x) do

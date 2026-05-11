@@ -220,8 +220,13 @@ defmodule BstsNx.Forecaster do
   """
   @spec fit_predict([number()], non_neg_integer(), keyword()) :: forecast_result()
   def fit_predict(observations, horizon, opts \\ []) do
-    fit_result = fit(observations, opts)
-    predict_opts = Keyword.put(opts, :horizon, horizon)
+    {fit_opts, predict_opts_base} = split_fit_predict_prng_opts(opts)
+    fit_result = fit(observations, fit_opts)
+
+    predict_opts =
+      predict_opts_base
+      |> Keyword.put(:horizon, horizon)
+
     predict(fit_result, predict_opts)
   end
 
@@ -337,6 +342,26 @@ defmodule BstsNx.Forecaster do
 
       Enum.reverse(trajectory)
     end)
+  end
+
+  defp split_fit_predict_prng_opts(opts) do
+    case Keyword.get(opts, :key) do
+      %Nx.Tensor{} = key ->
+        split_keys = Nx.Random.split(key, parts: 2)
+        fit_key = Nx.slice_along_axis(split_keys, 0, 1, axis: 0) |> Nx.squeeze(axes: [0])
+        predict_key = Nx.slice_along_axis(split_keys, 1, 1, axis: 0) |> Nx.squeeze(axes: [0])
+
+        {
+          opts |> Keyword.put(:key, fit_key) |> Keyword.delete(:seed),
+          opts |> Keyword.put(:key, predict_key) |> Keyword.delete(:seed)
+        }
+
+      _ ->
+        case Keyword.get(opts, :seed) do
+          seed when is_integer(seed) -> {opts, Keyword.put(opts, :seed, seed + 1)}
+          _ -> {opts, opts}
+        end
+    end
   end
 
   defp predict_scalar(%{posterior_samples: samples}, horizon, base_key) do

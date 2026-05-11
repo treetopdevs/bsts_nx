@@ -106,8 +106,8 @@ defmodule BstsNx.Applications.DemandForecasterTest do
 
       safety = DemandForecaster.safety_stock(forecast, lead_time: 3)
 
-      # Total safety stock over 3-period lead time: 3 × z × 5.0
-      assert_in_delta safety.total, 3 * 1.644854 * 5.0, 0.01
+      # Total safety stock over 3 independent periods: z * sqrt(3 * sigma^2)
+      assert_in_delta safety.total, 1.644854 * :math.sqrt(3.0 * 25.0), 0.01
     end
   end
 

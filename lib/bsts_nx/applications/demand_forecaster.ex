@@ -161,11 +161,18 @@ defmodule BstsNx.Applications.DemandForecaster do
     # Safety stock per period = z * forecast sd
     per_period = Enum.map(forecast.sd, fn s -> max(z * s, 0.0) end)
 
-    # Aggregate over lead time
-    total =
-      per_period
+    # Aggregate lead-time uncertainty for independent period demand:
+    # total safety stock = z * sqrt(sum(sigma_i^2)).
+    lead_time_sds =
+      forecast.sd
       |> Enum.take(lead_time)
-      |> Enum.sum()
+      |> Enum.map(&max(&1, 0.0))
+
+    total =
+      lead_time_sds
+      |> Enum.reduce(0.0, fn sd, acc -> acc + sd * sd end)
+      |> :math.sqrt()
+      |> Kernel.*(z)
 
     %{
       per_period: per_period,
@@ -218,7 +225,10 @@ defmodule BstsNx.Applications.DemandForecaster do
     end
 
     seed = Keyword.get(opts, :seed, System.os_time())
-    key = Keyword.get(opts, :key, Nx.Random.key(seed))
+    root_key = Keyword.get(opts, :key, Nx.Random.key(seed))
+    split_keys = Nx.Random.split(root_key, parts: 2)
+    sampler_key = split_key_at(split_keys, 0)
+    forecast_key = split_key_at(split_keys, 1)
 
     obs_list = ModelBuilder.coerce_obs(observations)
     regressors = Keyword.get(opts, :regressors)
@@ -230,24 +240,30 @@ defmodule BstsNx.Applications.DemandForecaster do
 
     sampler_opts =
       opts
-      |> Keyword.take([:seed, :thin])
+      |> Keyword.take([:thin])
+      |> Keyword.put(:key, sampler_key)
       |> Keyword.put(:burn_in, burn_in)
 
     samples = GibbsSampler.sample_structured(obs_list, spec, num_samples, sampler_opts)
 
     # Forward simulation with future regressors
-    key_rows = Nx.Random.split(key, parts: length(samples)) |> Nx.to_list()
+    key_rows = Nx.Random.split(forecast_key, parts: length(samples)) |> Nx.to_list()
 
     trajectories =
       Enum.zip(samples, key_rows)
       |> Enum.map(fn {sample, key_row} ->
-        sample_key = Nx.tensor(key_row, type: Nx.type(key))
+        sample_key = Nx.tensor(key_row, type: Nx.type(forecast_key))
         forward_simulate_demand(sample, spec, future_h, horizon, sample_key)
       end)
 
     result = aggregate(trajectories, horizon, alpha)
 
     {result, samples, spec, obs_list}
+  end
+
+  defp split_key_at(keys, idx) do
+    Nx.slice_along_axis(keys, idx, 1, axis: 0)
+    |> Nx.squeeze(axes: [0])
   end
 
   defp build_demand_model(obs_list, horizon, seasonality, regressors) do

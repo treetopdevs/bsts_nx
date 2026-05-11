@@ -60,7 +60,10 @@ defmodule BstsNx.Applications.AnomalyDetector do
           # MCMC fields
           posterior_mean: [float()] | nil,
           posterior_sd: [float()] | nil,
+          posterior_samples: [map()] | nil,
+          mcmc_model: :structured | :scalar | nil,
           spec: BstsNx.ModelSpec.t() | nil,
+          regressor_columns: non_neg_integer(),
           # Filter fields (for streaming)
           filter_state: Nx.t() | nil,
           filter_cov: Nx.t() | nil,
@@ -162,18 +165,20 @@ defmodule BstsNx.Applications.AnomalyDetector do
 
   Returns a list of `anomaly_score` maps, one per observation.
   """
-  @spec score(detector(), [number()]) :: [anomaly_score()]
-  def score(%{method: :mcmc} = detector, observations) do
-    Enum.with_index(observations, fn obs, idx ->
-      # Use the last fitted prediction as the baseline
-      # For scoring new data, we extrapolate the fitted model
-      predicted = extrapolate_mean(detector, idx)
-      predicted_sd = extrapolate_sd(detector, idx)
+  @spec score(detector(), [number()], keyword()) :: [anomaly_score()]
+  def score(detector, observations, opts \\ [])
+
+  def score(%{method: :mcmc} = detector, observations, opts) do
+    horizon = length(observations)
+    {pred_means, pred_sds} = mcmc_forward_predictions(detector, horizon, opts)
+
+    Enum.zip([observations, pred_means, pred_sds])
+    |> Enum.map(fn {obs, predicted, predicted_sd} ->
       build_score(obs, predicted, predicted_sd, detector.z_threshold)
     end)
   end
 
-  def score(%{method: :filter} = detector, observations) do
+  def score(%{method: :filter} = detector, observations, _opts) do
     {scores, _final_detector} =
       Enum.map_reduce(observations, detector, fn obs, det ->
         {sc, updated} = score_one(det, obs)
@@ -235,8 +240,9 @@ defmodule BstsNx.Applications.AnomalyDetector do
   @spec detect(detector(), [number()], keyword()) :: [anomaly_score()]
   def detect(detector, observations, opts \\ []) do
     min_severity = Keyword.get(opts, :min_severity, :warning)
+    score_opts = Keyword.delete(opts, :min_severity)
 
-    scores = score(detector, observations)
+    scores = score(detector, observations, score_opts)
 
     Enum.filter(scores, fn s ->
       s.anomaly? and severity_at_least?(s.severity, min_severity)
@@ -288,6 +294,7 @@ defmodule BstsNx.Applications.AnomalyDetector do
     t = length(obs_list)
     num_samples = Keyword.get(opts, :num_samples, 200)
     burn_in = Keyword.get(opts, :burn_in, div(num_samples, 2))
+    regressor_columns = regressor_columns_from_opts(opts)
 
     {spec, method_type} = ModelBuilder.build_spec(obs_list, opts)
 
@@ -324,7 +331,10 @@ defmodule BstsNx.Applications.AnomalyDetector do
       z_threshold: z_threshold,
       posterior_mean: means,
       posterior_sd: sds,
+      posterior_samples: samples,
+      mcmc_model: method_type,
       spec: spec,
+      regressor_columns: regressor_columns,
       filter_state: nil,
       filter_cov: nil,
       f: 1.0,
@@ -358,7 +368,10 @@ defmodule BstsNx.Applications.AnomalyDetector do
       z_threshold: z_threshold,
       posterior_mean: nil,
       posterior_sd: nil,
+      posterior_samples: nil,
+      mcmc_model: nil,
       spec: nil,
+      regressor_columns: 0,
       filter_state: Nx.to_number(final_x),
       filter_cov: Nx.to_number(final_p),
       f: f * 1.0,
@@ -421,21 +434,234 @@ defmodule BstsNx.Applications.AnomalyDetector do
     {means, sds}
   end
 
-  defp extrapolate_mean(%{posterior_mean: means}, idx) when is_list(means) do
-    # For new observations beyond training, use the last fitted value
-    Enum.at(means, idx) || List.last(means) || 0.0
+  defp mcmc_forward_predictions(detector, horizon, opts) do
+    samples = Map.get(detector, :posterior_samples)
+    mode = Map.get(detector, :mcmc_model)
+
+    cond do
+      horizon <= 0 ->
+        {[], []}
+
+      not is_list(samples) or samples == [] ->
+        fallback_extrapolation(detector, horizon)
+
+      mode == :structured and detector.spec != nil ->
+        forward_structured_predictions(
+          samples,
+          detector.spec,
+          horizon,
+          opts,
+          regression_dims_for_detector(detector)
+        )
+
+      mode == :scalar ->
+        forward_scalar_predictions(samples, horizon)
+
+      true ->
+        fallback_extrapolation(detector, horizon)
+    end
   end
 
-  defp extrapolate_sd(%{posterior_sd: sds}, idx) when is_list(sds) do
-    sds_len = length(sds)
-    # For new observations, use the last fitted sd (grows with distance)
-    base_sd = Enum.at(sds, idx) || List.last(sds) || 1.0
-    # Increase uncertainty for extrapolation beyond training
-    if idx >= sds_len do
-      extra_steps = idx - sds_len + 1
-      base_sd * :math.sqrt(1.0 + extra_steps * 0.1)
+  defp forward_structured_predictions(samples, spec, horizon, opts, regressor_columns) do
+    h_rows = future_h_rows(spec, horizon, opts, regressor_columns)
+    n_samples = max(length(samples), 1)
+
+    per_sample =
+      Enum.map(samples, fn sample ->
+        f = Nx.as_type(spec.f, {:f, 64})
+        q = Nx.as_type(sample.q_matrix, {:f, 64})
+        obs_var = max(Nx.to_number(sample.obs_var), 0.0)
+        init_state = sample.states |> List.last() |> Nx.flatten() |> Nx.as_type({:f, 64})
+        state_dim = Nx.axis_size(init_state, 0)
+        zero_cov = Nx.broadcast(0.0, {state_dim, state_dim})
+
+        {final_state, _final_cov, means_rev, vars_rev} =
+          Enum.reduce(h_rows, {init_state, zero_cov, [], []}, fn h_row,
+                                                                 {state, cov, means_acc, vars_acc} ->
+            next_state = Nx.dot(f, state)
+            next_cov = f |> Nx.dot(cov) |> Nx.dot(Nx.transpose(f)) |> Nx.add(q)
+            h_row_t = Nx.as_type(h_row, {:f, 64})
+            y_mean = Nx.dot(h_row_t, next_state) |> Nx.to_number()
+            h_mat = Nx.new_axis(h_row_t, 0)
+
+            proc_var =
+              h_mat
+              |> Nx.dot(next_cov)
+              |> Nx.dot(Nx.transpose(h_mat))
+              |> Nx.squeeze()
+              |> Nx.to_number()
+
+            y_var = max(proc_var + obs_var, 1.0e-12)
+            {next_state, next_cov, [y_mean | means_acc], [y_var | vars_acc]}
+          end)
+
+        _ = final_state
+        %{means: Enum.reverse(means_rev), vars: Enum.reverse(vars_rev)}
+      end)
+
+    means =
+      Enum.map(0..(horizon - 1), fn idx ->
+        step_means = Enum.map(per_sample, &Enum.at(&1.means, idx))
+        Enum.sum(step_means) / n_samples
+      end)
+
+    sds =
+      Enum.map(0..(horizon - 1), fn idx ->
+        step_means = Enum.map(per_sample, &Enum.at(&1.means, idx))
+        step_noise_vars = Enum.map(per_sample, &Enum.at(&1.vars, idx))
+        between = sample_variance(step_means)
+        avg_noise = Enum.sum(step_noise_vars) / n_samples
+        :math.sqrt(max(between + avg_noise, 1.0e-12))
+      end)
+
+    {means, sds}
+  end
+
+  defp forward_scalar_predictions(samples, horizon) do
+    n_samples = max(length(samples), 1)
+
+    per_sample =
+      Enum.map(samples, fn sample ->
+        level = sample.states |> List.last() |> Nx.to_number()
+        q = max(Nx.to_number(sample.process_var), 0.0)
+        r = max(Nx.to_number(sample.obs_var), 0.0)
+
+        vars =
+          Enum.map(1..horizon, fn step ->
+            max(step * q + r, 1.0e-12)
+          end)
+
+        %{means: List.duplicate(level, horizon), vars: vars}
+      end)
+
+    means =
+      Enum.map(0..(horizon - 1), fn idx ->
+        step_means = Enum.map(per_sample, &Enum.at(&1.means, idx))
+        Enum.sum(step_means) / n_samples
+      end)
+
+    sds =
+      Enum.map(0..(horizon - 1), fn idx ->
+        step_means = Enum.map(per_sample, &Enum.at(&1.means, idx))
+        step_noise_vars = Enum.map(per_sample, &Enum.at(&1.vars, idx))
+        between = sample_variance(step_means)
+        avg_noise = Enum.sum(step_noise_vars) / n_samples
+        :math.sqrt(max(between + avg_noise, 1.0e-12))
+      end)
+
+    {means, sds}
+  end
+
+  defp future_h_rows(spec, horizon, opts, regressor_columns) when regressor_columns > 0 do
+    future_regressors =
+      Keyword.get(opts, :future_regressors) ||
+        raise ArgumentError,
+              "future_regressors are required when scoring an MCMC regression detector"
+
+    future_t = normalize_future_regressors!(future_regressors, horizon, regressor_columns)
+
+    spec
+    |> ModelBuilder.build_future_h(future_t, regressor_columns)
+    |> Enum.map(&BstsNx.Utils.h_to_row_tensor/1)
+  end
+
+  defp future_h_rows(spec, horizon, _opts, _regressor_columns) do
+    static_h =
+      case spec.h do
+        list when is_list(list) -> List.last(list)
+        %Nx.Tensor{} = h_t -> h_t
+      end
+
+    h_row = BstsNx.Utils.h_to_row_tensor(static_h)
+    List.duplicate(h_row, horizon)
+  end
+
+  defp normalize_future_regressors!(future_regressors, horizon, regressor_columns) do
+    future_t =
+      case future_regressors do
+        %Nx.Tensor{} = tensor ->
+          tensor
+
+        rows when is_list(rows) ->
+          Nx.tensor(rows)
+
+        other ->
+          raise ArgumentError,
+                "future_regressors must be an Nx tensor or list, got: #{inspect(other)}"
+      end
+
+    if Nx.rank(future_t) != 2 do
+      raise ArgumentError,
+            "future_regressors must be rank-2, got shape #{inspect(Nx.shape(future_t))}"
+    end
+
+    if Nx.axis_size(future_t, 0) != horizon do
+      raise ArgumentError,
+            "future_regressors rows (#{Nx.axis_size(future_t, 0)}) must match observations (#{horizon})"
+    end
+
+    if Nx.axis_size(future_t, 1) != regressor_columns do
+      raise ArgumentError,
+            "future_regressors columns (#{Nx.axis_size(future_t, 1)}) must match training regressors (#{regressor_columns})"
+    end
+
+    future_t
+  end
+
+  defp regressor_columns_from_opts(opts) do
+    case Keyword.get(opts, :regressors) do
+      %Nx.Tensor{} = tensor ->
+        if Nx.rank(tensor) == 2, do: Nx.axis_size(tensor, 1), else: 0
+
+      _ ->
+        0
+    end
+  end
+
+  defp regression_dims_for_detector(detector) do
+    max(Map.get(detector, :regressor_columns, 0), regression_dims_from_spec(detector.spec))
+  end
+
+  defp regression_dims_from_spec(%BstsNx.ModelSpec{regression: %{num_dims: num_dims}})
+       when is_integer(num_dims) and num_dims > 0 do
+    num_dims
+  end
+
+  defp regression_dims_from_spec(_spec), do: 0
+
+  defp fallback_extrapolation(%{posterior_mean: means, posterior_sd: sds}, horizon)
+       when is_list(means) and is_list(sds) do
+    pred_means =
+      Enum.map(0..(horizon - 1), fn idx -> Enum.at(means, idx) || List.last(means) || 0.0 end)
+
+    pred_sds =
+      Enum.map(0..(horizon - 1), fn idx ->
+        sds_len = length(sds)
+        base_sd = Enum.at(sds, idx) || List.last(sds) || 1.0
+
+        if idx >= sds_len do
+          extra_steps = idx - sds_len + 1
+          base_sd * :math.sqrt(1.0 + extra_steps * 0.1)
+        else
+          base_sd
+        end
+      end)
+
+    {pred_means, pred_sds}
+  end
+
+  defp fallback_extrapolation(_detector, horizon) do
+    {List.duplicate(0.0, horizon), List.duplicate(1.0, horizon)}
+  end
+
+  defp sample_variance(values) do
+    n = length(values)
+
+    if n < 2 do
+      0.0
     else
-      base_sd
+      mean = Enum.sum(values) / n
+      Enum.reduce(values, 0.0, fn x, acc -> acc + :math.pow(x - mean, 2) end) / (n - 1)
     end
   end
 

@@ -177,14 +177,16 @@ defmodule BstsNx.BCT.ARForecasterTest do
       assert length(forecast.mean) == 6
     end
 
-    test "matches separate fit and predict with same seed/options" do
+    test "matches separate fit and predict when prediction seed is advanced" do
       data = synthetic_series(85)
       opts = [order: 2, num_samples: 35, alpha: 0.1, seed: 123]
+
+      predict_opts = opts |> Keyword.put(:horizon, 9) |> Keyword.put(:seed, 124)
 
       separate =
         data
         |> ARForecaster.fit(opts)
-        |> ARForecaster.predict(Keyword.put(opts, :horizon, 9))
+        |> ARForecaster.predict(predict_opts)
 
       combined = ARForecaster.fit_predict(data, 9, opts)
 
