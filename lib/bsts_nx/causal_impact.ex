@@ -105,9 +105,13 @@ defmodule BstsNx.CausalImpact do
     process_var = Keyword.get(opts, :process_var, 1.0)
     obs_var_init = Keyword.get(opts, :obs_var, 1.0)
 
+    {sampler_key, cf_base_key} = derive_estimate_keys(opts)
+
     gibbs_opts =
       opts
       |> Keyword.delete(:num_samples)
+      |> Keyword.delete(:seed)
+      |> Keyword.put(:key, sampler_key)
       |> Keyword.put(:burn_in, burn_in)
       |> Keyword.put(:thin, thin)
 
@@ -124,9 +128,7 @@ defmodule BstsNx.CausalImpact do
 
     # Determine number of post steps
     n_post = post_end - post_start + 1
-    # Create Nx.Random key for counterfactual simulation (consistent PRNG approach)
-    seed_base = Keyword.get(opts, :seed, System.os_time())
-    cf_base_key = Keyword.get(opts, :key, Nx.Random.key(seed_base))
+    gap_count = post_start - pre_end - 1
     # Split into one key per sample for independent counterfactual draws
     cf_keys = Nx.Random.split(cf_base_key, parts: length(pre_samples))
 
@@ -140,7 +142,9 @@ defmodule BstsNx.CausalImpact do
         q = Nx.to_number(sample.process_var)
         r = Nx.to_number(sample.obs_var)
         # generate counterfactual by forward simulation (random walk with observation noise)
-        cf = generate_counterfactual(init_val, q, r, n_post, split_key_at(cf_keys, idx))
+        cf =
+          generate_counterfactual(init_val, q, r, n_post, split_key_at(cf_keys, idx), gap_count)
+
         # compute point effects as difference between actual post data and counterfactual
         point_effects =
           Enum.zip(post_data, cf)
@@ -154,10 +158,7 @@ defmodule BstsNx.CausalImpact do
     # compute cumulative and relative effects per sample
     cumulative_effects = Enum.map(point_effects_list, &Enum.sum/1)
     baseline_sums = Enum.map(baselines, &Enum.sum/1)
-
-    relative_effects =
-      Enum.zip(cumulative_effects, baseline_sums)
-      |> Enum.map(fn {cum, base} -> if abs(base) > 1.0e-10, do: cum / base, else: 0.0 end)
+    relative_effects = relative_effects_for_draws(cumulative_effects, baseline_sums)
 
     # build result struct
     %{
@@ -232,23 +233,27 @@ defmodule BstsNx.CausalImpact do
     burn_in = Keyword.get(opts, :burn_in, div(num_samples, 2))
     thin = Keyword.get(opts, :thin, 1)
 
+    {sampler_key, cf_base_key} = derive_estimate_keys(opts)
+
     gibbs_opts =
       opts
       |> Keyword.delete(:num_samples)
+      |> Keyword.delete(:seed)
+      |> Keyword.put(:key, sampler_key)
       |> Keyword.put(:burn_in, burn_in)
       |> Keyword.put(:thin, thin)
 
     # Slice H for the pre-period so sample_structured gets matching lengths
-    pre_spec = slice_spec_h(spec, pre_start - 1, length(pre_data))
+    state_dim = Nx.axis_size(spec.f, 0)
+    pre_spec = slice_spec_h(spec, pre_start - 1, length(pre_data), state_dim)
     pre_samples = GibbsSampler.sample_structured(pre_data, pre_spec, num_samples, gibbs_opts)
 
     n_post = post_end - post_start + 1
-    seed_base = Keyword.get(opts, :seed, System.os_time())
-    cf_base_key = Keyword.get(opts, :key, Nx.Random.key(seed_base))
+    gap_count = post_start - pre_end - 1
     cf_keys = Nx.Random.split(cf_base_key, parts: length(pre_samples))
 
     # Get post-period H entries for counterfactual forward simulation
-    post_h = post_period_h(spec.h, post_start - 1, n_post)
+    post_h = post_period_h(spec.h, post_start - 1, n_post, state_dim)
 
     effects =
       Enum.with_index(pre_samples)
@@ -266,7 +271,8 @@ defmodule BstsNx.CausalImpact do
             q_mat,
             r,
             n_post,
-            split_key_at(cf_keys, idx)
+            split_key_at(cf_keys, idx),
+            gap_count
           )
 
         point_effects =
@@ -279,10 +285,7 @@ defmodule BstsNx.CausalImpact do
     {baselines, point_effects_list} = Enum.unzip(effects)
     cumulative_effects = Enum.map(point_effects_list, &Enum.sum/1)
     baseline_sums = Enum.map(baselines, &Enum.sum/1)
-
-    relative_effects =
-      Enum.zip(cumulative_effects, baseline_sums)
-      |> Enum.map(fn {cum, base} -> if abs(base) > 1.0e-10, do: cum / base, else: 0.0 end)
+    relative_effects = relative_effects_for_draws(cumulative_effects, baseline_sums)
 
     %{
       point_effects: point_effects_list,
@@ -483,7 +486,9 @@ defmodule BstsNx.CausalImpact do
         },
         relative_effect: %{mean: 0.0, sd: 0.0, lower: 0.0, upper: 0.0},
         actual: [],
-        baseline: []
+        baseline: [],
+        baseline_variance: [],
+        obs_variance: r_to_number(r)
       }
     else
       # Build NaN mask for intervention period
@@ -514,6 +519,10 @@ defmodule BstsNx.CausalImpact do
       # y_t = h_t * x_t, so baseline = h_t * smoothed_x_t
       h_vals = h_intervention_values(h, valid_indices)
       baseline_vals = Enum.zip(h_vals, raw_state_vals) |> Enum.map(fn {hi, xi} -> hi * xi end)
+
+      baseline_variance_vals =
+        Enum.zip(h_vals, state_var_vals)
+        |> Enum.map(fn {hi, v} -> max(hi * hi * v, 0.0) end)
 
       # Point effects
       point_effects_mean =
@@ -614,7 +623,7 @@ defmodule BstsNx.CausalImpact do
           0.0
         end
 
-      cum_var = diag_var + 2.0 * cross_var_sum + n_intervention * r_num
+      cum_var = diag_var + n_intervention * r_num + 2.0 * cross_var_sum
       cum_sd = :math.sqrt(max(cum_var, 0.0))
 
       # Relative
@@ -645,7 +654,9 @@ defmodule BstsNx.CausalImpact do
           upper: rel_mean + z * rel_sd
         },
         actual: actual_vals,
-        baseline: baseline_vals
+        baseline: baseline_vals,
+        baseline_variance: baseline_variance_vals,
+        obs_variance: r_num
       }
     end
   end
@@ -700,7 +711,9 @@ defmodule BstsNx.CausalImpact do
         cumulative_effect: %{mean: 0.0, sd: 0.0, lower: 0.0, upper: 0.0},
         relative_effect: %{mean: 0.0, sd: 0.0, lower: 0.0, upper: 0.0},
         actual: [],
-        baseline: []
+        baseline: [],
+        baseline_variance: [],
+        obs_variance: 0.0
       }
     else
       # Extract fixed structural matrices from priors.
@@ -708,7 +721,12 @@ defmodule BstsNx.CausalImpact do
       # ModelSpec stores `prior_scale` and `prior_shape` for each diagonal Q entry.
       q_diag_map =
         Enum.map(spec.q_specs, fn q_spec ->
-          {q_spec.dim_index, q_spec.prior_scale / (q_spec.prior_shape + 1.0)}
+          prior_shape = to_number(q_spec.prior_shape)
+          prior_scale = to_number(q_spec.prior_scale)
+          # Filter-only path does not adapt via MCMC; use a regularized mean-like
+          # initializer instead of the inverse-gamma mode to reduce under-dispersion.
+          denom = max(prior_shape - 1.0, 0.5)
+          {q_spec.dim_index, prior_scale / denom}
         end)
         |> Map.new()
 
@@ -718,12 +736,13 @@ defmodule BstsNx.CausalImpact do
 
       q_matrix = Nx.make_diagonal(Nx.tensor(q_diag, type: {:f, 64}))
 
-      r_val = spec.obs_prior_scale / (spec.obs_prior_shape + 1.0)
+      obs_prior_shape = to_number(spec.obs_prior_shape)
+      obs_prior_scale = to_number(spec.obs_prior_scale)
+      r_val = obs_prior_scale / max(obs_prior_shape - 1.0, 0.5)
       r_tensor = Nx.tensor(r_val, type: {:f, 64})
 
-      x0 = Nx.broadcast(0.0, {state_dim})
-      # Diffuse prior for start
-      p0 = Nx.eye(state_dim) |> Nx.multiply(100.0)
+      x0 = spec.x0 |> BstsNx.Utils.to_tensor() |> Nx.as_type({:f, 64}) |> Nx.flatten()
+      p0 = spec.p0 |> BstsNx.Utils.to_tensor() |> Nx.as_type({:f, 64})
 
       # Build NaN mask for intervention period
       mask_flags = :array.new(t, default: 0)
@@ -738,16 +757,7 @@ defmodule BstsNx.CausalImpact do
       nan_vec = Nx.broadcast(Nx.Constants.nan(), {t})
       masked_obs = Nx.select(mask, nan_vec, obs_tensor)
 
-      # Use the same list-to-tensor or tensor padding logic for H
-      h_tensor =
-        case spec.h do
-          list when is_list(list) ->
-            list |> Enum.map(&BstsNx.Utils.to_tensor/1) |> Nx.stack()
-
-          %Nx.Tensor{} = static_h ->
-            # Broadcast static H to the time dimension
-            Nx.broadcast(static_h, {t, Nx.axis_size(static_h, 0), Nx.axis_size(static_h, 1)})
-        end
+      h_tensor = normalize_structured_h_for_filter(spec.h, t, state_dim)
 
       # Filter
       {filt_xs, filt_ps} =
@@ -773,9 +783,13 @@ defmodule BstsNx.CausalImpact do
       sxs_interventions = Nx.take(sxs, idx_tensor)
       sps_interventions = Nx.take(sps, idx_tensor)
 
-      # Baseline: H_t * x_t (H is row vector per step, so dot(H, x) = scalar)
+      # Baseline: H_t * x_t  →  one scalar per time step.
+      # h_interventions may be {n, 1, state_dim} (3D) or {n, state_dim} (2D)
+      # depending on how H was broadcast.  Flatten all but the leading batch axis.
+      h_flat = Nx.reshape(h_interventions, {Nx.axis_size(h_interventions, 0), :auto})
+
       baseline_vals =
-        Nx.sum(Nx.multiply(h_interventions, sxs_interventions), axes: [1]) |> Nx.to_flat_list()
+        Nx.sum(Nx.multiply(h_flat, sxs_interventions), axes: [1]) |> Nx.to_flat_list()
 
       point_effects_mean =
         Enum.zip(actual_vals, baseline_vals) |> Enum.map(fn {a, b} -> a - b end)
@@ -804,15 +818,20 @@ defmodule BstsNx.CausalImpact do
       # (P * h^T) for each time step -> {n, dim}
       ph = Nx.sum(Nx.multiply(sps_interventions, Nx.new_axis(h_rows, 1)), axes: [2])
 
-      p_projected_vars =
-        Nx.sum(Nx.multiply(ph, h_rows), axes: [1])
-        |> Nx.add(r_tensor)
+      baseline_projected_vars = Nx.sum(Nx.multiply(ph, h_rows), axes: [1])
 
       # Ensure no negative variances due to precision
-      p_projected_vars =
-        Nx.select(Nx.less(p_projected_vars, 0.0), Nx.tensor(0.0), p_projected_vars)
+      baseline_projected_vars =
+        Nx.select(
+          Nx.less(baseline_projected_vars, 0.0),
+          Nx.tensor(0.0),
+          baseline_projected_vars
+        )
+
+      p_projected_vars = Nx.add(baseline_projected_vars, r_tensor)
 
       point_sds = Nx.sqrt(p_projected_vars) |> Nx.to_flat_list()
+      baseline_variance_vals = baseline_projected_vars |> Nx.to_flat_list()
 
       point_lower =
         Enum.zip(point_effects_mean, point_sds) |> Enum.map(fn {m, s} -> m - z * s end)
@@ -852,13 +871,22 @@ defmodule BstsNx.CausalImpact do
           upper: rel_mean + z * rel_sd
         },
         actual: actual_vals,
-        baseline: baseline_vals
+        baseline: baseline_vals,
+        baseline_variance: baseline_variance_vals,
+        obs_variance: r_val
       }
     end
   end
 
   defp r_to_number(r) when is_number(r), do: r * 1.0
   defp r_to_number(%Nx.Tensor{} = r), do: Nx.to_number(r)
+
+  defp relative_effects_for_draws(cumulative_effects, baseline_sums) do
+    Enum.zip(cumulative_effects, baseline_sums)
+    |> Enum.map(fn {cumulative_effect, baseline_sum} ->
+      if abs(baseline_sum) > 1.0e-10, do: cumulative_effect / baseline_sum, else: 0.0
+    end)
+  end
 
   # Returns a function that gives h at any time step index.
   defp h_at_step_fn(h, _t) when is_number(h), do: fn _step -> h * 1.0 end
@@ -887,6 +915,45 @@ defmodule BstsNx.CausalImpact do
     end
   end
 
+  defp normalize_structured_h_for_filter(h, t, state_dim) when is_list(h) do
+    h_rows = h |> Enum.map(&BstsNx.Utils.h_to_row_tensor/1) |> Nx.stack()
+
+    cond do
+      Nx.axis_size(h_rows, 0) == t ->
+        h_rows
+
+      Nx.axis_size(h_rows, 0) == 1 ->
+        Nx.broadcast(Nx.squeeze(h_rows, axes: [0]), {t, state_dim})
+
+      true ->
+        raise ArgumentError,
+              "structured model H covers #{Nx.axis_size(h_rows, 0)} steps, but observations require #{t}"
+    end
+  end
+
+  defp normalize_structured_h_for_filter(%Nx.Tensor{} = h, t, state_dim) do
+    cond do
+      Nx.rank(h) == 0 and state_dim == 1 ->
+        Nx.broadcast(h, {t, 1})
+
+      Nx.rank(h) == 1 and Nx.axis_size(h, 0) == state_dim ->
+        Nx.broadcast(h, {t, state_dim})
+
+      Nx.rank(h) == 2 and Nx.shape(h) == {1, state_dim} ->
+        Nx.broadcast(Nx.squeeze(h, axes: [0]), {t, state_dim})
+
+      Nx.rank(h) == 2 and Nx.shape(h) == {t, state_dim} ->
+        h
+
+      Nx.rank(h) == 3 and Nx.shape(h) == {t, 1, state_dim} ->
+        Nx.squeeze(h, axes: [1])
+
+      true ->
+        raise ArgumentError,
+              "h must be shape {#{state_dim}}, {1, #{state_dim}}, or {#{t}, #{state_dim}} for structured filter, got: #{inspect(Nx.shape(h))}"
+    end
+  end
+
   # Generates a counterfactual trajectory by forward simulation of a random walk
   # with observation noise, using Nx.Random for PRNG consistency with the rest
   # of the library.
@@ -897,9 +964,10 @@ defmodule BstsNx.CausalImpact do
   # iteratively adding Gaussian process noise and then observation noise.
   # An Nx.Random `key` controls reproducibility.  The returned list has
   # length `n_steps`.
-  defp generate_counterfactual(initial_state, process_var, obs_var, n_steps, key) do
+  defp generate_counterfactual(initial_state, process_var, obs_var, n_steps, key, gap_steps) do
     sd_process = :math.sqrt(max(process_var, 0.0))
     sd_obs = :math.sqrt(max(obs_var, 0.0))
+    total_steps = gap_steps + n_steps
 
     # Split into 2 independent sub-keys: one for process noise, one for
     # observation noise. Sharing no common ancestor from a single split
@@ -908,16 +976,17 @@ defmodule BstsNx.CausalImpact do
     key_process = split_key_at(keys, 0)
     key_obs = split_key_at(keys, 1)
 
-    {z_process, _} = Nx.Random.normal(key_process, 0.0, 1.0, shape: {n_steps})
+    {z_process, _} = Nx.Random.normal(key_process, 0.0, 1.0, shape: {total_steps})
     {z_obs, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {n_steps})
 
     # Vectorized state simulation: x_t = x_0 + sum_{i=1}^t w_i
     process_noise = Nx.multiply(z_process, sd_process)
     states = Nx.add(initial_state, Nx.cumulative_sum(process_noise))
+    post_states = Nx.slice_along_axis(states, gap_steps, n_steps, axis: 0)
 
     # Vectorized observation simulation: y_t = x_t + v_t
     obs_noise = Nx.multiply(z_obs, sd_obs)
-    cf_obs = Nx.add(states, obs_noise)
+    cf_obs = Nx.add(post_states, obs_noise)
 
     Nx.to_flat_list(cf_obs)
   end
@@ -929,7 +998,8 @@ defmodule BstsNx.CausalImpact do
          q_matrix,
          obs_var,
          _n_steps,
-         key
+         key,
+         gap_steps
        ) do
     # Convert list of post-period H tensors into a single stacked tensor {n_steps, state_dim}
     # This enables running the entire simulation gracefully inside a compiled Nx.Defn.while loop
@@ -940,14 +1010,25 @@ defmodule BstsNx.CausalImpact do
       end)
       |> Nx.stack()
 
-    {cf_obs_t, _key} =
+    state_dim = Nx.axis_size(f, 0)
+    total_steps = gap_steps + Nx.axis_size(post_h_tensor, 0)
+    keys = Nx.Random.split(key, parts: 2)
+    key_state = split_key_at(keys, 0)
+    key_obs = split_key_at(keys, 1)
+
+    {z_state, _} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {total_steps, state_dim})
+    {z_obs, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {Nx.axis_size(post_h_tensor, 0)})
+
+    cf_obs_t =
       generate_structured_counterfactual_defn(
         Nx.flatten(final_state),
         f,
         post_h_tensor,
         q_matrix,
         obs_var,
-        key
+        z_state,
+        z_obs,
+        gap_steps
       )
 
     Nx.to_flat_list(cf_obs_t)
@@ -963,29 +1044,40 @@ defmodule BstsNx.CausalImpact do
          post_h_tensor,
          q_matrix,
          obs_var,
-         key
+         z_state_raw,
+         z_obs_raw,
+         gap_steps
        ) do
-    state_dim = Nx.axis_size(f_mat, 0)
-    {n_steps, _} = Nx.shape(post_h_tensor)
+    type = Nx.type(final_state)
+    f_t = Nx.as_type(f_mat, type)
+    h_t = Nx.as_type(post_h_tensor, type)
+    q_t = Nx.as_type(q_matrix, type)
+    obs_var_t = Nx.as_type(obs_var, type)
+    {n_steps, _} = Nx.shape(h_t)
+    z_state = Nx.as_type(z_state_raw, type)
+    z_obs = Nx.as_type(z_obs_raw, type)
 
-    q_diag = Nx.take_diagonal(q_matrix)
-    q_sds = Nx.sqrt(Nx.max(q_diag, 0.0))
-    obs_sd = Nx.sqrt(Nx.max(obs_var, 0.0))
+    q_diag = Nx.take_diagonal(q_t)
+    q_sds = Nx.sqrt(Nx.max(q_diag, Nx.tensor(0.0, type: type)))
+    obs_sd = Nx.sqrt(Nx.max(obs_var_t, Nx.tensor(0.0, type: type)))
 
-    keys = Nx.Random.split(key, parts: 2)
-    key_state = take_time_slice_defn(keys, 0)
-    key_obs = take_time_slice_defn(keys, 1)
-
-    {z_state, key_out} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {n_steps, state_dim})
-    {z_obs, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {n_steps})
-
-    cf_obs = Nx.broadcast(0.0, {n_steps})
-
-    {_, _, final_obs, _, _, _, _, _, _} =
-      while {i = 0, prev_state = final_state, obs_acc = cf_obs, z_s = z_state, z_o = z_obs,
-             h_tensor = post_h_tensor, f = f_mat, q_s = q_sds, o_s = obs_sd},
-            i < n_steps do
+    {_, gap_state, _, _, _, _} =
+      while {i = 0, prev_state = final_state, z_s = z_state, f = f_t, q_s = q_sds,
+             gap = gap_steps},
+            i < gap do
         z_s_i = take_time_slice_defn(z_s, i)
+        process_noise = Nx.multiply(z_s_i, q_s)
+        next_state = Nx.add(Nx.dot(f, prev_state), process_noise)
+        {i + 1, next_state, z_s, f, q_s, gap}
+      end
+
+    cf_obs = Nx.broadcast(Nx.tensor(0.0, type: type), {n_steps})
+
+    {_, _, final_obs, _, _, _, _, _, _, _} =
+      while {i = 0, prev_state = gap_state, obs_acc = cf_obs, z_s = z_state, z_o = z_obs,
+             h_tensor = h_t, f = f_t, q_s = q_sds, o_s = obs_sd, gap = gap_steps},
+            i < n_steps do
+        z_s_i = take_time_slice_defn(z_s, i + gap)
         process_noise = Nx.multiply(z_s_i, q_s)
 
         # State transition: x_{t+1} = F * x_t + w_t
@@ -1000,22 +1092,22 @@ defmodule BstsNx.CausalImpact do
 
         new_obs_acc = Nx.put_slice(obs_acc, [i], Nx.new_axis(Nx.squeeze(cf_obs_i), 0))
 
-        {i + 1, next_state, new_obs_acc, z_s, z_o, h_tensor, f, q_s, o_s}
+        {i + 1, next_state, new_obs_acc, z_s, z_o, h_tensor, f, q_s, o_s, gap}
       end
 
-    {final_obs, key_out}
+    final_obs
   end
 
   # Returns a copy of spec with H sliced for the pre-period.
   # Handles: list of per-step tensors, static tensor (rank <= 2), and
   # time-varying tensor (rank 3, shape {t, ...}).
-  defp slice_spec_h(%BstsNx.ModelSpec{} = spec, start_idx, count) do
+  defp slice_spec_h(%BstsNx.ModelSpec{} = spec, start_idx, count, state_dim) do
     case spec.h do
       list when is_list(list) ->
         %{spec | h: Enum.slice(list, start_idx, count)}
 
       %Nx.Tensor{} = h ->
-        if Nx.rank(h) >= 3 do
+        if time_varying_h_tensor?(h, state_dim) do
           %{spec | h: Nx.slice_along_axis(h, start_idx, count, axis: 0)}
         else
           spec
@@ -1026,14 +1118,14 @@ defmodule BstsNx.CausalImpact do
   # Returns a list of H tensors for the post-period forward simulation.
   # Handles: list of per-step tensors, static tensor (rank <= 2), and
   # time-varying tensor (rank 3, shape {t, ...}).
-  defp post_period_h(h, post_start_0based, n_post) do
+  defp post_period_h(h, post_start_0based, n_post, state_dim) do
     case h do
       list when is_list(list) ->
         require_h_coverage!(length(list), post_start_0based, n_post)
         Enum.slice(list, post_start_0based, n_post)
 
       %Nx.Tensor{} = t ->
-        if Nx.rank(t) >= 3 do
+        if time_varying_h_tensor?(t, state_dim) do
           require_h_coverage!(Nx.axis_size(t, 0), post_start_0based, n_post)
 
           # Slice the time axis then split into a list of per-step tensors
@@ -1042,6 +1134,14 @@ defmodule BstsNx.CausalImpact do
         else
           List.duplicate(t, n_post)
         end
+    end
+  end
+
+  defp time_varying_h_tensor?(%Nx.Tensor{} = h, state_dim) do
+    case Nx.rank(h) do
+      2 -> Nx.axis_size(h, 0) > 1 and Nx.axis_size(h, 1) == state_dim
+      rank when rank >= 3 -> true
+      _ -> false
     end
   end
 
@@ -1088,5 +1188,16 @@ defmodule BstsNx.CausalImpact do
   defp split_key_at(keys, idx) do
     Nx.slice_along_axis(keys, idx, 1, axis: 0)
     |> Nx.squeeze(axes: [0])
+  end
+
+  defp derive_estimate_keys(opts) do
+    root_key =
+      case Keyword.get(opts, :key) do
+        %Nx.Tensor{} = key -> key
+        _ -> Nx.Random.key(Keyword.get(opts, :seed, System.os_time()))
+      end
+
+    split_keys = Nx.Random.split(root_key, parts: 2)
+    {split_key_at(split_keys, 0), split_key_at(split_keys, 1)}
   end
 end

@@ -276,27 +276,61 @@ defmodule BstsNx.ShapleyAllocator do
       |> List.to_tuple()
 
     fn sorted_ids ->
-      # Sort by absolute lift descending (contribution rank) rather than by ID,
-      # so that the decay is applied based on contribution magnitude.
-      # NOTE: The ID tiebreaker for equal absolute lifts makes the value
-      # function depend on player labels, which can break the Shapley symmetry
-      # axiom for players with identical lifts. This is accepted for
-      # determinism; in practice, exact lift ties are rare.
-      sorted_ids
-      |> Enum.sort_by(fn id -> {-abs(Map.get(spot_lifts, id, 0.0)), id} end)
-      |> Enum.with_index()
-      |> Enum.reduce(0.0, fn {id, rank}, acc ->
-        lift = Map.get(spot_lifts, id, 0.0)
+      if sorted_ids == [] do
+        0.0
+      else
+        # Rank by absolute lift magnitude. Players tied on magnitude share the
+        # same average rank weight, preserving symmetry for equal-lift players.
+        sorted_pairs =
+          sorted_ids
+          |> Enum.map(fn id -> {id, Map.get(spot_lifts, id, 0.0)} end)
+          |> Enum.sort_by(fn {_id, lift} -> -abs(lift) end)
 
-        decay_weight =
-          if rank <= max_rank do
-            elem(decay_powers, rank)
-          else
-            :math.pow(decay, rank)
-          end
+        {groups, current_group} =
+          Enum.reduce(sorted_pairs, {[], []}, fn pair, {groups_acc, group_acc} ->
+            case group_acc do
+              [] ->
+                {groups_acc, [pair]}
 
-        acc + lift * decay_weight
-      end)
+              [{_id0, lift0} | _] ->
+                {_id, lift} = pair
+
+                if abs(abs(lift) - abs(lift0)) <= 1.0e-12 do
+                  {groups_acc, [pair | group_acc]}
+                else
+                  {[Enum.reverse(group_acc) | groups_acc], [pair]}
+                end
+            end
+          end)
+
+        tie_groups = Enum.reverse([Enum.reverse(current_group) | groups])
+
+        {value, _rank_after} =
+          Enum.reduce(tie_groups, {0.0, 0}, fn group, {acc, start_rank} ->
+            group_size = length(group)
+
+            avg_weight =
+              start_rank..(start_rank + group_size - 1)
+              |> Enum.map(fn rank ->
+                if rank <= max_rank do
+                  elem(decay_powers, rank)
+                else
+                  :math.pow(decay, rank)
+                end
+              end)
+              |> Enum.sum()
+              |> Kernel./(group_size)
+
+            group_value =
+              Enum.reduce(group, 0.0, fn {_id, lift}, group_acc ->
+                group_acc + lift * avg_weight
+              end)
+
+            {acc + group_value, start_rank + group_size}
+          end)
+
+        value
+      end
     end
   end
 
@@ -349,16 +383,21 @@ defmodule BstsNx.ShapleyAllocator do
 
     lambda = :math.log(2) / half_life
 
+    global_t_max =
+      if map_size(spot_times) == 0 do
+        0
+      else
+        spot_times |> Map.values() |> Enum.max()
+      end
+
     fn sorted_ids ->
       if sorted_ids == [] do
         0.0
       else
-        t_max = sorted_ids |> Enum.map(&Map.get(spot_times, &1, 0)) |> Enum.max()
-
         Enum.reduce(sorted_ids, 0.0, fn id, acc ->
           lift = Map.get(spot_lifts, id, 0.0)
           t_i = Map.get(spot_times, id, 0)
-          weight = :math.exp(-lambda * (t_max - t_i))
+          weight = :math.exp(-lambda * (global_t_max - t_i))
           acc + lift * weight
         end)
       end

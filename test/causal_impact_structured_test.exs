@@ -93,15 +93,14 @@ defmodule BstsNx.CausalImpactStructuredTest do
     end
 
     test "allows a gap between pre_period and post_period", %{spec: spec, obs: obs} do
-      result =
-        CausalImpact.estimate_structured(obs, {1, 10}, {12, 20}, spec,
-          num_samples: 5,
-          burn_in: 2,
-          seed: 1
-        )
+      opts = [num_samples: 5, burn_in: 2, seed: 1]
+
+      result = CausalImpact.estimate_structured(obs, {1, 10}, {12, 20}, spec, opts)
+      no_gap = CausalImpact.estimate_structured(obs, {1, 10}, {11, 19}, spec, opts)
 
       assert result.post_period == {12, 20}
       assert length(result.actual) == 9
+      assert result.counterfactual != no_gap.counterfactual
     end
 
     test "raises when post_period exceeds observations", %{spec: spec, obs: obs} do

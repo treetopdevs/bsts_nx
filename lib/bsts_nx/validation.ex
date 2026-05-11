@@ -352,7 +352,8 @@ defmodule BstsNx.Validation do
     - `:noise_sd` — observation noise SD (default: 2.0)
     - `:num_samples` — MCMC samples (default: 200)
     - `:burn_in` — burn-in (default: 100)
-    - `:seed` — PRNG seed for both data generation and MCMC
+    - `:seed` — PRNG seed for data generation
+    - `:mcmc_seed` — optional PRNG seed for MCMC (default: `seed + 1`)
     - `:credible_level` — CI level, 0.0 to 1.0 (default: 0.95)
   """
   @spec known_lift_injection(float(), BstsNx.ModelSpec.t(), keyword()) :: map()
@@ -364,6 +365,7 @@ defmodule BstsNx.Validation do
     num_samples = Keyword.get(opts, :num_samples, 200)
     burn_in = Keyword.get(opts, :burn_in, 100)
     seed = Keyword.get(opts, :seed, 42)
+    mcmc_seed = Keyword.get(opts, :mcmc_seed, seed + 1)
     credible_level = Keyword.get(opts, :credible_level, 0.95)
 
     if not is_integer(n_pre) or n_pre <= 0 do
@@ -419,7 +421,7 @@ defmodule BstsNx.Validation do
     mcmc_opts = [
       num_samples: num_samples,
       burn_in: burn_in,
-      seed: seed
+      seed: mcmc_seed
     ]
 
     result =

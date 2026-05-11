@@ -49,16 +49,14 @@ defmodule BstsNxEdgeCasesTest do
     test "allows a gap between pre_period and post_period" do
       :rand.seed(:exsss, {7, 8, 9})
       observations = Enum.map(1..20, fn _ -> :rand.uniform() * 10 end)
+      opts = [num_samples: 5, burn_in: 2, seed: 11, process_var: 0.5, obs_var: 1.0]
 
-      result =
-        CausalImpact.estimate(observations, {1, 5}, {7, 10},
-          num_samples: 5,
-          burn_in: 2,
-          seed: 11
-        )
+      result = CausalImpact.estimate(observations, {1, 5}, {7, 10}, opts)
+      no_gap = CausalImpact.estimate(observations, {1, 5}, {6, 9}, opts)
 
       assert length(result.actual) == 4
       assert result.post_period == {7, 10}
+      assert result.counterfactual != no_gap.counterfactual
     end
 
     test "works with minimal valid periods (2 pre, 1 post)" do

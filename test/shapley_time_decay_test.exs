@@ -22,12 +22,12 @@ defmodule BstsNx.ShapleyTimeDecayTest do
       assert vf.([]) == 0.0
     end
 
-    test "single spot returns its full lift (no decay relative to self)" do
+    test "single spot is weighted against the group's latest spot time" do
       lifts = %{"a" => 100.0, "b" => 80.0}
       times = %{"a" => 0, "b" => 7}
       vf = ShapleyAllocator.time_weighted_value_function(lifts, times)
 
-      assert_in_delta vf.(["a"]), 100.0, 1.0e-10
+      assert_in_delta vf.(["a"]), 50.0, 1.0e-10
       assert_in_delta vf.(["b"]), 80.0, 1.0e-10
     end
 
@@ -59,11 +59,11 @@ defmodule BstsNx.ShapleyTimeDecayTest do
       val = vf.(["older", "recent"])
       assert_in_delta val, 150.0, 1.0e-10
 
-      # Verify the older spot contributes exactly half
+      # Verify the older spot is discounted relative to the group reference time.
       single_recent = vf.(["recent"])
       single_older = vf.(["older"])
       assert_in_delta single_recent, 100.0, 1.0e-10
-      assert_in_delta single_older, 100.0, 1.0e-10
+      assert_in_delta single_older, 50.0, 1.0e-10
 
       # In coalition, older is discounted by 0.5
       expected_older_contribution = 100.0 * 0.5
@@ -136,11 +136,22 @@ defmodule BstsNx.ShapleyTimeDecayTest do
       total = result |> Map.values() |> Enum.sum()
       assert_in_delta total, grand_coalition_value, 1.0e-10
 
-      # With equal lifts, both single-spot values are 100.0 and
-      # both marginals of adding either to the other are 50.0,
-      # so Shapley values are equal: phi_a = phi_b = 75.0
-      assert_in_delta result["a"], 75.0, 1.0e-10
-      assert_in_delta result["b"], 75.0, 1.0e-10
+      # With a fixed group reference time, the older spot is discounted even
+      # as a singleton. The resulting Shapley split is 50/100.
+      assert_in_delta result["a"], 50.0, 1.0e-10
+      assert_in_delta result["b"], 100.0, 1.0e-10
+    end
+
+    test "a zero-lift recent spot remains a dummy player" do
+      lifts = %{"active" => 100.0, "dummy" => 0.0}
+      times = %{"active" => 0, "dummy" => 7}
+      spots = [make_spot("active", 0, 10), make_spot("dummy", 7, 17)]
+
+      vf = ShapleyAllocator.time_weighted_value_function(lifts, times, half_life: 7.0)
+      result = ShapleyAllocator.exact_shapley(spots, vf)
+
+      assert_in_delta result["dummy"], 0.0, 1.0e-10
+      assert_in_delta result["active"], vf.(["active", "dummy"]), 1.0e-10
     end
 
     test "unknown spot ID contributes zero lift" do

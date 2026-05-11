@@ -197,21 +197,7 @@ defmodule BstsNx.Synthetic.Generator do
     # Solo spot contributions (single-spot counterfactual value)
     solo_lifts =
       Map.new(spots, fn spot ->
-        impulse = build_impulse_signal(total, [spot])
-        effect = apply_effect(impulse, effect_config)
-
-        # Sum effect within the spot's own window
-        lift =
-          effect
-          |> Enum.with_index()
-          |> Enum.reduce(0.0, fn {val, idx}, acc ->
-            if idx >= spot.window_start and idx < spot.window_end do
-              acc + val
-            else
-              acc
-            end
-          end)
-
+        lift = coalition_lift(total, [spot], effect_config)
         {spot.id, lift}
       end)
 
@@ -297,12 +283,8 @@ defmodule BstsNx.Synthetic.Generator do
   end
 
   # Box-Muller transform for a single standard normal draw.
-  # Clamps u1 away from zero to prevent log(0) producing -infinity.
   defp normal_sample(state) do
-    {u1_raw, state} = :rand.uniform_s(state)
-    {u2, state} = :rand.uniform_s(state)
-    u1 = max(u1_raw, 1.0e-300)
-    z = :math.sqrt(-2.0 * :math.log(u1)) * :math.cos(2.0 * :math.pi() * u2)
+    {z, state} = :rand.normal_s(state)
     {z, state}
   end
 

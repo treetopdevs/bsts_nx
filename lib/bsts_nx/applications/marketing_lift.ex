@@ -247,9 +247,14 @@ defmodule BstsNx.Applications.MarketingLift do
     actual_mean =
       if actual_vals == [], do: 0.0, else: Enum.sum(actual_vals) / length(actual_vals)
 
+    effect =
+      analysis.summary
+      |> ModelBuilder.build_effect(n_post)
+      |> effect_with_observation_relative(baseline_mean, n_post)
+
     %{
       campaign: campaign,
-      effect: ModelBuilder.build_effect(analysis.summary, n_post),
+      effect: effect,
       significant?: analysis.significant?,
       baseline_mean: baseline_mean,
       actual_mean: actual_mean,
@@ -374,6 +379,20 @@ defmodule BstsNx.Applications.MarketingLift do
     campaigns
     |> Enum.reduce(0.0, fn c, acc -> acc + c.effect.cumulative_sd * c.effect.cumulative_sd end)
     |> :math.sqrt()
+  end
+
+  defp effect_with_observation_relative(effect, baseline_mean, n_post) do
+    baseline_total_for_window = baseline_mean * n_post
+
+    if abs(baseline_total_for_window) > 1.0e-10 do
+      %{
+        effect
+        | relative: effect.cumulative / baseline_total_for_window,
+          relative_sd: effect.cumulative_sd / abs(baseline_total_for_window)
+      }
+    else
+      %{effect | relative: 0.0, relative_sd: 0.0}
+    end
   end
 
   defp detect_campaign_overlaps(campaigns) do

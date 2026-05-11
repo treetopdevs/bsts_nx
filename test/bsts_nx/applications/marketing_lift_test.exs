@@ -426,8 +426,10 @@ defmodule BstsNx.Applications.MarketingLiftTest do
         baseline_end: 30
       }
 
+      obs = Enum.map(1..40, fn _ -> 10.0 end)
+
       assert_raise ArgumentError, ~r/seasonality/, fn ->
-        MarketingLift.measure_lift([1.0, 2.0, 3.0], campaign, seasonality: 1)
+        MarketingLift.measure_lift(obs, campaign, seasonality: 1)
       end
     end
   end

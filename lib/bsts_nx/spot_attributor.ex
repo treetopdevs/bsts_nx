@@ -106,11 +106,7 @@ defmodule BstsNx.SpotAttributor do
     validate_alpha!(alpha)
     z = BstsNx.Utils.z_score(alpha)
 
-    # Convert to :array for O(1) access
-    obs_arr = :array.from_list(observations)
-    mean_arr = :array.from_list(counterfactual.mean)
-    var_arr = :array.from_list(counterfactual.variance)
-    obs_var = counterfactual.obs_variance
+    prefixes = build_prefixes(observations, counterfactual)
 
     # Build a map of spot_id → spot for lookups
     spot_map = Map.new(spots, fn s -> {s.id, s} end)
@@ -118,7 +114,7 @@ defmodule BstsNx.SpotAttributor do
     # Detect overlap groups
     groups = ShapleyAllocator.detect_overlaps(spots)
 
-    evaluate_attribution(groups, spot_map, obs_arr, mean_arr, var_arr, obs_var, z, opts)
+    evaluate_attribution(groups, spot_map, prefixes, z, opts)
   end
 
   # -------------------------------------------------------------------
@@ -166,7 +162,6 @@ defmodule BstsNx.SpotAttributor do
     validate_alpha!(alpha)
     t = length(observations)
     n_draws = length(counterfactual_draws)
-    zeros_arr = :array.new(t, default: 0.0)
 
     base_counterfactual = %{
       mean: hd(counterfactual_draws),
@@ -183,7 +178,6 @@ defmodule BstsNx.SpotAttributor do
       end
     end)
 
-    obs_arr = :array.from_list(observations)
     spot_map = Map.new(spots, fn s -> {s.id, s} end)
     groups = ShapleyAllocator.detect_overlaps(spots)
 
@@ -198,16 +192,18 @@ defmodule BstsNx.SpotAttributor do
 
     {per_spot_lifts, per_draw_totals} =
       Enum.reduce(counterfactual_draws, {init_lifts, []}, fn draw, {lift_acc, total_acc} ->
-        mean_arr = :array.from_list(draw)
+        prefixes =
+          build_prefixes(observations, %{
+            mean: draw,
+            variance: List.duplicate(0.0, t),
+            obs_variance: obs_variance
+          })
 
         result =
           evaluate_attribution(
             groups,
             spot_map,
-            obs_arr,
-            mean_arr,
-            zeros_arr,
-            obs_variance,
+            prefixes,
             z,
             Keyword.put(opts, :overlap_groups, overlap_groups)
           )
@@ -265,16 +261,15 @@ defmodule BstsNx.SpotAttributor do
       |> Nx.to_flat_list()
 
     attributions =
-      spots
-      |> Enum.with_index()
-      |> Enum.map(fn {spot, idx} ->
+      Enum.zip([spots, means, sds, lowers, uppers, p_positives])
+      |> Enum.map(fn {spot, mean, sd, lower, upper, p_positive} ->
         %{
           spot_id: spot.id,
-          lift: Enum.at(means, idx),
-          lift_sd: Enum.at(sds, idx),
-          lift_lower: Enum.at(lowers, idx),
-          lift_upper: Enum.at(uppers, idx),
-          p_positive: Enum.at(p_positives, idx),
+          lift: mean,
+          lift_sd: sd,
+          lift_lower: lower,
+          lift_upper: upper,
+          p_positive: p_positive,
           window_start: spot.window_start,
           window_end: spot.window_end
         }
@@ -301,7 +296,7 @@ defmodule BstsNx.SpotAttributor do
   end
 
   # Shared attribution core used by `attribute/4` and `attribute_posterior/5`.
-  defp evaluate_attribution(groups, spot_map, obs_arr, mean_arr, var_arr, obs_var, z, opts) do
+  defp evaluate_attribution(groups, spot_map, prefixes, z, opts) do
     overlap_groups =
       Keyword.get_lazy(opts, :overlap_groups, fn ->
         groups
@@ -317,20 +312,13 @@ defmodule BstsNx.SpotAttributor do
           spot = hd(group)
 
           %{lift: lift, variance: var} =
-            compute_window_lift_arr(
-              obs_arr,
-              mean_arr,
-              var_arr,
-              obs_var,
-              spot.window_start,
-              spot.window_end
-            )
+            compute_window_lift_prefix(prefixes, spot.window_start, spot.window_end)
 
           sd = safe_sqrt(var)
           [build_attribution(spot, lift, sd, z)]
         else
           # Multi-spot overlap group — use Shapley allocation
-          allocate_group(group, obs_arr, mean_arr, var_arr, obs_var, spot_map, z, opts)
+          allocate_group(group, prefixes, spot_map, z, opts)
         end
       end)
 
@@ -379,18 +367,9 @@ defmodule BstsNx.SpotAttributor do
   @spec compute_window_lift([float()], counterfactual(), non_neg_integer(), non_neg_integer()) ::
           %{lift: float(), variance: float()}
   def compute_window_lift(observations, counterfactual, window_start, window_end) do
-    obs_arr = :array.from_list(observations)
-    mean_arr = :array.from_list(counterfactual.mean)
-    var_arr = :array.from_list(counterfactual.variance)
-
-    compute_window_lift_arr(
-      obs_arr,
-      mean_arr,
-      var_arr,
-      counterfactual.obs_variance,
-      window_start,
-      window_end
-    )
+    observations
+    |> build_prefixes(counterfactual)
+    |> compute_window_lift_prefix(window_start, window_end)
   end
 
   # -------------------------------------------------------------------
@@ -415,12 +394,9 @@ defmodule BstsNx.SpotAttributor do
   @spec compute_coalition_lift([float()], counterfactual(), [spot()]) ::
           %{lift: float(), variance: float()}
   def compute_coalition_lift(observations, counterfactual, spots) do
-    obs_arr = :array.from_list(observations)
-    mean_arr = :array.from_list(counterfactual.mean)
-    var_arr = :array.from_list(counterfactual.variance)
-    obs_var = counterfactual.obs_variance
-
-    compute_coalition_lift_arr(obs_arr, mean_arr, var_arr, obs_var, spots)
+    observations
+    |> build_prefixes(counterfactual)
+    |> compute_coalition_lift_prefix(spots)
   end
 
   # -------------------------------------------------------------------
@@ -492,44 +468,17 @@ defmodule BstsNx.SpotAttributor do
     spot_map = Map.new(spots, fn s -> {s.id, s} end)
     n = length(spots)
     mode = Keyword.get(opts, :value_fn_mode, if(n <= 6, do: :exact_lift, else: :diminishing))
+    prefixes = build_prefixes(observations, counterfactual)
 
     case mode do
       :exact_lift ->
-        obs_arr = :array.from_list(observations)
-        mean_arr = :array.from_list(counterfactual.mean)
-        var_arr = :array.from_list(counterfactual.variance)
-        obs_var = counterfactual.obs_variance
-
-        fn sorted_ids ->
-          if sorted_ids == [] do
-            0.0
-          else
-            coalition_spots = Enum.map(sorted_ids, fn id -> Map.fetch!(spot_map, id) end)
-
-            %{lift: lift} =
-              compute_coalition_lift_arr(obs_arr, mean_arr, var_arr, obs_var, coalition_spots)
-
-            lift
-          end
-        end
+        exact_value_function(spots, spot_map, prefixes)
 
       :diminishing ->
-        obs_arr = :array.from_list(observations)
-        mean_arr = :array.from_list(counterfactual.mean)
-        var_arr = :array.from_list(counterfactual.variance)
-        obs_var = counterfactual.obs_variance
-
         individual_lifts =
           Map.new(spots, fn spot ->
             %{lift: lift} =
-              compute_window_lift_arr(
-                obs_arr,
-                mean_arr,
-                var_arr,
-                obs_var,
-                spot.window_start,
-                spot.window_end
-              )
+              compute_window_lift_prefix(prefixes, spot.window_start, spot.window_end)
 
             {spot.id, lift}
           end)
@@ -589,43 +538,68 @@ defmodule BstsNx.SpotAttributor do
     observations
   end
 
-  defp compute_window_lift_arr(obs_arr, mean_arr, var_arr, obs_var, window_start, window_end) do
-    if window_start >= window_end do
-      %{lift: 0.0, variance: 0.0}
-    else
-      Enum.reduce(window_start..(window_end - 1), %{lift: 0.0, variance: 0.0}, fn t, acc ->
-        obs_t = :array.get(t, obs_arr)
-        mean_t = :array.get(t, mean_arr)
-        var_t = :array.get(t, var_arr)
-
-        %{
-          lift: acc.lift + (obs_t - mean_t),
-          variance: acc.variance + (var_t + obs_var)
-        }
+  defp build_prefixes(observations, counterfactual) do
+    {lift_prefix, variance_prefix, _lift_running, _variance_running} =
+      Enum.zip([observations, counterfactual.mean, counterfactual.variance])
+      |> Enum.reduce({[0.0], [0.0], 0.0, 0.0}, fn {obs, mean, variance},
+                                                  {lift_acc, variance_acc, lift_running,
+                                                   variance_running} ->
+        next_lift = lift_running + (obs - mean)
+        next_variance = variance_running + variance + counterfactual.obs_variance
+        {[next_lift | lift_acc], [next_variance | variance_acc], next_lift, next_variance}
       end)
-    end
+
+    %{
+      lift: lift_prefix |> Enum.reverse() |> List.to_tuple(),
+      variance: variance_prefix |> Enum.reverse() |> List.to_tuple()
+    }
   end
 
-  defp compute_coalition_lift_arr(obs_arr, mean_arr, var_arr, obs_var, spots) do
+  defp compute_window_lift_prefix(_prefixes, window_start, window_end)
+       when window_start >= window_end do
+    %{lift: 0.0, variance: 0.0}
+  end
+
+  defp compute_window_lift_prefix(prefixes, window_start, window_end) do
+    %{
+      lift: prefix_sum(prefixes.lift, window_start, window_end),
+      variance: prefix_sum(prefixes.variance, window_start, window_end)
+    }
+  end
+
+  defp prefix_sum(prefix, window_start, window_end) do
+    elem(prefix, window_end) - elem(prefix, window_start)
+  end
+
+  defp compute_coalition_lift_prefix(prefixes, spots) do
     # Merge overlapping [window_start, window_end) intervals instead of
     # materializing all individual indices (avoids O(sum of window sizes) memory).
     merged = merge_intervals(spots)
 
     Enum.reduce(merged, %{lift: 0.0, variance: 0.0}, fn {ws, we}, outer_acc ->
-      if ws >= we do
-        outer_acc
-      else
-        Enum.reduce(ws..(we - 1), outer_acc, fn t, acc ->
-          obs_t = :array.get(t, obs_arr)
-          mean_t = :array.get(t, mean_arr)
-          var_t = :array.get(t, var_arr)
+      %{lift: lift, variance: variance} = compute_window_lift_prefix(prefixes, ws, we)
+      %{lift: outer_acc.lift + lift, variance: outer_acc.variance + variance}
+    end)
+  end
 
-          %{
-            lift: acc.lift + (obs_t - mean_t),
-            variance: acc.variance + (var_t + obs_var)
-          }
-        end)
-      end
+  defp exact_value_function(spots, spot_map, prefixes) do
+    ids = spots |> Enum.map(& &1.id) |> Enum.sort()
+
+    memo =
+      ids
+      |> subsets()
+      |> Map.new(fn subset ->
+        coalition_spots = Enum.map(subset, fn id -> Map.fetch!(spot_map, id) end)
+        %{lift: lift} = compute_coalition_lift_prefix(prefixes, coalition_spots)
+        {subset, lift}
+      end)
+
+    fn sorted_ids -> Map.fetch!(memo, Enum.sort(sorted_ids)) end
+  end
+
+  defp subsets(ids) do
+    Enum.reduce(ids, [[]], fn id, acc ->
+      acc ++ Enum.map(acc, fn subset -> [id | subset] |> Enum.sort() end)
     end)
   end
 
@@ -648,10 +622,10 @@ defmodule BstsNx.SpotAttributor do
     |> Enum.reverse()
   end
 
-  defp allocate_group(group, obs_arr, mean_arr, var_arr, obs_var, spot_map, z, opts) do
+  defp allocate_group(group, prefixes, spot_map, z, opts) do
     # Compute coalition lift for the full group
     %{lift: coalition_lift, variance: coalition_var} =
-      compute_coalition_lift_arr(obs_arr, mean_arr, var_arr, obs_var, group)
+      compute_coalition_lift_prefix(prefixes, group)
 
     # Compute individual lifts for building the value function
     n = length(group)
@@ -660,31 +634,13 @@ defmodule BstsNx.SpotAttributor do
     value_fn =
       case mode do
         :exact_lift ->
-          fn sorted_ids ->
-            if sorted_ids == [] do
-              0.0
-            else
-              coalition_spots = Enum.map(sorted_ids, fn id -> Map.fetch!(spot_map, id) end)
-
-              %{lift: lift} =
-                compute_coalition_lift_arr(obs_arr, mean_arr, var_arr, obs_var, coalition_spots)
-
-              lift
-            end
-          end
+          exact_value_function(group, spot_map, prefixes)
 
         :diminishing ->
           individual_lifts =
             Map.new(group, fn spot ->
               %{lift: lift} =
-                compute_window_lift_arr(
-                  obs_arr,
-                  mean_arr,
-                  var_arr,
-                  obs_var,
-                  spot.window_start,
-                  spot.window_end
-                )
+                compute_window_lift_prefix(prefixes, spot.window_start, spot.window_end)
 
               {spot.id, lift}
             end)

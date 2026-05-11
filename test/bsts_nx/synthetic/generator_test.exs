@@ -177,6 +177,19 @@ defmodule BstsNx.Synthetic.GeneratorTest do
       assert_in_delta shapley_sum, coalition_lift, 1.0e-8
     end
 
+    test "single-spot attribution includes carryover lift" do
+      config = %{
+        @minimal_config
+        | noise_sd: 0.0,
+          effect: %{lambda: 0.85, ec: 1.0, slope: 2.0, coefficient: 10.0}
+      }
+
+      result = Generator.generate(config)
+      shapley_sum = result.ground_truth.spot_attributions |> Map.values() |> Enum.sum()
+
+      assert_in_delta shapley_sum, result.ground_truth.total_lift, 1.0e-8
+    end
+
     test "generated controls track configured correlation direction" do
       config = %{
         @minimal_config
