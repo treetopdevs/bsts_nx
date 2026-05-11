@@ -258,24 +258,27 @@ defmodule BstsNx.KalmanFilter do
           number
         ) :: {Nx.t(), Nx.t()}
   def filter_defn(observations, f, h, q, r, x0, p0) do
+    type = {:f, 64}
+    obs_t = Nx.as_type(observations, type)
+
     # wrapper to ensure h is a vector of same length as observations.  Allows constant or vector h.
-    t = Nx.axis_size(observations, 0)
-    f_t = to_tensor(f)
+    t = Nx.axis_size(obs_t, 0)
+    f_t = to_tensor(f) |> Nx.as_type(type)
     # convert h to vector: if scalar, broadcast; otherwise accept a length-t vector
     # or a {t, 1} column vector for convenience.
     h_vec =
       cond do
         is_number(h) ->
-          Nx.broadcast(to_tensor(h), {t})
+          Nx.broadcast(to_tensor(h) |> Nx.as_type(type), {t})
 
         match?(%Nx.Tensor{}, h) and Nx.rank(h) == 0 ->
-          Nx.broadcast(h, {t})
+          Nx.broadcast(Nx.as_type(h, type), {t})
 
         match?(%Nx.Tensor{}, h) and Nx.rank(h) == 1 and Nx.axis_size(h, 0) == t ->
-          h
+          Nx.as_type(h, type)
 
         match?(%Nx.Tensor{}, h) and Nx.rank(h) == 2 and Nx.shape(h) == {t, 1} ->
-          Nx.squeeze(h, axes: [1])
+          h |> Nx.as_type(type) |> Nx.squeeze(axes: [1])
 
         match?(%Nx.Tensor{}, h) ->
           raise ArgumentError,
@@ -286,12 +289,12 @@ defmodule BstsNx.KalmanFilter do
       end
 
     # convert q, r, x0, p0 to scalar tensors outside defn
-    q_t = to_tensor(q)
-    r_t = to_tensor(r)
-    x0_t = to_tensor(x0)
-    p0_t = to_tensor(p0)
+    q_t = to_tensor(q) |> Nx.as_type(type)
+    r_t = to_tensor(r) |> Nx.as_type(type)
+    x0_t = to_tensor(x0) |> Nx.as_type(type)
+    p0_t = to_tensor(p0) |> Nx.as_type(type)
     # call compiled function with vector h
-    filter_defn_vec(observations, f_t, h_vec, q_t, r_t, x0_t, p0_t)
+    filter_defn_vec(obs_t, f_t, h_vec, q_t, r_t, x0_t, p0_t)
   end
 
   @doc """
@@ -318,7 +321,7 @@ defmodule BstsNx.KalmanFilter do
           number | Nx.t()
         ) :: {Nx.t(), Nx.t()}
   def filter_defn_multi(observations, f, h, q, r, x0, p0) do
-    type = {:f, 32}
+    type = {:f, 64}
     obs_t = Nx.as_type(observations, type)
     t = Nx.axis_size(obs_t, 0)
     f_t = to_tensor(f) |> Nx.as_type(type)
@@ -334,9 +337,11 @@ defmodule BstsNx.KalmanFilter do
   # compiled defn that accepts vector h for each time step and supports missing data via NaN sentinel.
   Nx.Defn.defn filter_defn_vec(observations, f_t, h_vec, q_t, r_t, x0, p0) do
     t = Nx.axis_size(observations, 0)
+    zero_x = Nx.tensor(0.0, type: Nx.type(x0))
+    zero_p = Nx.tensor(0.0, type: Nx.type(p0))
     # initialise accumulators
-    xs = Nx.broadcast(0.0, {t})
-    ps = Nx.broadcast(0.0, {t})
+    xs = Nx.broadcast(zero_x, {t})
+    ps = Nx.broadcast(zero_p, {t})
     # loop over observations
     #
     # Note: in newer Nx versions, values referenced inside `while` must be part
@@ -379,8 +384,10 @@ defmodule BstsNx.KalmanFilter do
   Nx.Defn.defn filter_defn_multi_impl(observations, f_t, h_t, q_t, r_t, x0, p0) do
     t = Nx.axis_size(observations, 0)
     n = Nx.axis_size(x0, 0)
-    xs = Nx.broadcast(0.0, {t, n})
-    ps = Nx.broadcast(0.0, {t, n, n})
+    zero_x = Nx.tensor(0.0, type: Nx.type(x0))
+    zero_p = Nx.tensor(0.0, type: Nx.type(p0))
+    xs = Nx.broadcast(zero_x, {t, n})
+    ps = Nx.broadcast(zero_p, {t, n, n})
     i_n = Nx.eye(n, type: Nx.type(p0))
 
     {_, _, _, xs_out, ps_out, _, _, _, _, _, _} =
@@ -486,16 +493,12 @@ defmodule BstsNx.KalmanFilter do
               end
 
               # Time-varying scalar coefficients.
-              h |> Nx.to_flat_list() |> Enum.map(&Nx.tensor/1)
+              h_type = Nx.type(h)
+              h |> Nx.to_flat_list() |> Enum.map(&Nx.tensor(&1, type: h_type))
 
             rank == 2 and obs_dim == 1 and len == t_len ->
               # Scalar-observation time-varying H encoded as {T, n}
-              cols = Nx.axis_size(h, 1)
-
-              h
-              |> Nx.to_flat_list()
-              |> Enum.chunk_every(cols)
-              |> Enum.map(&Nx.tensor/1)
+              h |> Nx.to_batched(1) |> Enum.map(&Nx.squeeze(&1, axes: [0]))
 
             rank == 2 ->
               # Rank-2 tensors are static observation matrices by default.
@@ -511,9 +514,7 @@ defmodule BstsNx.KalmanFilter do
 
             len == t_len ->
               # Rank-3+ time-varying matrix H_t over first axis
-              h
-              |> Nx.to_list()
-              |> Enum.map(&Nx.tensor/1)
+              h |> Nx.to_batched(1) |> Enum.map(&Nx.squeeze(&1, axes: [0]))
 
             true ->
               raise ArgumentError,

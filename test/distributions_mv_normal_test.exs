@@ -13,7 +13,10 @@ defmodule BstsNxDistributionsMvNormalTest do
     {sample_direct, key_b} = Distributions.mv_normal_sample(key, mean, cov)
 
     assert Nx.shape(sample_with_chol) == {2}
+
     assert Nx.all_close(sample_with_chol, sample_direct, atol: 1.0e-8, rtol: 1.0e-8)
+           |> Nx.to_number() == 1
+
     assert Nx.to_flat_list(key_a) == Nx.to_flat_list(key_b)
   end
 end

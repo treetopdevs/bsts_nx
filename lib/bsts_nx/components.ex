@@ -17,6 +17,7 @@ defmodule BstsNx.Components do
   """
 
   alias BstsNx.ModelSpec
+  require Logger
 
   @doc """
   Constructs a local level component for a univariate time series.
@@ -478,6 +479,7 @@ defmodule BstsNx.Components do
   @spec compose_specs(ModelSpec.t(), ModelSpec.t()) :: ModelSpec.t()
   def compose_specs(%ModelSpec{} = spec1, %ModelSpec{} = spec2) do
     n1 = Nx.axis_size(spec1.f, 0)
+    warn_if_observation_priors_differ(spec1, spec2)
 
     # Block-diagonal F
     f = BstsNx.StateSpace.block_diag([spec1.f, spec2.f])
@@ -515,6 +517,19 @@ defmodule BstsNx.Components do
       obs_prior_shape: obs_prior_shape,
       obs_prior_scale: obs_prior_scale
     }
+  end
+
+  defp warn_if_observation_priors_differ(spec1, spec2) do
+    different_obs_var? = spec1.obs_var != spec2.obs_var
+    different_shape? = spec1.obs_prior_shape != spec2.obs_prior_shape
+    different_scale? = spec1.obs_prior_scale != spec2.obs_prior_scale
+
+    if different_obs_var? or different_shape? or different_scale? do
+      Logger.warning(
+        "compose_specs/2 keeps observation variance priors from spec1; " <>
+          "spec2 observation settings were ignored"
+      )
+    end
   end
 
   defp compose_regression(nil, nil, _n1), do: nil

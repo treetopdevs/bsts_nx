@@ -51,10 +51,11 @@ defmodule BstsNx.Utils do
 
   defp cholesky_with_jitter(mat) do
     dim = Nx.shape(mat) |> elem(0)
-    eye = Nx.eye(dim)
+    eye = Nx.eye(dim, type: Nx.type(mat))
+    scale = cholesky_scale(mat, dim)
 
-    Enum.reduce_while([1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3], nil, fn jitter_scale, _acc ->
-      jitter = Nx.multiply(eye, jitter_scale)
+    Enum.reduce_while([1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3], nil, fn rel_jitter, _acc ->
+      jitter = Nx.multiply(eye, rel_jitter * scale)
 
       chol =
         try do
@@ -75,7 +76,24 @@ defmodule BstsNx.Utils do
           end
       end
     end) ||
-      raise ArgumentError, "Cholesky factorisation failed even with jitter up to 1e-3"
+      raise ArgumentError,
+            "Cholesky factorisation failed even with jitter up to 1e-3 (relative scale=#{scale})"
+  end
+
+  defp cholesky_scale(mat, dim) do
+    raw_trace =
+      mat
+      |> Nx.take_diagonal()
+      |> Nx.sum()
+      |> Nx.to_number()
+
+    trace =
+      case raw_trace do
+        v when is_number(v) and v == v and abs(v) < 1.0e300 -> abs(v)
+        _ -> 1.0
+      end
+
+    max(trace / max(dim, 1), 1.0e-12)
   end
 
   @doc """
@@ -222,7 +240,7 @@ defmodule BstsNx.Utils do
 
   defp scalar_divide_with_jitter_fallback(denom, b) do
     Enum.reduce_while([1.0e-8, 1.0e-7, 1.0e-6, 1.0e-5, 1.0e-4, 1.0e-3], nil, fn jitter, _acc ->
-      adjusted = denom + jitter
+      adjusted = denom + scalar_jitter_sign(denom) * jitter
 
       if abs(adjusted) < 1.0e-15 do
         {:cont, nil}
@@ -245,6 +263,9 @@ defmodule BstsNx.Utils do
         Nx.broadcast(Nx.tensor(0.0), Nx.shape(b))
       )
   end
+
+  defp scalar_jitter_sign(denom) when denom < 0.0, do: -1.0
+  defp scalar_jitter_sign(_denom), do: 1.0
 
   defp pinv_fallback(a, b) do
     result =

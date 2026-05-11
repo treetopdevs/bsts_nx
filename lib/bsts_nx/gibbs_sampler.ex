@@ -23,6 +23,7 @@ defmodule BstsNx.GibbsSampler do
   deterministic PRNG control are supported throughout.
   """
 
+  alias BstsNx.Distributions
   alias BstsNx.KalmanFilter
   alias BstsNx.ModelSpec
   import BstsNx.Utils, only: [to_tensor: 1, missing_observation?: 1, compat_dot: 2]
@@ -629,7 +630,7 @@ defmodule BstsNx.GibbsSampler do
         scale_r = safe_to_number(spec.obs_prior_scale) + safe_to_number(obs_ss) / 2
 
         {r_sample, next_key} =
-          BstsNx.Distributions.inv_gamma_sample_with_key(shape_r, scale_r, key_after_q)
+          Distributions.inv_gamma_sample_defn(shape_r, scale_r, key_after_q)
 
         acc2 =
           if iter > burn_in and rem(iter - burn_in, thin) == 0 do
@@ -781,7 +782,7 @@ defmodule BstsNx.GibbsSampler do
           scale_r = safe_to_number(spec.obs_prior_scale) + safe_to_number(obs_ss) / 2
 
           {r_sample, key_next} =
-            BstsNx.Distributions.inv_gamma_sample_with_key(shape_r, scale_r, key_after_beta)
+            Distributions.inv_gamma_sample_defn(shape_r, scale_r, key_after_beta)
 
           acc2 =
             if iter > burn_in and rem(iter - burn_in, thin) == 0 do
@@ -1369,13 +1370,33 @@ defmodule BstsNx.GibbsSampler do
   # Resamples each Q diagonal entry from its inverse-gamma posterior.
   # Returns {list_of_{dim_index, new_value}, next_key}.
   defp resample_q_components(q_specs, per_dim_ss, num_diffs, key) do
-    Enum.map_reduce(q_specs, key, fn qs, key_acc ->
-      ss = Map.get(per_dim_ss, qs.dim_index, 0.0) |> safe_to_number()
-      shape = safe_to_number(qs.prior_shape) + num_diffs / 2
-      scale = safe_to_number(qs.prior_scale) + ss / 2
-      {sample, key_next} = BstsNx.Distributions.inv_gamma_sample_with_key(shape, scale, key_acc)
-      {{qs.dim_index, safe_to_number(sample)}, key_next}
-    end)
+    case q_specs do
+      [] ->
+        {[], key}
+
+      _ ->
+        dim_indices = Enum.map(q_specs, & &1.dim_index)
+
+        shapes =
+          Enum.map(q_specs, fn qs ->
+            safe_to_number(qs.prior_shape) + num_diffs / 2
+          end)
+
+        scales =
+          Enum.map(q_specs, fn qs ->
+            ss = Map.get(per_dim_ss, qs.dim_index, 0.0) |> safe_to_number()
+            safe_to_number(qs.prior_scale) + ss / 2
+          end)
+
+        {samples, next_key} =
+          Distributions.inv_gamma_sample_defn(
+            Nx.tensor(shapes, type: {:f, 64}),
+            Nx.tensor(scales, type: {:f, 64}),
+            key
+          )
+
+        {Enum.zip(dim_indices, Nx.to_flat_list(samples)), next_key}
+    end
   end
 
   defp safe_to_number(%Nx.Tensor{} = t), do: Nx.to_number(t) |> safe_to_number()
@@ -1467,14 +1488,21 @@ defmodule BstsNx.GibbsSampler do
   end
 
   defp validate_q_specs!(q_specs, state_dim) do
-    Enum.each(q_specs, fn qs ->
-      dim_index = Map.get(qs, :dim_index)
+    dim_indices =
+      Enum.map(q_specs, fn qs ->
+        dim_index = Map.get(qs, :dim_index)
 
-      if not is_integer(dim_index) or dim_index < 0 or dim_index >= state_dim do
-        raise ArgumentError,
-              "q_specs dim_index must be in [0, #{state_dim - 1}], got: #{inspect(dim_index)}"
-      end
-    end)
+        if not is_integer(dim_index) or dim_index < 0 or dim_index >= state_dim do
+          raise ArgumentError,
+                "q_specs dim_index must be in [0, #{state_dim - 1}], got: #{inspect(dim_index)}"
+        end
+
+        dim_index
+      end)
+
+    if length(dim_indices) != MapSet.size(MapSet.new(dim_indices)) do
+      raise ArgumentError, "q_specs dim_index values must be unique, got: #{inspect(dim_indices)}"
+    end
   end
 
   # Converts a per-step H tensor into a row vector for scalar-observation residuals.
@@ -1517,7 +1545,7 @@ defmodule BstsNx.GibbsSampler do
     |> Enum.map(fn y ->
       if missing_observation?(y), do: nan, else: observation_to_number(y)
     end)
-    |> Nx.tensor(type: {:f, 32})
+    |> Nx.tensor(type: {:f, 64})
   end
 
   defp scalar_tensor_list(tensor) do
@@ -1533,10 +1561,9 @@ defmodule BstsNx.GibbsSampler do
   end
 
   defp observed_transition_count(observations) do
-    observations
-    |> Enum.map(&(not missing_observation?(&1)))
-    |> Enum.chunk_every(2, 1, :discard)
-    |> Enum.count(fn [prev_present?, next_present?] -> prev_present? and next_present? end)
+    # Structured samplers impute the full latent trajectory via simulation smoother.
+    # Therefore process residuals use all adjacent transitions, not only observed pairs.
+    max(length(observations) - 1, 0)
   end
 
   defp to_tuple_matrix(rows) do
@@ -1641,11 +1668,15 @@ defmodule BstsNx.GibbsSampler do
     shape_r = prior_shape + t_steps / 2
     scale_r = prior_scale + obs_ss / 2
 
-    {q_sample, key_after_q} =
-      BstsNx.Distributions.inv_gamma_sample_with_key(shape_q, scale_q, key)
+    {samples, next_key} =
+      Distributions.inv_gamma_sample_defn(
+        Nx.tensor([shape_q, shape_r], type: {:f, 64}),
+        Nx.tensor([scale_q, scale_r], type: {:f, 64}),
+        key
+      )
 
-    {r_sample, next_key} =
-      BstsNx.Distributions.inv_gamma_sample_with_key(shape_r, scale_r, key_after_q)
+    q_sample = samples |> Nx.slice([0], [1]) |> Nx.squeeze(axes: [0])
+    r_sample = samples |> Nx.slice([1], [1]) |> Nx.squeeze(axes: [0])
 
     {q_sample, r_sample, next_key}
   end

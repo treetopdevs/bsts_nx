@@ -61,7 +61,12 @@ defmodule BstsNx.Smoother do
     ps_t = Nx.as_type(ps, {:f, 64})
     f_t = Nx.as_type(f, {:f, 64})
     q_t = Nx.as_type(q, {:f, 64})
-    rts_defn_matrix_impl(xs_t, ps_t, f_t, q_t)
+
+    if backend_supports_lu?() do
+      rts_defn_matrix_impl(xs_t, ps_t, f_t, q_t)
+    else
+      rts_defn_matrix_impl_pinv(xs_t, ps_t, f_t, q_t)
+    end
   end
 
   Nx.Defn.defn rts_defn_impl(xs, ps, f, q) do
@@ -159,6 +164,58 @@ defmodule BstsNx.Smoother do
     {sxs_out, sps_out}
   end
 
+  Nx.Defn.defn rts_defn_matrix_impl_pinv(xs, ps, f, q) do
+    t = Nx.axis_size(xs, 0)
+    n = Nx.axis_size(xs, 1)
+
+    sxs = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(xs)), {t, n})
+    sps = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(ps)), {t, n, n})
+    i_n = Nx.eye(n, type: Nx.type(ps))
+    eps = Nx.tensor(1.0e-6, type: Nx.type(ps))
+
+    last_idx = t - 1
+    sxs = Nx.put_slice(sxs, [last_idx, 0], Nx.new_axis(take_vector_at(xs, last_idx), 0))
+    sps = Nx.put_slice(sps, [last_idx, 0, 0], Nx.new_axis(take_matrix_at(ps, last_idx), 0))
+
+    num_steps = t - 1
+
+    {_, sxs_out, sps_out, _, _, _, _, _, _} =
+      while {k = Nx.tensor(0), sxs_acc = sxs, sps_acc = sps, xs_in = xs, ps_in = ps, f_in = f,
+             q_in = q, i_eye = i_n, eps_in = eps},
+            k < num_steps do
+        i = last_idx - 1 - k
+
+        x_filt = take_vector_at(xs_in, i)
+        p_filt = take_matrix_at(ps_in, i)
+
+        x_pred_next = Nx.dot(f_in, x_filt)
+        p_pred_next = Nx.add(Nx.dot(Nx.dot(f_in, p_filt), Nx.transpose(f_in)), q_in)
+
+        p_pred_next_reg = Nx.add(p_pred_next, Nx.multiply(i_eye, eps_in))
+        rhs = Nx.dot(f_in, p_filt)
+        c = Nx.dot(Nx.LinAlg.pinv(p_pred_next_reg), rhs) |> Nx.transpose()
+
+        x_smooth_next = take_vector_at(sxs_acc, i + 1)
+        p_smooth_next = take_matrix_at(sps_acc, i + 1)
+
+        x_smooth = Nx.add(x_filt, Nx.dot(c, Nx.subtract(x_smooth_next, x_pred_next)))
+
+        p_smooth =
+          Nx.add(
+            p_filt,
+            Nx.dot(Nx.dot(c, Nx.subtract(p_smooth_next, p_pred_next)), Nx.transpose(c))
+          )
+          |> then(&Nx.multiply(Nx.add(&1, Nx.transpose(&1)), 0.5))
+
+        sxs_new = Nx.put_slice(sxs_acc, [i, 0], Nx.new_axis(x_smooth, 0))
+        sps_new = Nx.put_slice(sps_acc, [i, 0, 0], Nx.new_axis(p_smooth, 0))
+
+        {k + 1, sxs_new, sps_new, xs_in, ps_in, f_in, q_in, i_eye, eps_in}
+      end
+
+    {sxs_out, sps_out}
+  end
+
   @doc """
   Compiled RTS backward smoother that also returns lag-one cross-covariances.
 
@@ -201,12 +258,16 @@ defmodule BstsNx.Smoother do
 
   Nx.Defn.defn rts_defn_with_lag1_impl(xs, ps, f, q) do
     t = Nx.axis_size(xs, 0)
-    # Initialize output accumulators
-    sxs = Nx.broadcast(Nx.tensor(0.0), {t})
-    sps = Nx.broadcast(Nx.tensor(0.0), {t})
+    # Match accumulator types to xs/ps to prevent f32/f64 mismatch in the while loop.
+    out_type = Nx.type(xs)
+    sxs = Nx.broadcast(Nx.tensor(0.0, type: out_type), {t})
+    sps = Nx.broadcast(Nx.tensor(0.0, type: out_type), {t})
     # Allocate lag1 at size {t} for shape compatibility in defn.
     # Only indices 0..t-2 are meaningful; index t-1 is zero padding.
-    lag1 = Nx.broadcast(Nx.tensor(0.0), {t})
+    lag1 = Nx.broadcast(Nx.tensor(0.0, type: out_type), {t})
+    # Cast f and q to the same type to keep the while body consistent.
+    f = Nx.as_type(f, out_type)
+    q = Nx.as_type(q, out_type)
 
     # Set the last element to the filtered value (smoother boundary condition)
     last_idx = t - 1
@@ -415,10 +476,7 @@ defmodule BstsNx.Smoother do
 
     x_T_mean = take_vector_at(filtered_xs, last_idx)
     p_T_cov = take_matrix_at(filtered_ps, last_idx) |> symmetrize()
-
-    # safe Cholesky proxy: P = P + epsilon * I
-    p_T_reg = Nx.add(p_T_cov, Nx.multiply(i_n, eps_reg))
-    chol_T = Nx.LinAlg.cholesky(p_T_reg)
+    chol_T = safe_cholesky_or_zero_defn(p_T_cov, i_n, eps_reg)
 
     eps_T = take_vector_at(eps_tensor, last_idx)
     x_T = Nx.add(x_T_mean, Nx.dot(chol_T, eps_T))
@@ -452,8 +510,7 @@ defmodule BstsNx.Smoother do
         j_p_jt = Nx.dot(Nx.dot(j, p_pred_next), Nx.transpose(j))
         cov = Nx.subtract(p_filt, j_p_jt) |> symmetrize()
 
-        cov_reg = Nx.add(cov, Nx.multiply(i_eye, c_eps))
-        chol_i = Nx.LinAlg.cholesky(cov_reg)
+        chol_i = safe_cholesky_or_zero_defn(cov, i_eye, c_eps)
 
         eps_i = take_vector_at(eps_in, i)
         x_i = Nx.add(mean, Nx.dot(chol_i, eps_i))
@@ -480,8 +537,7 @@ defmodule BstsNx.Smoother do
 
     x_T_mean = take_vector_at(filtered_xs, last_idx)
     p_T_cov = take_matrix_at(filtered_ps, last_idx) |> symmetrize()
-    p_T_reg = Nx.add(p_T_cov, Nx.multiply(i_n, eps_reg))
-    chol_T = Nx.LinAlg.cholesky(p_T_reg)
+    chol_T = safe_cholesky_or_zero_defn(p_T_cov, i_n, eps_reg)
 
     eps_T = take_vector_at(eps_tensor, last_idx)
     x_T = Nx.add(x_T_mean, Nx.dot(chol_T, eps_T))
@@ -511,8 +567,7 @@ defmodule BstsNx.Smoother do
         j_p_jt = Nx.dot(Nx.dot(j, p_pred_next), Nx.transpose(j))
         cov = Nx.subtract(p_filt, j_p_jt) |> symmetrize()
 
-        cov_reg = Nx.add(cov, Nx.multiply(i_eye, c_eps))
-        chol_i = Nx.LinAlg.cholesky(cov_reg)
+        chol_i = safe_cholesky_or_zero_defn(cov, i_eye, c_eps)
 
         eps_i = take_vector_at(eps_in, i)
         x_i = Nx.add(mean, Nx.dot(chol_i, eps_i))
@@ -811,6 +866,30 @@ defmodule BstsNx.Smoother do
   end
 
   Nx.Defn.defnp(symmetrize(matrix), do: Nx.multiply(Nx.add(matrix, Nx.transpose(matrix)), 0.5))
+
+  Nx.Defn.defnp safe_cholesky_or_zero_defn(cov, i_eye, eps) do
+    cov_reg = regularize_cov_for_cholesky(cov, i_eye, eps)
+    chol_raw = Nx.LinAlg.cholesky(cov_reg)
+    raw_has_nan = Nx.any(Nx.is_nan(chol_raw))
+
+    diag = Nx.take_diagonal(cov_reg)
+    diag_scale = Nx.max(Nx.mean(Nx.abs(diag)), eps)
+    retry_shift = Nx.add(Nx.multiply(diag_scale, 1.0e-6), Nx.multiply(eps, 1000.0))
+    cov_retry = Nx.add(cov_reg, Nx.multiply(i_eye, retry_shift))
+    chol_retry = Nx.LinAlg.cholesky(cov_retry)
+    fallback = Nx.multiply(i_eye, Nx.sqrt(Nx.max(retry_shift, eps)))
+    chol_retry = Nx.select(Nx.is_nan(chol_retry), fallback, chol_retry)
+
+    Nx.select(raw_has_nan, chol_retry, chol_raw)
+  end
+
+  Nx.Defn.defnp regularize_cov_for_cholesky(cov, i_eye, eps) do
+    cov_sym = symmetrize(cov)
+    diag = Nx.take_diagonal(cov_sym)
+    min_diag = Nx.reduce_min(diag)
+    shift = Nx.max(Nx.subtract(eps, min_diag), Nx.tensor(0.0, type: Nx.type(cov_sym)))
+    Nx.add(cov_sym, Nx.multiply(i_eye, Nx.add(eps, shift)))
+  end
 
   defp safe_cholesky_or_zero(cov, _context) do
     cov_sym = symmetrize(cov)

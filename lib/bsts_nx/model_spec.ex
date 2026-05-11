@@ -154,21 +154,27 @@ defmodule BstsNx.ModelSpec do
   end
 
   defp validate_q_specs!(q_specs, n) when is_list(q_specs) do
-    Enum.each(q_specs, fn qs ->
-      dim_index = Map.get(qs, :dim_index)
-      prior_shape = Map.get(qs, :prior_shape)
-      prior_scale = Map.get(qs, :prior_scale)
-      initial = Map.get(qs, :initial)
+    dim_indices =
+      Enum.map(q_specs, fn qs ->
+        dim_index = Map.get(qs, :dim_index)
+        prior_shape = Map.get(qs, :prior_shape)
+        prior_scale = Map.get(qs, :prior_scale)
+        initial = Map.get(qs, :initial)
 
-      if not is_integer(dim_index) or dim_index < 0 or dim_index >= n do
-        raise ArgumentError,
-              "q_specs dim_index must be in [0, #{n - 1}], got: #{inspect(dim_index)}"
-      end
+        if not is_integer(dim_index) or dim_index < 0 or dim_index >= n do
+          raise ArgumentError,
+                "q_specs dim_index must be in [0, #{n - 1}], got: #{inspect(dim_index)}"
+        end
 
-      validate_non_negative_number!(initial, :initial)
-      validate_positive_number!(prior_shape, :prior_shape)
-      validate_positive_number!(prior_scale, :prior_scale)
-    end)
+        validate_non_negative_number!(initial, :initial)
+        validate_positive_number!(prior_shape, :prior_shape)
+        validate_positive_number!(prior_scale, :prior_scale)
+        dim_index
+      end)
+
+    if length(dim_indices) != MapSet.size(MapSet.new(dim_indices)) do
+      raise ArgumentError, "q_specs dim_index values must be unique, got: #{inspect(dim_indices)}"
+    end
   end
 
   defp validate_q_specs!(other, _n) do

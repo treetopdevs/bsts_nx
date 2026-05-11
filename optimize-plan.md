@@ -20,7 +20,7 @@ This section is the tracker of record for completion status.
 - [~] PR 4: Close remaining Tier 3/4 medium work
 - [~] PR 5: Tier 5A compiled multi-dimensional filter
 - [~] PR 6: Tier 5B compiled multi-dimensional RTS smoother
-- [ ] PR 7: Tier 5C pure-Nx gamma / inv-gamma defn path
+- [x] PR 7: Tier 5C pure-Nx gamma / inv-gamma defn path
 - [ ] PR 8: Tier 5D spike-and-slab rank-1 updates + closeout
 
 ### Tier Snapshot
@@ -29,7 +29,7 @@ This section is the tracker of record for completion status.
 - [~] Tier 2: Partial
 - [~] Tier 3: Mostly complete
 - [~] Tier 4: Mostly complete
-- [~] Tier 5: Partial API surface landed, integration still pending
+- [~] Tier 5: Partial; PR 5/6/7 paths are wired, PR 8 remains deferred
 
 Legend: `[x]` done, `[~]` partial, `[ ]` pending.
 
@@ -339,10 +339,15 @@ These changes target code that runs `iterations × T` times (thousands to millio
 
 ### 5C. Pure-Nx defn gamma sampler
 
+**Status:** Complete in PR 7.
+
 **File:** `lib/bsts_nx/distributions.ex` (new implementation)
-- Marsaglia-Tsang algorithm using `Nx.Random.normal` + `Nx.Random.uniform`
-- Would enable batch GPU sampling and full JIT compilation of the sampling step
-- Tradeoff: Needs explicit f64 typing to match current Erlang float precision; significant validation effort
+- [x] Added `gamma_sample_defn/4` using the Marsaglia-Tsang algorithm with `Nx.Random.normal` + `Nx.Random.uniform`
+- [x] Reworked `inv_gamma_sample_defn/4` to reuse the pure-Nx gamma kernel and apply inverse-gamma scaling/truncation in defn
+- [x] Uses explicit `{:f, 64}` typing for gamma and inverse-gamma parameters/results, including small-shape coverage below `alpha < 0.5`
+- [x] Wired scalar and structured Gibbs variance resampling through the defn inverse-gamma path, batching scalar `{Q, R}` and structured Q-component draws
+- [x] Added targeted distribution and Gibbs regression tests
+- [ ] Deferred: full end-to-end MCMC-loop fusion remains out of scope for PR 7; posterior sufficient statistics are still computed by the surrounding sampler code
 
 ### 5D. [NEW] Spike-and-slab XtX rank-1 updates
 
@@ -392,7 +397,7 @@ spec = BstsNx.Components.local_linear_trend_spec(0.1, 0.01)
 - **No precision impact:** Tiers 1-4 (identical arithmetic, just in tensor form)
 - **Minor f32 vs f64:** Tier 5A/5B defn paths default to f32; explicitly use `Nx.as_type(:f64)` for inputs if precision matters
 - **Potential accumulation error:** Tier 3D Shapley value caching — none (exact same computation, just cached)
-- **Tier 5C (defn gamma):** needs f64 typing validation for small alpha < 0.5
+- **Tier 5C (defn gamma):** complete in PR 7 with explicit f64 typing and targeted small-alpha validation
 - **Welford's algorithm** (4B): More numerically stable than two-pass for large n (avoids catastrophic cancellation)
 - **Vectorized Pearson** (3A): Numerically equivalent; uses same formula, just batched
 

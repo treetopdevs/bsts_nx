@@ -21,7 +21,7 @@ defmodule BstsNx.Distributions do
 
   import BstsNx.Utils, only: [to_tensor: 1, derive_exsss_seed: 1]
   require Nx.Defn
-  @gamma_rejection_max_iters 10_000
+  @gamma_rejection_max_iters 50_000
 
   @doc """
   Draws a sample from the inverse–gamma distribution with shape parameter
@@ -117,6 +117,39 @@ defmodule BstsNx.Distributions do
   end
 
   @doc """
+  Draws gamma sample(s) using a pure `Nx.Defn` Marsaglia-Tsang path.
+
+  `alpha` is the shape and `scale` is the gamma scale parameter. Inputs may
+  be numbers, lists or tensors, but shapes must match exactly; broadcasting is
+  not performed. Returns `{sample, next_key}` for functional PRNG chaining.
+  """
+  @spec gamma_sample_defn(number | list | Nx.t(), number | list | Nx.t(), Nx.t(), keyword()) ::
+          {Nx.t(), Nx.t()}
+  def gamma_sample_defn(alpha, scale, key, opts \\ []) do
+    if Keyword.has_key?(opts, :key) do
+      raise ArgumentError, "pass the PRNG key as the third argument to gamma_sample_defn/4"
+    end
+
+    validate_prng_key_shape!(key)
+    a = to_tensor(alpha) |> Nx.as_type({:f, 64})
+    s = to_tensor(scale) |> Nx.as_type({:f, 64})
+
+    unless Nx.shape(a) == Nx.shape(s) do
+      raise ArgumentError, "alpha and scale must have the same shape; broadcasting not supported"
+    end
+
+    validate_positive_tensor_param!(a, :alpha, "gamma sampling")
+    validate_positive_tensor_param!(s, :scale, "gamma sampling")
+
+    flat_size = Nx.size(a)
+    a_flat = Nx.reshape(a, {flat_size})
+    s_flat = Nx.reshape(s, {flat_size})
+    {sample_flat, next_key} = gamma_sample_defn_impl(a_flat, s_flat, key)
+
+    {Nx.reshape(sample_flat, Nx.shape(a)), next_key}
+  end
+
+  @doc """
   Draws inverse-gamma sample(s) using a pure `Nx.Defn` Marsaglia-Tsang path.
 
   This API is additive and is intended for compiled/vectorized call sites.
@@ -142,13 +175,8 @@ defmodule BstsNx.Distributions do
       raise ArgumentError, "alpha and beta must have the same shape; broadcasting not supported"
     end
 
-    if Nx.any(Nx.less_equal(a, 0.0)) |> Nx.to_number() == 1 do
-      raise ArgumentError, "alpha must be strictly positive for inverse-gamma sampling"
-    end
-
-    if Nx.any(Nx.less_equal(b, 0.0)) |> Nx.to_number() == 1 do
-      raise ArgumentError, "beta must be strictly positive for inverse-gamma sampling"
-    end
+    validate_positive_tensor_param!(a, :alpha, "inverse-gamma sampling")
+    validate_positive_tensor_param!(b, :beta, "inverse-gamma sampling")
 
     flat_size = Nx.size(a)
     a_flat = Nx.reshape(a, {flat_size})
@@ -188,8 +216,21 @@ defmodule BstsNx.Distributions do
 
   Nx.Defn.defn inv_gamma_sample_defn_impl(alpha, beta, key, cap_value, apply_cap) do
     n = Nx.axis_size(alpha, 0)
-    eps = Nx.tensor(1.0e-12, type: {:f, 64})
+    unit_scale = Nx.broadcast(Nx.tensor(1.0, type: {:f, 64}), {n})
+    {gamma, next_key} = gamma_sample_defn_impl(alpha, unit_scale, key)
+
     gamma_floor = Nx.tensor(1.0e-300, type: {:f, 64})
+    safe_gamma = Nx.max(gamma, gamma_floor)
+    sample = Nx.divide(beta, safe_gamma)
+    sample_capped = Nx.min(sample, Nx.broadcast(cap_value, {n}))
+    cap_enabled = Nx.equal(apply_cap, Nx.tensor(1, type: {:u, 8}))
+
+    {Nx.select(cap_enabled, sample_capped, sample), next_key}
+  end
+
+  Nx.Defn.defn gamma_sample_defn_impl(alpha, scale, key) do
+    n = Nx.axis_size(alpha, 0)
+    eps = Nx.tensor(1.0e-12, type: {:f, 64})
     alpha_lt_one = Nx.less(alpha, 1.0)
     alpha_base = Nx.select(alpha_lt_one, Nx.add(alpha, 1.0), alpha)
     d = Nx.subtract(alpha_base, 1.0 / 3.0)
@@ -238,6 +279,8 @@ defmodule BstsNx.Distributions do
         {iter + 1, accepted_new, gamma_new, key_after_u, d_in, c_in, eps_in}
       end
 
+    # In defn we cannot raise from inside the kernel. Use a conservative fallback
+    # only for entries that failed to accept after max iterations.
     fallback = Nx.max(d, eps)
     gamma_accepted = Nx.select(Nx.equal(accepted_out, 1), gamma_out, fallback)
 
@@ -245,12 +288,8 @@ defmodule BstsNx.Distributions do
     u_small = Nx.as_type(u_small_raw, {:f, 64}) |> Nx.max(eps)
     adjust = Nx.pow(u_small, Nx.divide(1.0, alpha))
     gamma_final = Nx.select(alpha_lt_one, Nx.multiply(gamma_accepted, adjust), gamma_accepted)
-    safe_gamma = Nx.max(gamma_final, gamma_floor)
-    sample = Nx.divide(beta, safe_gamma)
-    sample_capped = Nx.min(sample, Nx.broadcast(cap_value, {n}))
-    cap_enabled = Nx.equal(apply_cap, Nx.tensor(1, type: {:u, 8}))
 
-    {Nx.select(cap_enabled, sample_capped, sample), key_after_small}
+    {Nx.multiply(gamma_final, scale), key_after_small}
   end
 
   @doc """
@@ -266,9 +305,9 @@ defmodule BstsNx.Distributions do
   def normal_sample(key, opts \\ []) do
     mean = Keyword.get(opts, :mean, 0.0)
     stddev = Keyword.get(opts, :stddev, 1.0)
-    [key_draw_row, key_next_row] = Nx.Random.split(key, parts: 2) |> Nx.to_list()
-    key_draw = Nx.tensor(key_draw_row, type: Nx.type(key))
-    key_next = Nx.tensor(key_next_row, type: Nx.type(key))
+    split_keys = Nx.Random.split(key, parts: 2)
+    key_draw = split_key_at(split_keys, 0)
+    key_next = split_key_at(split_keys, 1)
     {sample, _unused} = Nx.Random.normal(key_draw, mean, stddev)
     {sample, key_next}
   end
@@ -300,9 +339,9 @@ defmodule BstsNx.Distributions do
   @spec mv_normal_sample_with_chol(Nx.t(), Nx.t(), Nx.t(), Nx.t()) :: {Nx.t(), Nx.t()}
   def mv_normal_sample_with_chol(key, mean, _cov, chol) do
     dim = Nx.axis_size(mean, 0)
-    [key_draw_row, key_next_row] = Nx.Random.split(key, parts: 2) |> Nx.to_list()
-    key_draw = Nx.tensor(key_draw_row, type: Nx.type(key))
-    next_key = Nx.tensor(key_next_row, type: Nx.type(key))
+    split_keys = Nx.Random.split(key, parts: 2)
+    key_draw = split_key_at(split_keys, 0)
+    next_key = split_key_at(split_keys, 1)
     {noise, _unused} = Nx.Random.normal(key_draw, 0.0, 1.0, shape: {dim})
 
     sample = Nx.add(mean, Nx.dot(chol, noise))
@@ -340,30 +379,41 @@ defmodule BstsNx.Distributions do
     a_list = Nx.to_flat_list(a)
     b_list = Nx.to_flat_list(b)
     num_draws = length(a_list)
-    split_key_rows = Nx.Random.split(key, parts: num_draws + 1) |> Nx.to_list()
-    sample_keys = Enum.take(split_key_rows, num_draws)
+    split_keys = Nx.Random.split(key, parts: num_draws + 1)
+
+    sample_keys =
+      if num_draws == 0 do
+        []
+      else
+        Enum.map(0..(num_draws - 1), &split_key_at(split_keys, &1))
+      end
 
     samples =
       Enum.zip(Enum.zip(a_list, b_list), sample_keys)
-      |> Enum.map(fn {{alpha_i, beta_i}, subkey} ->
-        rand_state = rand_state_from_key(subkey)
+      |> Enum.map(fn {{alpha_i, beta_i}, sample_key} ->
+        rand_state = rand_state_from_key(sample_key)
         {sample, _rs2} = inv_gamma_draw(alpha_i, beta_i, max_value, rand_state)
         sample
       end)
 
     sample_tensor = Nx.tensor(samples) |> Nx.reshape(Nx.shape(a))
-    next_key = split_key_rows |> List.last() |> Nx.tensor(type: Nx.type(key))
+    next_key = split_key_at(split_keys, num_draws)
     {sample_tensor, next_key}
   end
 
   defp sample_with_key_scalar(alpha, beta, max_value, key) do
     validate_prng_key_shape!(key)
-    [draw_key_row, next_key_row] = Nx.Random.split(key, parts: 2) |> Nx.to_list()
-    draw_key = Nx.tensor(draw_key_row, type: Nx.type(key))
-    next_key = Nx.tensor(next_key_row, type: Nx.type(key))
+    split_keys = Nx.Random.split(key, parts: 2)
+    draw_key = split_key_at(split_keys, 0)
+    next_key = split_key_at(split_keys, 1)
     rand_state = rand_state_from_key(draw_key)
     {sample, _rs2} = inv_gamma_draw(alpha, beta, max_value, rand_state)
     {Nx.tensor(sample), next_key}
+  end
+
+  defp split_key_at(keys, idx) do
+    Nx.slice_along_axis(keys, idx, 1, axis: 0)
+    |> Nx.squeeze(axes: [0])
   end
 
   defp inv_gamma_draw(alpha_i, beta_i, max_value, rand_state) do
@@ -412,6 +462,12 @@ defmodule BstsNx.Distributions do
 
   defp validate_prng_key_shape!(other) do
     raise ArgumentError, "Expected Nx.Random key with shape {2}, got: #{inspect(other)}"
+  end
+
+  defp validate_positive_tensor_param!(tensor, name, context) do
+    if Nx.any(Nx.less_equal(tensor, 0.0)) |> Nx.to_number() == 1 do
+      raise ArgumentError, "#{name} must be strictly positive for #{context}"
+    end
   end
 
   defp maybe_cap(sample, :infinity), do: sample
