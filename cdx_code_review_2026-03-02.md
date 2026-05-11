@@ -226,4 +226,3 @@ Result: those categories are **not directly applicable** in current codebase sta
 ## Commands Run
 - `mix compile --warnings-as-errors`
 - repository-wide static inspection (`rg`, `nl -ba`, targeted module walkthrough)
-

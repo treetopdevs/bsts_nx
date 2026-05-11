@@ -1,0 +1,2079 @@
+# From Noisy Data to Causal Claims
+
+## An Interactive Guide to Bayesian Structural Time Series
+
+You measure something over time — website visits, product demand, hospital admissions, server
+latency. The numbers go up and down. Then *something happens*: a marketing campaign launches, a
+new policy takes effect, a server gets upgraded. The numbers change. But did they change *because*
+of the intervention, or would they have changed anyway?
+
+This is the central question that Bayesian Structural Time Series (BSTS) answers. By the end of
+this notebook you will understand — intuitively, visually, and mathematically — how the algorithm
+works, why it works, and how to apply it across five completely different domains.
+
+**What you'll be able to do after this notebook:**
+
+- Decompose any time series into trend, seasonality, and noise
+- Estimate causal effects of interventions with honest uncertainty
+- Forecast future values with calibrated prediction intervals
+- Detect anomalies using statistical process control
+- Split credit fairly across overlapping campaigns
+- Validate your results before trusting them
+
+**Who this is for:** Technically curious people — engineers, data scientists, product managers,
+researchers — who want to *understand* the algorithm, not just call an API. We assume comfort
+with code and basic probability, but no prior knowledge of state-space models or Bayesian inference.
+
+## Setup
+
+```elixir
+project_root = "/Users/nicholas/develop/bsts_nx"
+
+Mix.install(
+  [
+    {:nx, "~> 0.11.0"},
+    {:bsts_nx, path: project_root},
+    {:kino_vega_lite, "~> 0.1.13"},
+    {:kino, "~> 0.14"}
+  ],
+  force: true
+)
+```
+
+```elixir
+defmodule Guide do
+  @moduledoc """
+  Visualization and utility helpers for the BSTS guide.
+  All charts use VegaLite. All statistics are plain Elixir.
+  """
+  alias VegaLite, as: Vl
+
+  # ── Seeds & Basics ──────────────────────────────────────────────
+
+  def seed!(n \\ 42) do
+    :rand.seed(:exsss, {n, n + 1, n + 2})
+    Nx.Random.key(n)
+  end
+
+  def mean([]), do: 0.0
+  def mean(xs), do: Enum.sum(xs) / length(xs)
+
+  def sd(xs) when length(xs) > 1 do
+    m = mean(xs)
+    ss = Enum.reduce(xs, 0.0, fn x, acc -> acc + (x - m) ** 2 end)
+    :math.sqrt(ss / (length(xs) - 1))
+  end
+
+  def sd(_), do: 0.0
+
+  def mae(a, b) when length(a) == length(b) and a != [] do
+    Enum.zip(a, b) |> Enum.map(fn {x, y} -> abs(x - y) end) |> mean()
+  end
+
+  def rmse(a, b) when length(a) == length(b) and a != [] do
+    Enum.zip(a, b) |> Enum.map(fn {x, y} -> (x - y) ** 2 end) |> mean() |> :math.sqrt()
+  end
+
+  def quantile(sorted, q) when sorted != [] do
+    pos = q * (length(sorted) - 1)
+    lo = trunc(:math.floor(pos))
+    hi = trunc(:math.ceil(pos))
+    if lo == hi, do: Enum.at(sorted, lo), else: (1 - pos + lo) * Enum.at(sorted, lo) + (pos - lo) * Enum.at(sorted, hi)
+  end
+
+  def downsample(series, every) do
+    series
+    |> Enum.chunk_every(every, every, :discard)
+    |> Enum.map(fn chunk -> Enum.sum(chunk) / length(chunk) end)
+  end
+
+  def posterior_mean(draws) when draws != [] do
+    n = length(draws)
+    Enum.zip_with(draws, fn vals -> Enum.sum(vals) / n end)
+  end
+
+  def posterior_mean(_), do: []
+
+  def per_t_bands(draws, alpha \\ 0.05) when draws != [] do
+    Enum.zip_with(draws, fn vals ->
+      sorted = Enum.sort(vals)
+      %{
+        mean: Enum.sum(vals) / length(vals),
+        lower: quantile(sorted, alpha / 2),
+        upper: quantile(sorted, 1 - alpha / 2)
+      }
+    end)
+  end
+
+  # ── Charting ────────────────────────────────────────────────────
+
+  @doc "Multi-series line plot with optional vertical intervention marker."
+  def series_plot(series_map, opts \\ []) do
+    w = Keyword.get(opts, :width, 900)
+    h = Keyword.get(opts, :height, 340)
+    title = Keyword.get(opts, :title)
+    x_title = Keyword.get(opts, :x_title, "time")
+    y_title = Keyword.get(opts, :y_title, "value")
+    intervention = Keyword.get(opts, :intervention_at)
+
+    rows =
+      Enum.flat_map(series_map, fn {name, values} ->
+        values |> Enum.with_index() |> Enum.map(fn {v, t} -> %{"series" => name, "t" => t, "value" => v} end)
+      end)
+
+    base =
+      Vl.new()
+      |> Vl.data_from_values(rows)
+      |> Vl.mark(:line)
+      |> Vl.encode_field(:x, "t", type: :quantitative, title: x_title)
+      |> Vl.encode_field(:y, "value", type: :quantitative, title: y_title)
+      |> Vl.encode_field(:color, "series", type: :nominal, legend: [orient: :bottom])
+
+    if intervention do
+      Vl.new(width: w, height: h, title: title)
+      |> Vl.layers([
+        base,
+        Vl.new()
+        |> Vl.data_from_values([%{"x" => intervention}])
+        |> Vl.mark(:rule, stroke_dash: [6, 4], color: "#e45756", stroke_width: 2)
+        |> Vl.encode_field(:x, "x", type: :quantitative)
+      ])
+    else
+      Vl.new(width: w, height: h, title: title) |> Vl.layers([base])
+    end
+  end
+
+  @doc "Mean line with shaded credible band, optional actual overlay and intervention line."
+  def band_plot(band_rows, opts \\ []) do
+    w = Keyword.get(opts, :width, 900)
+    h = Keyword.get(opts, :height, 340)
+    title = Keyword.get(opts, :title)
+    intervention = Keyword.get(opts, :intervention_at)
+    actual = Keyword.get(opts, :actual)
+
+    band_data = Enum.map(band_rows, fn r -> %{"t" => r.t, "mean" => r.mean, "lower" => r.lower, "upper" => r.upper} end)
+
+    band_layer =
+      Vl.new()
+      |> Vl.data_from_values(band_data)
+      |> Vl.mark(:area, opacity: 0.25, color: "#4c78a8")
+      |> Vl.encode_field(:x, "t", type: :quantitative, title: "time")
+      |> Vl.encode_field(:y, "lower", type: :quantitative, title: "value")
+      |> Vl.encode_field(:y2, "upper")
+
+    mean_layer =
+      Vl.new()
+      |> Vl.data_from_values(band_data)
+      |> Vl.mark(:line, color: "#4c78a8", stroke_width: 2)
+      |> Vl.encode_field(:x, "t", type: :quantitative)
+      |> Vl.encode_field(:y, "mean", type: :quantitative)
+
+    layers = [band_layer, mean_layer]
+
+    layers =
+      if actual do
+        actual_data = actual |> Enum.with_index() |> Enum.map(fn {v, t} -> %{"t" => t, "actual" => v} end)
+
+        actual_layer =
+          Vl.new()
+          |> Vl.data_from_values(actual_data)
+          |> Vl.mark(:line, color: "#e45756", stroke_width: 2)
+          |> Vl.encode_field(:x, "t", type: :quantitative)
+          |> Vl.encode_field(:y, "actual", type: :quantitative)
+
+        layers ++ [actual_layer]
+      else
+        layers
+      end
+
+    layers =
+      if intervention do
+        rule =
+          Vl.new()
+          |> Vl.data_from_values([%{"x" => intervention}])
+          |> Vl.mark(:rule, stroke_dash: [6, 4], color: "#e45756", stroke_width: 2)
+          |> Vl.encode_field(:x, "x", type: :quantitative)
+
+        layers ++ [rule]
+      else
+        layers
+      end
+
+    Vl.new(width: w, height: h, title: title) |> Vl.layers(layers)
+  end
+
+  @doc """
+  Explanatory causal-impact plot: actual series, counterfactual baseline,
+  uncertainty band, intervention boundary, and a visible lift gap marker.
+  """
+  def counterfactual_story_plot(observations, result, opts \\ []) do
+    w = Keyword.get(opts, :width, 930)
+    h = Keyword.get(opts, :height, 320)
+    title = Keyword.get(opts, :title, "Actual vs. counterfactual")
+    pre_end = Keyword.fetch!(opts, :pre_end)
+    alpha = Keyword.get(opts, :alpha, 0.05)
+    summary = Map.get(result, :summary, result)
+    z = BstsNx.Utils.z_score(alpha)
+
+    actual_rows =
+      observations
+      |> Enum.with_index()
+      |> Enum.map(fn {v, t} -> %{"t" => t, "value" => v} end)
+
+    baseline_variance =
+      Map.get(summary, :baseline_variance, List.duplicate(0.0, length(summary.baseline)))
+
+    obs_variance = Map.get(summary, :obs_variance, 0.0)
+
+    baseline_rows =
+      Enum.zip(summary.baseline, baseline_variance)
+      |> Enum.with_index()
+      |> Enum.map(fn {{mean, variance}, i} ->
+        sd = :math.sqrt(max(variance + obs_variance, 0.0))
+
+        %{
+          "t" => pre_end + i,
+          "mean" => mean,
+          "lower" => mean - z * sd,
+          "upper" => mean + z * sd
+        }
+      end)
+
+    lift_row =
+      summary.point_effects.mean
+      |> Enum.with_index()
+      |> Enum.max_by(fn {lift, _i} -> lift end, fn -> nil end)
+      |> case do
+        nil ->
+          []
+
+        {_lift, i} ->
+          [
+            %{
+              "t" => pre_end + i,
+              "baseline" => Enum.at(summary.baseline, i),
+              "actual" => Enum.at(summary.actual, i)
+            }
+          ]
+      end
+
+    band_layer =
+      Vl.new()
+      |> Vl.data_from_values(baseline_rows)
+      |> Vl.mark(:area, opacity: 0.22, color: "#6c8cff")
+      |> Vl.encode_field(:x, "t", type: :quantitative, title: "time")
+      |> Vl.encode_field(:y, "lower", type: :quantitative, title: "metric")
+      |> Vl.encode_field(:y2, "upper")
+
+    baseline_layer =
+      Vl.new()
+      |> Vl.data_from_values(baseline_rows)
+      |> Vl.mark(:line, color: "#3567e7", stroke_width: 2.5, stroke_dash: [8, 4])
+      |> Vl.encode_field(:x, "t", type: :quantitative)
+      |> Vl.encode_field(:y, "mean", type: :quantitative)
+
+    actual_layer =
+      Vl.new()
+      |> Vl.data_from_values(actual_rows)
+      |> Vl.mark(:line, color: "#111111", stroke_width: 2)
+      |> Vl.encode_field(:x, "t", type: :quantitative)
+      |> Vl.encode_field(:y, "value", type: :quantitative)
+
+    intervention_layer =
+      Vl.new()
+      |> Vl.data_from_values([%{"x" => pre_end}])
+      |> Vl.mark(:rule, stroke_dash: [6, 4], color: "#333333", stroke_width: 2)
+      |> Vl.encode_field(:x, "x", type: :quantitative)
+
+    lift_layer =
+      Vl.new()
+      |> Vl.data_from_values(lift_row)
+      |> Vl.mark(:rule, color: "#43a047", stroke_width: 5)
+      |> Vl.encode_field(:x, "t", type: :quantitative)
+      |> Vl.encode_field(:y, "baseline", type: :quantitative)
+      |> Vl.encode_field(:y2, "actual")
+
+    lift_label =
+      Vl.new()
+      |> Vl.data_from_values(lift_row)
+      |> Vl.mark(:text, text: "lift", color: "#2e7d32", align: "left", dx: 8, dy: -8, font_size: 13)
+      |> Vl.encode_field(:x, "t", type: :quantitative)
+      |> Vl.encode_field(:y, "actual", type: :quantitative)
+
+    Vl.new(width: w, height: h, title: title)
+    |> Vl.layers([
+      band_layer,
+      baseline_layer,
+      actual_layer,
+      intervention_layer,
+      lift_layer,
+      lift_label
+    ])
+  end
+
+  @doc "Per-period lift plot showing actual minus counterfactual after the intervention."
+  def lift_plot(result, opts \\ []) do
+    w = Keyword.get(opts, :width, 930)
+    h = Keyword.get(opts, :height, 170)
+    title = Keyword.get(opts, :title, "Estimated lift over time")
+    pre_end = Keyword.fetch!(opts, :pre_end)
+    summary = Map.get(result, :summary, result)
+
+    rows =
+      summary.point_effects.mean
+      |> Enum.with_index()
+      |> Enum.map(fn {lift, i} ->
+        %{
+          "t" => pre_end + i,
+          "lift" => lift,
+          "direction" => if(lift >= 0.0, do: "above counterfactual", else: "below counterfactual")
+        }
+      end)
+
+    bars =
+      Vl.new()
+      |> Vl.data_from_values(rows)
+      |> Vl.mark(:bar, opacity: 0.82)
+      |> Vl.encode_field(:x, "t", type: :quantitative, title: "time")
+      |> Vl.encode_field(:y, "lift", type: :quantitative, title: "actual - counterfactual")
+      |> Vl.encode_field(:color, "direction", type: :nominal, scale: [range: ["#43a047", "#d95f5f"]], legend: nil)
+
+    zero =
+      Vl.new()
+      |> Vl.data_from_values([%{"y" => 0}])
+      |> Vl.mark(:rule, color: "#555555")
+      |> Vl.encode_field(:y, "y", type: :quantitative)
+
+    Vl.new(width: w, height: h, title: title)
+    |> Vl.layers([bars, zero])
+  end
+
+  @doc "Spaghetti plot: many thin transparent lines from posterior draws."
+  def spaghetti_plot(draws, opts \\ []) do
+    w = Keyword.get(opts, :width, 900)
+    h = Keyword.get(opts, :height, 340)
+    title = Keyword.get(opts, :title)
+    actual = Keyword.get(opts, :actual)
+    intervention = Keyword.get(opts, :intervention_at)
+    max_draws = Keyword.get(opts, :max_draws, 30)
+
+    draw_rows =
+      draws
+      |> Enum.take(max_draws)
+      |> Enum.with_index()
+      |> Enum.flat_map(fn {draw, i} ->
+        draw |> Enum.with_index() |> Enum.map(fn {v, t} -> %{"draw" => "d#{i}", "t" => t, "value" => v} end)
+      end)
+
+    draw_layer =
+      Vl.new()
+      |> Vl.data_from_values(draw_rows)
+      |> Vl.mark(:line, opacity: 0.15, color: "#4c78a8")
+      |> Vl.encode_field(:x, "t", type: :quantitative, title: "time")
+      |> Vl.encode_field(:y, "value", type: :quantitative, title: "value")
+      |> Vl.encode_field(:detail, "draw", type: :nominal)
+
+    layers = [draw_layer]
+
+    layers =
+      if actual do
+        actual_data = actual |> Enum.with_index() |> Enum.map(fn {v, t} -> %{"t" => t, "actual" => v} end)
+
+        actual_layer =
+          Vl.new()
+          |> Vl.data_from_values(actual_data)
+          |> Vl.mark(:line, color: "#e45756", stroke_width: 2.5)
+          |> Vl.encode_field(:x, "t", type: :quantitative)
+          |> Vl.encode_field(:y, "actual", type: :quantitative)
+
+        layers ++ [actual_layer]
+      else
+        layers
+      end
+
+    layers =
+      if intervention do
+        rule =
+          Vl.new()
+          |> Vl.data_from_values([%{"x" => intervention}])
+          |> Vl.mark(:rule, stroke_dash: [6, 4], color: "#333", stroke_width: 2)
+          |> Vl.encode_field(:x, "x", type: :quantitative)
+
+        layers ++ [rule]
+      else
+        layers
+      end
+
+    Vl.new(width: w, height: h, title: title) |> Vl.layers(layers)
+  end
+
+  @doc "Histogram with optional vertical line at a true value."
+  def histogram(values, opts \\ []) do
+    w = Keyword.get(opts, :width, 500)
+    h = Keyword.get(opts, :height, 280)
+    title = Keyword.get(opts, :title)
+    true_value = Keyword.get(opts, :true_value)
+
+    data = Enum.map(values, fn v -> %{"value" => v} end)
+
+    hist_layer =
+      Vl.new()
+      |> Vl.data_from_values(data)
+      |> Vl.mark(:bar, opacity: 0.7, color: "#4c78a8")
+      |> Vl.encode_field(:x, "value", type: :quantitative, bin: [maxbins: 30], title: "value")
+      |> Vl.encode(:y, aggregate: :count, type: :quantitative)
+
+    layers = [hist_layer]
+
+    layers =
+      if true_value do
+        rule =
+          Vl.new()
+          |> Vl.data_from_values([%{"x" => true_value}])
+          |> Vl.mark(:rule, color: "#e45756", stroke_width: 2.5)
+          |> Vl.encode_field(:x, "x", type: :quantitative)
+
+        layers ++ [rule]
+      else
+        layers
+      end
+
+    Vl.new(width: w, height: h, title: title) |> Vl.layers(layers)
+  end
+
+  @doc "Horizontal bar chart with error bars for attribution results."
+  def attribution_chart(rows, opts \\ []) do
+    w = Keyword.get(opts, :width, 600)
+    h = Keyword.get(opts, :height, 200)
+    title = Keyword.get(opts, :title, "Attribution")
+
+    bar_data = Enum.map(rows, fn r -> %{"spot" => r.label, "lift" => r.value, "lower" => r[:lower] || r.value, "upper" => r[:upper] || r.value} end)
+
+    bar_layer =
+      Vl.new()
+      |> Vl.data_from_values(bar_data)
+      |> Vl.mark(:bar, color: "#4c78a8")
+      |> Vl.encode_field(:y, "spot", type: :nominal, title: nil, sort: "-x")
+      |> Vl.encode_field(:x, "lift", type: :quantitative, title: "lift")
+
+    error_layer =
+      Vl.new()
+      |> Vl.data_from_values(bar_data)
+      |> Vl.mark(:rule, color: "#333")
+      |> Vl.encode_field(:y, "spot", type: :nominal)
+      |> Vl.encode_field(:x, "lower", type: :quantitative)
+      |> Vl.encode_field(:x2, "upper")
+
+    Vl.new(width: w, height: h, title: title)
+    |> Vl.layers([bar_layer, error_layer])
+  end
+
+  @doc "Gantt-style chart showing spot time windows."
+  def gantt_chart(spots, opts \\ []) do
+    w = Keyword.get(opts, :width, 600)
+    h = Keyword.get(opts, :height, 150)
+    title = Keyword.get(opts, :title, "Spot Windows")
+
+    data =
+      Enum.map(spots, fn s ->
+        %{"spot" => s.id, "start" => s.window_start, "end" => s.window_end}
+      end)
+
+    Vl.new(width: w, height: h, title: title)
+    |> Vl.data_from_values(data)
+    |> Vl.mark(:bar, opacity: 0.8)
+    |> Vl.encode_field(:y, "spot", type: :nominal, title: nil)
+    |> Vl.encode_field(:x, "start", type: :quantitative, title: "hour (post-period)")
+    |> Vl.encode_field(:x2, "end")
+    |> Vl.encode_field(:color, "spot", type: :nominal, legend: nil)
+  end
+
+  # ── Backend Setup ───────────────────────────────────────────────
+
+  def setup_backend! do
+    result =
+      cond do
+        Code.ensure_loaded?(EMLX.Backend) ->
+          try do
+            Nx.global_default_backend(EMLX.Backend)
+            Nx.Defn.global_default_options(compiler: Nx.Defn.Evaluator)
+            _ = Nx.backend_transfer(Nx.tensor([0.0]), EMLX.Backend)
+            %{backend: :emlx}
+          rescue
+            _ ->
+              Nx.global_default_backend(Nx.BinaryBackend)
+              %{backend: :binary}
+          end
+
+        Code.ensure_loaded?(EXLA.Backend) ->
+          try do
+            Nx.global_default_backend(Nx.BinaryBackend)
+            Nx.Defn.global_default_options(compiler: EXLA)
+            _ = Nx.backend_transfer(Nx.tensor([0.0]), EXLA.Backend)
+            %{backend: :exla}
+          rescue
+            _ ->
+              Nx.global_default_backend(Nx.BinaryBackend)
+              %{backend: :binary}
+          end
+
+        true ->
+          Nx.global_default_backend(Nx.BinaryBackend)
+          %{backend: :binary}
+      end
+
+    IO.puts("Backend: #{result.backend} | Nx: #{Application.spec(:nx, :vsn)}")
+    result
+  end
+end
+
+alias BstsNx.{
+  CausalImpact, Components, CovariateSelection, Diagnostics,
+  Forecaster, GibbsSampler, InterventionAnalysis, KalmanFilter,
+  Operational, Pipeline, RollingBaseline, ShapleyAllocator, Smoother,
+  SpotAttributor, Validation
+}
+
+alias BstsNx.Applications.{AnomalyDetector, DemandForecaster, MarketingLift, PolicyEvaluator, TVAttribution}
+alias BstsNx.Synthetic.{Adstock, Generator}
+alias VegaLite, as: Vl
+
+Guide.seed!(2026)
+Guide.setup_backend!()
+```
+
+## Operational first: a bounded-latency answer
+
+```elixir
+ops_obs =
+  Enum.map(0..143, fn t ->
+    baseline = 80.0 + 0.05 * t + 7.0 * :math.sin(2.0 * :math.pi() * t / 24.0)
+    lift = if t >= 96, do: 12.0, else: 0.0
+    baseline + lift
+  end)
+
+ops_spec =
+  Components.local_level_spec(
+    initial_state: List.first(ops_obs),
+    initial_cov: 10.0,
+    process_var: 0.8,
+    obs_var: 4.0
+  )
+
+ops_spots = [
+  %{id: "spot_a", window_start: 0, window_end: 12},
+  %{id: "spot_b", window_start: 12, window_end: 24}
+]
+
+{ops_prepare_us, ops_prepared} =
+  :timer.tc(fn ->
+    Operational.prepare(ops_spec, {1, 96}, {97, 144})
+  end)
+
+{ops_cold_us, _ops_cold_result} =
+  :timer.tc(fn ->
+    Operational.run(ops_prepared, ops_obs, ops_spots,
+      alpha: 0.05,
+      shapley_samples: 250
+    )
+  end)
+
+{ops_warm_us, ops_result} =
+  :timer.tc(fn ->
+    Operational.run(ops_prepared, ops_obs, ops_spots,
+      alpha: 0.05,
+      shapley_samples: 250
+    )
+  end)
+
+Kino.Markdown.new("""
+| Output | Value |
+|---|---:|
+| Total lift | #{Float.round(ops_result.attributions.total_lift, 1)} |
+| Prepare runtime | #{Float.round(ops_prepare_us / 1_000, 1)} ms |
+| Cold prepared run | #{Float.round(ops_cold_us / 1_000, 1)} ms |
+| Warm prepared run | #{Float.round(ops_warm_us / 1_000, 1)} ms |
+| Mode | #{ops_result.execution.mode} |
+| Baseline | #{ops_result.execution.baseline} |
+| Method used | #{ops_result.execution.method_used} |
+| Prepared? | #{ops_result.execution.prepared?} |
+| Backend | `#{ops_result.execution.backend}` |
+""")
+```
+
+```elixir
+Guide.counterfactual_story_plot(
+  ops_obs,
+  ops_result,
+  pre_end: 96,
+  title: "Operational causal impact: actual traffic vs. predicted no-TV baseline"
+)
+```
+
+```elixir
+Guide.lift_plot(
+  ops_result,
+  pre_end: 96,
+  title: "The algorithm's lift estimate: actual minus predicted baseline"
+)
+```
+
+The black line is what actually happened. The dashed blue line is what the filter predicts
+would have happened if the post-period had been hidden from the model. The blue band is
+prediction uncertainty. The dashed vertical line is the intervention boundary. The green
+marker is the gap the attribution layer turns into incremental lift.
+
+---
+
+# Part I: The Problem
+
+## 1. Why raw data lies to you
+
+Every time series is a mixture of signal and noise. Your eyes are pattern-matching machines —
+they see trends and spikes even in pure random data. Before we can do anything useful, we need
+to internalize a simple but powerful equation:
+
+$$\text{observed}(t) = \text{signal}(t) + \text{noise}(t)$$
+
+The signal itself has structure — a slowly drifting level, a seasonal cycle, the influence of
+external factors. BSTS decomposes this mixture into its parts so you can reason about each one
+separately.
+
+Let's see this concretely. Here is a time series that *looks* like it has interesting patterns.
+Is the upward trend real? Is that dip at hour 30 meaningful?
+
+```elixir
+# Generate a pure random walk — no trend, no seasonality, just noise accumulating
+key = Guide.seed!(99)
+n = 100
+
+{random_steps, _} = Nx.Random.normal(key, shape: {n}, type: {:f, 32})
+random_walk = Nx.to_flat_list(Nx.cumulative_sum(random_steps))
+
+Guide.series_plot(
+  %{"random walk (pure noise!)" => random_walk},
+  title: "This looks like it has patterns. It doesn't. It's pure noise."
+)
+```
+
+That chart looks like it has a trend, a dip, maybe a recovery. But it's a **random walk** — each
+step is independent coin-flip noise. There is no signal. Your brain invented the pattern.
+
+This is why we need statistical models: to distinguish real structure from noise. BSTS does this
+by explicitly modeling what "structure" means (trend, seasonality, regression) and estimating how
+much noise is left over. If the model can explain the data well using simple structure, the
+remaining variation is probably noise. If a sudden change *can't* be explained by the model's
+baseline, it's probably a real effect.
+
+## 2. The core idea: decompose, project, compare
+
+BSTS solves problems by following three steps, regardless of the domain:
+
+**Step 1: Decompose.** Break the time series into interpretable components — a trend (where
+is the level going?), seasonality (does it cycle?), and regression (do external signals
+explain part of the variation?). Each component has its own simple dynamics.
+
+**Step 2: Project.** Use the learned components to ask "what if?" questions. For causal
+inference: "What would have happened without the intervention?" For forecasting: "What will
+happen next?" For anomaly detection: "What should this value be?"
+
+**Step 3: Compare.** Measure the gap between projection and reality. A large gap means
+something interesting happened — a real causal effect, a genuine anomaly, or a forecast miss
+that warrants investigation.
+
+The entire library is variations on this theme. Let's build the machinery.
+
+## 3. A world where we know the truth
+
+In real life, you never know the true causal effect — that's why you need the model. But how
+do you know the model works? You test it on **synthetic data** where you control every parameter.
+If the model can't recover a known answer, you can't trust it on real data.
+
+We'll build a synthetic world that mimics 6 days of hourly web traffic with:
+- A **baseline** with an intercept (~80 sessions/hour), slight upward trend, and daily seasonality
+- **TV spots** that air during hours 97-144 (the last 2 days)
+- **Control series** — correlated but unaffected time series (like organic search)
+- **Gaussian noise** with known standard deviation
+
+We split into a **pre-period** (hours 1-96, no TV) and a **post-period** (hours 97-144, campaign running).
+
+```elixir
+post_start_minute = 4 * 24 * 60
+
+spots = [
+  %{id: "spot_a", window_start: post_start_minute + 2 * 60, window_end: post_start_minute + 4 * 60},
+  %{id: "spot_b", window_start: post_start_minute + 3 * 60, window_end: post_start_minute + 5 * 60},
+  %{id: "spot_c", window_start: post_start_minute + 28 * 60, window_end: post_start_minute + 30 * 60},
+  %{id: "spot_d", window_start: post_start_minute + 29 * 60, window_end: post_start_minute + 31 * 60}
+]
+
+config = %{
+  name: "Web traffic + TV campaign",
+  total_minutes: 6 * 24 * 60,
+  baseline: %{
+    intercept: 80.0,
+    trend: 0.5,
+    daily_fourier: [{8.0, 3.0}, {2.0, 1.0}],
+    weekly_fourier: [{2.0, 1.0}]
+  },
+  spots: spots,
+  noise_sd: 2.0,
+  effect: %{lambda: 0.65, ec: 1.0, slope: 2.0, coefficient: 12.0},
+  controls: %{count: 3, correlation: 0.45},
+  seed: 2026
+}
+
+synthetic = Generator.generate(config)
+
+# Downsample from minute-level to hourly
+obs = Guide.downsample(synthetic.observations, 60)
+baseline_true = Guide.downsample(synthetic.ground_truth.baseline, 60)
+tv_true = Guide.downsample(synthetic.ground_truth.tv_contribution, 60)
+controls = Enum.map(synthetic.controls, &Guide.downsample(&1, 60))
+
+pre_period = {1, 96}
+post_period = {97, 144}
+post_len = 48
+
+# Adjust spot windows to post-period hours (0-indexed within post)
+spots_post =
+  synthetic.spots
+  |> Enum.map(fn s ->
+    ws = div(s.window_start - post_start_minute, 60)
+    we = div(s.window_end - post_start_minute + 59, 60)
+    %{id: s.id, window_start: max(ws, 0), window_end: min(we, post_len)}
+  end)
+  |> Enum.filter(&(&1.window_end > &1.window_start and &1.window_start < post_len))
+
+true_post_lift =
+  tv_true |> Enum.slice(96..143) |> Enum.sum()
+
+%{
+  hours: length(obs),
+  pre_period: pre_period,
+  post_period: post_period,
+  true_total_lift: Float.round(true_post_lift, 1),
+  spots_in_post: length(spots_post)
+}
+```
+
+Now the decomposition — observe how the observed series is exactly the baseline plus the TV
+effect plus noise:
+
+```elixir
+Guide.series_plot(
+  %{
+    "observed (what you measure)" => obs,
+    "true baseline (hidden)" => baseline_true,
+    "true TV effect (hidden)" => tv_true
+  },
+  title: "The synthetic world: we know every piece",
+  intervention_at: 96,
+  y_title: "sessions/hour"
+)
+```
+
+The vertical red dashed line marks the intervention. Before it, the TV effect is zero. After it,
+you can see the spikes caused by TV spots. The **model's job** is to recover that blue baseline
+line using only the observed data — it never sees the true baseline or the true effect.
+
+```elixir
+Guide.gantt_chart(spots_post, title: "TV spot air windows (hours within post-period)")
+```
+
+Notice spots A & B overlap (hours 2-5), and spots C & D overlap (hours 28-31). This overlap
+is what makes attribution hard — we can't naively assign the lift during overlapping hours to
+just one spot.
+
+## 4. How marketing effects propagate: adstock and saturation
+
+Before diving into the statistical engine, we need to understand two nonlinear transformations
+that make marketing measurement realistic. If you're not working in marketing, these concepts
+still matter — they're examples of how domain knowledge gets encoded into the model.
+
+### Adstock: the carry-over effect
+
+When a TV spot airs at 8:00 PM, people don't all visit your site at 8:00 PM. Some come
+immediately, some an hour later, some the next morning. **Adstock** spreads a single impulse
+across time using exponential decay:
+
+$$\text{adstock}(t) = \text{impulse}(t) + \lambda \cdot \text{adstock}(t-1)$$
+
+The parameter $\lambda$ (0 to 1) controls how quickly the effect fades. Higher $\lambda$ means
+longer memory.
+
+### Hill saturation: diminishing returns
+
+The first ad exposure drives a visit. The fifth exposure drives less. The twentieth, barely
+anything. The **Hill function** compresses the response:
+
+$$\text{saturated}(x) = \frac{x^s}{c^s + x^s}$$
+
+where $c$ is the half-saturation point and $s$ controls the curve's steepness.
+
+```elixir
+impulse = [1.0] ++ List.duplicate(0.0, 47)
+adstocked = Adstock.geometric_adstock(impulse, 0.7)
+saturated = Adstock.hill_saturation(adstocked, 0.3, 3.5)
+
+Guide.series_plot(
+  %{
+    "1. raw impulse" => impulse,
+    "2. after adstock (λ=0.7)" => adstocked,
+    "3. after Hill saturation" => saturated
+  },
+  title: "From a sharp spike to a realistic response curve",
+  x_title: "hours after spot aired"
+)
+```
+
+Watch how the sharp spike becomes a smooth, decaying tail (adstock), then the peak gets
+compressed (saturation). This is what real marketing response looks like — and it's baked
+into our synthetic data generator.
+
+---
+
+# Part II: The Statistical Engine
+
+We now build the BSTS engine layer by layer. Each section introduces one problem, shows why
+the previous tool can't solve it, and reveals the next tool that can.
+
+## 5. The Kalman filter: tracking a signal through noise
+
+**The problem:** You have a noisy time series. You believe there's a slowly-changing underlying
+level, but each observation is corrupted by measurement noise. How do you estimate the true
+level at each time step?
+
+**The intuition:** Think of GPS navigation. Your phone has two sources of information:
+1. A **motion model** — based on your speed and direction, it predicts where you should be now
+2. A **satellite reading** — a noisy measurement of where you actually are
+
+The GPS blends these two sources, trusting each in proportion to its reliability. If satellite
+signal is weak (high noise), it relies more on the motion model. If the motion model is
+uncertain (you just turned), it trusts the satellite more.
+
+The **Kalman filter** does exactly this for time series. At each step:
+
+1. **Predict**: Use the model to project the previous state forward → gives a *prior*
+2. **Update**: Incorporate the new observation → gives a *posterior*
+
+The balance between model and data is controlled by the **Kalman gain**, which depends on the
+ratio of process noise ($Q$ — how much the true state can drift) to observation noise
+($R$ — how noisy your measurements are).
+
+### The state-space equations
+
+For a simple **local level** model:
+
+$$
+\begin{aligned}
+\text{State evolution:} \quad & x_t = F \cdot x_{t-1} + w_t, \quad w_t \sim N(0, Q) \\
+\text{Observation:} \quad & y_t = H \cdot x_t + v_t, \quad v_t \sim N(0, R)
+\end{aligned}
+$$
+
+With $F = 1$ and $H = 1$, the state is just a drifting level. $Q$ controls how much the level
+can change per step; $R$ controls how noisy observations are around the level.
+
+Let's run the filter on the first 72 hours (pre-period only, no intervention):
+
+```elixir
+kalman_obs = Enum.take(obs, 72)
+
+{filtered, predicted} =
+  KalmanFilter.filter_with_pred(kalman_obs, 1.0, 1.0, 0.8, 4.0, List.first(kalman_obs), 10.0)
+
+filtered_mean = Enum.map(filtered, fn {x, _p} -> Nx.to_number(x) end)
+pred_mean = Enum.map(predicted, fn {x, _p} -> Nx.to_number(x) end)
+
+Guide.series_plot(
+  %{
+    "observed (noisy)" => kalman_obs,
+    "one-step prediction (before seeing data)" => pred_mean,
+    "filtered estimate (after seeing data)" => filtered_mean
+  },
+  title: "The Kalman filter: prediction vs. posterior correction"
+)
+```
+
+**What to look for:** The prediction (orange) *lags* behind sudden changes — it's always one
+step behind because it hasn't seen the current observation yet. The filtered estimate (green)
+snaps toward the data after each update. The *gap* between prediction and filtered estimate
+is the Kalman gain in action.
+
+```elixir
+pred_mae = Guide.mae(kalman_obs, pred_mean)
+filt_mae = Guide.mae(kalman_obs, filtered_mean)
+
+Kino.Markdown.new("""
+| Metric | Value |
+|--------|-------|
+| Prediction MAE (before update) | #{Float.round(pred_mae, 3)} |
+| Filtered MAE (after update) | #{Float.round(filt_mae, 3)} |
+| Improvement from update step | #{Float.round(100 * (pred_mae - filt_mae) / pred_mae, 1)}% |
+
+The update step reduces error by ~#{Float.round(100 * (pred_mae - filt_mae) / pred_mae, 0)}%.
+That's the Kalman gain at work.
+""")
+```
+
+### Compiled version
+
+BstsNx also provides a compiled (`Nx.Defn`) version that JIT-compiles to native code via
+EXLA or EMLX. It produces identical results but runs faster on large datasets:
+
+```elixir
+obs_tensor = Nx.tensor(kalman_obs, type: {:f, 32})
+{xs_defn, _ps_defn} = KalmanFilter.filter_defn(obs_tensor, 1.0, 1.0, 0.8, 4.0, List.first(kalman_obs), 10.0)
+defn_mean = Nx.to_flat_list(xs_defn)
+
+%{
+  eager_vs_defn_rmse: Float.round(Guide.rmse(filtered_mean, defn_mean), 8),
+  verdict: "Eager and compiled filters produce identical results"
+}
+```
+
+## 6. The smoother: the power of hindsight
+
+**The problem:** The Kalman filter at hour 50 only knows about hours 1-50. But hours 51-72
+carry information about what the state was at hour 50. Can we use it?
+
+**The intuition:** Imagine watching a mystery movie. Halfway through, you have a theory about
+who the culprit is. By the end, you have much more information and your theory is refined.
+If someone asks "who did you suspect at the halfway mark?", your *retrospective* answer
+(informed by the ending) is better than your *real-time* answer was.
+
+**RTS (Rauch-Tung-Striebel) smoothing** does exactly this. After the forward Kalman filter
+pass, it walks *backward* through time, refining each estimate using information from the
+future. The result:
+
+- **Filtered estimate at time $t$**: $p(x_t \mid y_1, \ldots, y_t)$ — uses past + present
+- **Smoothed estimate at time $t$**: $p(x_t \mid y_1, \ldots, y_T)$ — uses *everything*
+
+Smoothed estimates always have equal or lower uncertainty. The improvement is greatest in
+the middle of the series.
+
+```elixir
+smoothed = Smoother.rts(filtered, predicted, 1.0)
+smoothed_mean = Enum.map(smoothed, fn {x, _p} -> Nx.to_number(x) end)
+
+# Also draw a single posterior state trajectory (FFBS)
+{state_draw, _} = Smoother.simulate_with_key(smoothed, filtered, predicted, 1.0, key: Nx.Random.key(42))
+state_draw_vals = Enum.map(state_draw, &Nx.to_number/1)
+
+Guide.series_plot(
+  %{
+    "filtered (only past)" => filtered_mean,
+    "smoothed (full hindsight)" => smoothed_mean,
+    "one posterior trajectory (FFBS)" => state_draw_vals
+  },
+  title: "Smoothing uses the full timeline — the wiggly line is one possible 'true history'"
+)
+```
+
+The **smoothed mean** (orange) is smoother than the filtered mean — it benefits from
+knowing the future. The **posterior trajectory** (green) is a single random draw from the
+distribution of possible latent state histories. It's noisier than the mean, but it represents
+one "what if this was the real trajectory?" scenario. These draws are the building blocks of
+the Gibbs sampler in the next section.
+
+```elixir
+true_baseline_72 = Enum.take(baseline_true, 72)
+filt_rmse = Guide.rmse(filtered_mean, true_baseline_72)
+smooth_rmse = Guide.rmse(smoothed_mean, true_baseline_72)
+
+Kino.Markdown.new("""
+| Metric | Filtered | Smoothed |
+|--------|----------|----------|
+| RMSE vs. true baseline | #{Float.round(filt_rmse, 3)} | #{Float.round(smooth_rmse, 3)} |
+| **Hindsight gain** | — | **#{Float.round(100 * (filt_rmse - smooth_rmse) / filt_rmse, 1)}%** |
+""")
+```
+
+## 7. The Gibbs sampler: honest about what we don't know
+
+**The problem:** The Kalman filter and smoother give us the posterior over *states* — but only
+if we know the true variance parameters $Q$ and $R$. In practice, we don't. We want the **joint
+posterior** over states *and* variances, but this has no closed-form solution.
+
+**The intuition:** Imagine you're trying to figure out two things at once — the temperature in
+a room and the accuracy of your thermometer. If you knew the thermometer's accuracy, you could
+estimate the temperature. If you knew the temperature, you could estimate the thermometer's
+accuracy. You know neither.
+
+**Gibbs sampling** breaks this circular dependency by alternating:
+
+1. **Fix variances, sample states**: Given current $Q$ and $R$, run the Kalman smoother and
+   draw a state trajectory. This is the FFBS step from Section 6.
+2. **Fix states, sample variances**: Given the state trajectory, compute residuals and sample
+   new $Q$ and $R$ from their conditional posteriors (inverse-gamma distributions).
+3. **Repeat**: Each cycle produces one draw from the joint posterior. Over many iterations,
+   the collection of draws approximates the true posterior distribution.
+
+The first $N$ iterations (**burn-in**) are discarded because the chain may start far from the
+high-probability region.
+
+### 7.1 Running the scalar sampler
+
+```elixir
+pre_obs = Enum.take(obs, 96)
+
+scalar_samples =
+  GibbsSampler.sample(
+    pre_obs, 50, List.first(obs), 10.0, 0.8, 4.0,
+    burn_in: 25, seed: 11
+  )
+
+q_chain = Enum.map(scalar_samples, &Nx.to_number(&1.process_var))
+r_chain = Enum.map(scalar_samples, &Nx.to_number(&1.obs_var))
+
+Guide.series_plot(
+  %{"process variance (Q)" => q_chain, "observation variance (R)" => r_chain},
+  title: "MCMC trace plots: are the chains mixing well?",
+  x_title: "iteration (post burn-in)",
+  y_title: "variance"
+)
+```
+
+**Reading trace plots:** You want to see chains that look like "hairy caterpillars" — rapidly
+oscillating around a stable mean, not drifting or getting stuck. If a chain trends upward or
+stays flat for long stretches, the sampler hasn't converged.
+
+### 7.2 Multiple chains and convergence diagnostics
+
+A single chain can get stuck in a local mode. Running **multiple chains** from different
+starting points lets you check:
+
+- **R-hat**: Compares within-chain to between-chain variance. Should be < 1.05.
+- **ESS (Effective Sample Size)**: MCMC samples are autocorrelated, so 100 draws ≠ 100
+  independent samples. ESS estimates how many independent samples you effectively have.
+
+```elixir
+chains =
+  GibbsSampler.sample_chains(
+    pre_obs, 3, 30, List.first(obs), 10.0, 0.8, 4.0,
+    burn_in: 15, seed: 123
+  )
+
+q_chains = Enum.map(chains, fn chain -> Enum.map(chain, &Nx.to_number(&1.process_var)) end)
+
+# Plot all chains together
+chain_map =
+  q_chains
+  |> Enum.with_index(1)
+  |> Map.new(fn {chain, i} -> {"chain #{i}" , chain} end)
+
+Guide.series_plot(chain_map,
+  title: "Three independent chains for process variance — do they agree?",
+  x_title: "iteration",
+  y_title: "Q"
+)
+```
+
+```elixir
+r_hat = Diagnostics.r_hat(q_chains)
+ess = Diagnostics.effective_sample_size(q_chains)
+
+converged? = r_hat < 1.05
+
+Kino.Markdown.new("""
+| Diagnostic | Value | Threshold | Status |
+|------------|-------|-----------|--------|
+| R-hat | #{Float.round(r_hat, 3)} | < 1.05 | #{if converged?, do: "✓ converged", else: "✗ not converged"} |
+| ESS | #{Float.round(ess, 1)} | > 100 | #{if ess > 100, do: "✓ sufficient", else: "⚠ run longer"} |
+""")
+```
+
+### 7.3 Structured models: trend + seasonality + controls
+
+The scalar model treats the baseline as a single drifting level. Real data has *structure*:
+daily cycles, weekly patterns, correlations with external signals. A **structured state-space
+model** decomposes the baseline into interpretable components that you snap together like
+building blocks.
+
+```elixir
+regressors = controls |> Nx.tensor() |> Nx.transpose()
+
+# Build each component as a self-contained state-space model
+trend_spec =
+  Components.local_linear_trend_spec(
+    initial_level: List.first(obs),
+    var_level: 0.2,
+    var_slope: 0.02,
+    obs_var: 2.0
+  )
+
+seasonal_spec = Components.seasonal_spec(8, process_var: 0.05, obs_var: 2.0)
+regression_spec = Components.regression_spec(regressors, var_beta: 0.02, obs_var: 2.0)
+
+# Compose them — block-diagonalizes F/Q, concatenates H
+structured_spec =
+  trend_spec
+  |> Components.compose_specs(seasonal_spec)
+  |> Components.compose_specs(regression_spec)
+
+%{
+  total_state_dimension: Nx.axis_size(structured_spec.f, 0),
+  components: "trend (2 dims) + seasonal (7 dims) + regression (#{Nx.axis_size(regressors, 1)} dims)",
+  variance_parameters_to_sample: length(structured_spec.q_specs)
+}
+```
+
+```elixir
+# Run the structured Gibbs sampler (lighter settings for interactivity)
+structured_samples =
+  GibbsSampler.sample_structured(obs, structured_spec, 6,
+    burn_in: 3, seed: 77
+  )
+
+Kino.Markdown.new("""
+**Structured sampler ran with #{length(structured_samples)} post-burn-in samples.**
+
+The structured sampler extends the scalar one: instead of sampling a single $Q$,
+it resamples each component's noise variance independently. The model now captures
+trend, seasonality, *and* the relationship with control series.
+""")
+```
+
+---
+
+# Part III: Answering Causal Questions
+
+## 8. The counterfactual: what would have happened?
+
+This is the heart of BSTS. The algorithm for causal inference:
+
+1. **Fit on pre-period only**: Learn the baseline model when no intervention is present
+2. **Project the counterfactual**: Simulate the model forward through the post-period to
+   generate "what would have happened without the intervention"
+3. **Compute the effect**: $\text{effect}(t) = \text{actual}(t) - \text{counterfactual}(t)$
+
+Because the counterfactual comes from posterior draws (many possible trajectories), the effect
+is automatically a *distribution* with uncertainty bounds.
+
+### 8.1 Simple causal impact (local-level model)
+
+The simplest version uses the scalar sampler with no trend, no seasonality, no controls.
+Surprisingly decent as a starting point, but it can't distinguish intervention effects from
+pre-existing trends.
+
+```elixir
+impact_scalar =
+  CausalImpact.estimate(obs, pre_period, post_period,
+    num_samples: 20, burn_in: 10, seed: 999
+  )
+
+summary_scalar = CausalImpact.summary(impact_scalar)
+
+# Build the counterfactual band from posterior draws
+cf_bands = Guide.per_t_bands(impact_scalar.counterfactual, 0.05)
+
+band_rows =
+  cf_bands
+  |> Enum.with_index()
+  |> Enum.map(fn {b, t} -> %{t: t, mean: b.mean, lower: b.lower, upper: b.upper} end)
+
+post_actual = impact_scalar.actual
+
+Guide.band_plot(band_rows,
+  title: "Scalar causal impact: actual (red) vs. counterfactual band (blue)",
+  actual: post_actual
+)
+```
+
+The blue band is the counterfactual — the model's estimate of what would have happened without
+TV. Where the red line (actual) rises above the band, the model attributes the difference to
+the intervention. The width of the band is the model's uncertainty.
+
+### 8.2 Structured causal impact with controls
+
+Now we use the full structured model. The controls are critical: if organic search also rose
+during the post-period for unrelated reasons, the regression component absorbs that, preventing
+it from being misattributed to TV.
+
+```elixir
+impact_structured =
+  CausalImpact.estimate_structured(
+    obs, pre_period, post_period, structured_spec,
+    num_samples: 10, burn_in: 5, seed: 202
+  )
+
+summary_structured = CausalImpact.summary(impact_structured)
+
+# Spaghetti plot: show individual counterfactual trajectories
+Guide.spaghetti_plot(
+  impact_structured.counterfactual,
+  title: "Each line is one possible 'what would have happened' — the posterior is a distribution",
+  actual: post_actual,
+  max_draws: 10
+)
+```
+
+**Why spaghetti plots matter:** The shaded band from 8.1 shows a summary (mean ± interval).
+The spaghetti plot shows the *actual draws* — each thin line is one possible counterfactual
+reality. This makes it viscerally clear that we're not computing a single answer but reasoning
+over many possible worlds.
+
+### 8.3 How close did we get to the truth?
+
+```elixir
+Kino.Markdown.new("""
+### Recovery comparison
+
+| Estimator | Cumulative effect estimate | True lift | Absolute error |
+|-----------|---------------------------|-----------|---------------|
+| Scalar (local level) | #{Float.round(summary_scalar.cumulative_effect.mean, 1)} | #{Float.round(true_post_lift, 1)} | #{Float.round(abs(summary_scalar.cumulative_effect.mean - true_post_lift), 1)} |
+| Structured (trend + seasonal + controls) | #{Float.round(summary_structured.cumulative_effect.mean, 1)} | #{Float.round(true_post_lift, 1)} | #{Float.round(abs(summary_structured.cumulative_effect.mean - true_post_lift), 1)} |
+
+**Relative effect (structured):** #{Float.round(summary_structured.relative_effect.mean * 100, 1)}%
+
+The structured model generally recovers the truth more accurately because it correctly accounts
+for seasonal and trend patterns that the scalar model would conflate with the effect.
+""")
+```
+
+### 8.4 Fast filter-based estimate (no MCMC)
+
+For real-time dashboards where speed matters more than full Bayesian uncertainty:
+
+```elixir
+filter_estimate =
+  CausalImpact.estimate_from_filter(obs, Enum.to_list(96..143),
+    f: 1.0, h: 1.0, q: 0.8, r: 4.0,
+    x0: List.first(obs), p0: 10.0, alpha: 0.05
+  )
+
+Kino.Markdown.new("""
+| Method | Cumulative effect | Speed |
+|--------|------------------|-------|
+| MCMC (structured) | #{Float.round(summary_structured.cumulative_effect.mean, 1)} | Seconds |
+| Kalman filter (no MCMC) | #{Float.round(filter_estimate.cumulative_effect.mean, 1)} | Milliseconds |
+
+The filter estimate skips MCMC entirely — it runs a single Kalman pass with fixed variances.
+Fast enough for monitoring; use MCMC for final reports.
+""")
+```
+
+## 9. The one-call API: when you just need an answer
+
+Leadership doesn't want trace plots. They want: "Did it work? By how much? Are we sure?"
+
+`InterventionAnalysis` bundles the entire workflow into a single function call:
+
+```elixir
+analysis =
+  InterventionAnalysis.analyze(
+    obs,
+    %{pre_period: pre_period, post_period: post_period},
+    seasonality: 24,
+    method: :filter,
+    f: 1.0, h: 1.0, q: 0.8, r: 4.0,
+    x0: List.first(obs), p0: 10.0,
+    seed: 42
+  )
+
+Kino.Markdown.new("""
+### Executive summary
+
+- **Significant?** #{if analysis.significant?, do: "Yes ✓", else: "No ✗"}
+- **Cumulative effect:** #{Float.round(analysis.summary.cumulative_effect.mean, 1)} sessions
+- **Relative effect:** #{Float.round(analysis.summary.relative_effect.mean * 100, 1)}%
+""")
+```
+
+```elixir
+# The full human-readable report
+InterventionAnalysis.report(analysis)
+```
+
+## 10. Attribution: splitting credit fairly
+
+**The problem:** Four TV spots aired. The total lift is known. But which spots deserve credit?
+Spots A & B overlap, and spots C & D overlap. Naive heuristics (first-touch, last-touch,
+even-split) are arbitrary and misleading.
+
+**The solution:** **Shapley values** from cooperative game theory. The Shapley value for each
+spot is its average marginal contribution across *all possible orderings* of spots joining a
+coalition. It satisfies fairness axioms: if a spot contributes nothing, it gets nothing; if two
+spots are interchangeable, they get equal shares; and the shares sum exactly to the total.
+
+### Why Shapley works: a 2-player example
+
+Imagine just spots A and B. There are two orderings:
+- A joins first, then B: A's contribution = value({A}). B's contribution = value({A,B}) - value({A}).
+- B joins first, then A: B's contribution = value({B}). A's contribution = value({A,B}) - value({B}).
+
+Shapley(A) = average of A's marginal contributions = ½[value({A}) + value({A,B}) - value({B})]
+
+This generalizes to N spots by averaging over all N! orderings. For 4 spots (24 orderings),
+exact computation is feasible. For many spots, BstsNx uses Monte Carlo approximation.
+
+```elixir
+# Show the spot windows visually
+Guide.gantt_chart(spots_post,
+  title: "Spot time windows — notice the overlaps"
+)
+```
+
+```elixir
+# Run posterior-propagated attribution
+post_obs = Enum.slice(obs, 96..143)
+counterfactual_mean = Guide.posterior_mean(impact_structured.counterfactual)
+
+attr_posterior =
+  SpotAttributor.attribute_posterior(
+    post_obs, spots_post, impact_structured.counterfactual, 0.0,
+    alpha: 0.05, n_samples: 3_000, decay: 0.7
+  )
+
+# Bar chart with uncertainty
+attr_rows =
+  Enum.map(attr_posterior.attributions, fn a ->
+    %{label: a.spot_id, value: a.lift, lower: a.ci_lower, upper: a.ci_upper}
+  end)
+
+Guide.attribution_chart(attr_rows,
+  title: "Posterior mean lift by spot (with 95% credible intervals)"
+)
+```
+
+```elixir
+sum_of_spots = Enum.reduce(attr_posterior.attributions, 0.0, fn a, acc -> acc + a.lift end)
+
+Kino.Markdown.new("""
+### Attribution reconciliation
+
+| Metric | Value |
+|--------|-------|
+| Total lift (from posterior) | #{Float.round(attr_posterior.total_lift, 1)} |
+| Sum of spot attributions | #{Float.round(sum_of_spots, 1)} |
+| Reconciliation gap | #{Float.round(attr_posterior.total_lift - sum_of_spots, 2)} |
+
+A near-zero gap confirms the Shapley values sum to the total — no credit is created or lost.
+""")
+```
+
+```elixir
+Kino.DataTable.new(attr_posterior.attributions)
+```
+
+## 11. The full pipeline: one call to rule them all
+
+`Pipeline.run/6` chains structured causal impact + Shapley attribution in a single call.
+This is the production entrypoint.
+
+```elixir
+pipeline_result =
+  Pipeline.run(
+    obs, pre_period, post_period, spots_post, structured_spec,
+    num_samples: 40, burn_in: 20, seed: 404,
+    alpha: 0.05, shapley_samples: 3_000, decay: 0.7
+  )
+
+Kino.Markdown.new("""
+### Pipeline output
+
+| Metric | Value |
+|--------|-------|
+| Pipeline total lift | #{Float.round(pipeline_result.attributions.total_lift, 1)} |
+| True total lift | #{Float.round(true_post_lift, 1)} |
+| Recovery error | #{Float.round(abs(pipeline_result.attributions.total_lift - true_post_lift), 1)} |
+""")
+```
+
+---
+
+# Part IV: Five Domains, One Engine
+
+The same decompose-project-compare pattern applies across completely different fields. Each
+case study below is self-contained — it generates its own data, runs the analysis, and shows
+the result. The underlying engine is identical; only the *framing* changes.
+
+## 12. Case Study: Did our email campaign drive conversions?
+
+**Context:** You run a 2-week email campaign for an e-commerce site. Daily conversion counts
+are available for 30 days before and 14 days during the campaign. Did the campaign actually
+lift conversions, or did they rise for seasonal reasons?
+
+```elixir
+Guide.seed!(3001)
+
+# Generate synthetic daily conversions with weekly seasonality
+n_pre_days = 30
+n_post_days = 14
+total_days = n_pre_days + n_post_days
+
+# Baseline: 200 conversions/day with weekly pattern and slight trend
+daily_baseline =
+  for d <- 0..(total_days - 1) do
+    200.0 + 0.8 * d + 15.0 * :math.sin(2 * :math.pi * d / 7) + :rand.normal() * 8.0
+  end
+
+# True campaign effect: +25 conversions/day during post-period
+true_campaign_effect = 25.0
+
+daily_obs =
+  daily_baseline
+  |> Enum.with_index()
+  |> Enum.map(fn {b, i} ->
+    if i >= n_pre_days, do: b + true_campaign_effect + :rand.normal() * 3.0, else: b
+  end)
+
+Guide.series_plot(
+  %{"daily conversions" => daily_obs},
+  title: "E-commerce conversions — did the email campaign work?",
+  intervention_at: n_pre_days,
+  x_title: "day",
+  y_title: "conversions"
+)
+```
+
+```elixir
+campaign = %{
+  name: "summer_email_blast",
+  channel: :email,
+  start_index: n_pre_days + 1,
+  end_index: total_days,
+  baseline_start: 1,
+  baseline_end: n_pre_days
+}
+
+marketing_result =
+  MarketingLift.measure_lift(daily_obs, campaign,
+    seasonality: 7,
+    num_samples: 30,
+    burn_in: 15,
+    seed: 700
+  )
+
+Kino.Markdown.new("""
+### Marketing lift result
+
+| Metric | Value |
+|--------|-------|
+| Cumulative lift | #{Float.round(marketing_result.effect.cumulative, 1)} conversions |
+| True cumulative lift | #{Float.round(true_campaign_effect * n_post_days, 1)} conversions |
+| Significant? | #{if marketing_result.significant?, do: "Yes ✓", else: "No ✗"} |
+| Relative lift | #{Float.round(marketing_result.effect.relative * 100, 1)}% |
+
+The model estimates a #{Float.round(marketing_result.effect.relative * 100, 1)}% lift.
+The true effect was #{true_campaign_effect} conversions/day × #{n_post_days} days =
+#{Float.round(true_campaign_effect * n_post_days, 1)} total.
+""")
+```
+
+## 13. Case Study: How much ice cream should we stock?
+
+**Context:** You manage inventory for an ice cream distributor. You have 120 days of historical
+demand data and need to forecast the next 14 days to decide how much to order. Getting the
+point forecast right isn't enough — you need to know the *range* of plausible demand to
+compute safety stock that avoids stockouts 95% of the time.
+
+```elixir
+Guide.seed!(4001)
+
+# Generate demand with strong weekly seasonality and an upward trend
+demand_history =
+  for d <- 0..119 do
+    base = 500.0 + 2.0 * d
+    seasonal = 80.0 * :math.sin(2 * :math.pi * d / 7) + 30.0 * :math.cos(2 * :math.pi * d / 7)
+    base + seasonal + :rand.normal() * 25.0
+  end
+
+# True future (we'll use this to check forecast quality)
+demand_future =
+  for d <- 120..133 do
+    base = 500.0 + 2.0 * d
+    seasonal = 80.0 * :math.sin(2 * :math.pi * d / 7) + 30.0 * :math.cos(2 * :math.pi * d / 7)
+    base + seasonal + :rand.normal() * 25.0
+  end
+
+forecast = DemandForecaster.forecast(demand_history,
+  horizon: 14,
+  seasonality: 7,
+  num_samples: 40,
+  burn_in: 20,
+  seed: 16
+)
+
+# Compute safety stock for 95% service level, 7-day lead time
+safety = DemandForecaster.safety_stock(forecast, service_level: 0.95, lead_time: 7)
+
+# Visualize forecast vs. actual
+band_rows =
+  0..13
+  |> Enum.map(fn t ->
+    %{
+      t: t,
+      mean: Enum.at(forecast.mean, t),
+      lower: Enum.at(forecast.lower, t),
+      upper: Enum.at(forecast.upper, t)
+    }
+  end)
+
+Guide.band_plot(band_rows,
+  title: "14-day demand forecast (blue band) vs. actual demand (red)",
+  actual: demand_future
+)
+```
+
+```elixir
+# Forecast quality metrics
+forecast_mae = Guide.mae(demand_future, forecast.mean)
+
+coverage =
+  Enum.zip(demand_future, Enum.zip(forecast.lower, forecast.upper))
+  |> Enum.count(fn {actual, {lo, hi}} -> actual >= lo and actual <= hi end)
+
+Kino.Markdown.new("""
+### Demand forecast evaluation
+
+| Metric | Value |
+|--------|-------|
+| MAE | #{Float.round(forecast_mae, 1)} units/day |
+| Interval coverage | #{coverage}/#{length(demand_future)} days (#{Float.round(100 * coverage / length(demand_future), 0)}%) |
+| Safety stock (7-day lead time, 95% SL) | **#{Float.round(safety.total, 0)} units** |
+
+The safety stock is computed from the *upper quantile* of the forecast distribution,
+not the mean. This is why Bayesian forecasting is valuable for operations: the
+uncertainty is built into the decision, not bolted on as an afterthought.
+""")
+```
+
+## 14. Case Study: Is this server spike an anomaly?
+
+**Context:** You monitor a web service. You have 96 hours of normal baseline traffic, then
+a new 24-hour monitoring window opens. Two genuine anomalies occur — a traffic spike at
+hour 8 and a dip at hour 16. Can the detector find them without flooding you with false alarms?
+
+```elixir
+normal_history = Enum.take(obs, 96)
+stream = Enum.take(Enum.drop(obs, 96), 24)
+
+# Inject two synthetic anomalies
+stream_with_anomalies =
+  stream
+  |> List.update_at(8, &(&1 + 35.0))   # spike
+  |> List.update_at(16, &(&1 - 30.0))  # dip
+
+# Fit the detector on normal history
+detector = AnomalyDetector.fit(normal_history, method: :filter, alpha: 0.01)
+
+# Score the new window
+scores = AnomalyDetector.score(detector, stream_with_anomalies)
+summary = AnomalyDetector.summary(scores)
+```
+
+```elixir
+# Plot the monitoring stream with anomalies highlighted
+z_scores = Enum.map(scores, &abs(&1.z_score))
+threshold = BstsNx.Utils.z_score(0.01)
+
+z_data =
+  z_scores
+  |> Enum.with_index()
+  |> Enum.flat_map(fn {z, t} ->
+    [
+      %{"series" => "|z-score|", "t" => t, "value" => z},
+      %{"series" => "threshold (α=0.01)", "t" => t, "value" => threshold}
+    ]
+  end)
+
+Vl.new(width: 900, height: 300, title: "Anomaly detection: z-scores vs. threshold")
+|> Vl.data_from_values(z_data)
+|> Vl.mark(:line)
+|> Vl.encode_field(:x, "t", type: :quantitative, title: "hour")
+|> Vl.encode_field(:y, "value", type: :quantitative, title: "|z-score|")
+|> Vl.encode_field(:color, "series", type: :nominal, legend: [orient: :bottom])
+|> Vl.encode_field(:stroke_dash, "series", type: :nominal)
+```
+
+```elixir
+flagged_indices =
+  scores
+  |> Enum.with_index()
+  |> Enum.filter(fn {s, _} -> s.anomaly? end)
+  |> Enum.map(fn {s, i} -> %{hour: i, z_score: Float.round(abs(s.z_score), 2), severity: s.severity} end)
+
+Kino.Markdown.new("""
+### Detection results
+
+| Metric | Value |
+|--------|-------|
+| Anomalies flagged | #{summary.anomalies} |
+| Injected anomalies | 2 (at hours 8 and 16) |
+| False alarms | #{max(summary.anomalies - 2, 0)} |
+
+The detector flags points where the z-score exceeds the threshold. At α=0.01,
+roughly 1% of normal observations would be falsely flagged. The two injected
+anomalies should stand out clearly.
+""")
+```
+
+```elixir
+Kino.DataTable.new(flagged_indices)
+```
+
+## 15. Case Study: Did the new speed limit reduce accidents?
+
+**Context:** A city lowered speed limits on major roads starting in month 37. You have monthly
+accident counts for 60 months total (36 before, 24 after). This is a classic **interrupted time
+series (ITS)** design used in public health and policy evaluation.
+
+The statistical question is identical to causal impact: estimate the counterfactual
+("what would accident rates have been without the policy?") and compare it to the actual
+post-policy data. The framing is different — instead of marketing lift, we're measuring
+policy effect — but the engine is the same.
+
+```elixir
+Guide.seed!(5001)
+
+# Generate monthly accidents with a trend and seasonality
+n_pre_months = 36
+n_post_months = 24
+total_months = n_pre_months + n_post_months
+true_policy_effect = -8.0  # reduction of 8 accidents/month
+
+monthly_baseline =
+  for m <- 0..(total_months - 1) do
+    base = 45.0 - 0.1 * m  # slight natural decline
+    seasonal = 5.0 * :math.sin(2 * :math.pi * m / 12)
+    base + seasonal + :rand.normal() * 3.0
+  end
+
+monthly_obs =
+  monthly_baseline
+  |> Enum.with_index()
+  |> Enum.map(fn {b, i} ->
+    if i >= n_pre_months, do: b + true_policy_effect + :rand.normal() * 2.0, else: b
+  end)
+
+Guide.series_plot(
+  %{"monthly accidents" => monthly_obs},
+  title: "Monthly traffic accidents — speed limit changed at month 37",
+  intervention_at: n_pre_months,
+  x_title: "month",
+  y_title: "accidents"
+)
+```
+
+```elixir
+intervention = %{
+  intervention_name: "speed_limit_reduction",
+  intervention_date_index: n_pre_months + 1,
+  pre_period_start: 1,
+  outcome_metric: "accidents per month"
+}
+
+policy_result =
+  PolicyEvaluator.evaluate(monthly_obs, intervention,
+    post_period_end: total_months,
+    seasonality: 12,
+    num_samples: 30,
+    burn_in: 15,
+    seed: 701
+  )
+
+Kino.Markdown.new("""
+### Policy evaluation result
+
+| Metric | Value |
+|--------|-------|
+| Cumulative effect | #{Float.round(policy_result.effect.cumulative, 1)} accidents |
+| Per-period effect | #{Float.round(policy_result.effect.per_period, 1)} accidents/month |
+| True effect | #{true_policy_effect} accidents/month |
+| Significant? | #{if policy_result.significant?, do: "Yes ✓", else: "No ✗"} |
+
+The model estimates the speed limit reduction prevented approximately
+#{Float.round(abs(policy_result.effect.cumulative), 0)} accidents over
+#{n_post_months} months. The true effect was #{abs(true_policy_effect)} fewer
+accidents per month × #{n_post_months} months = #{abs(true_policy_effect * n_post_months)}.
+""")
+```
+
+## 16. Case Study: Which TV spots earned their airtime?
+
+**Context:** This brings together everything from Parts II-III in a single production-ready
+call. Four TV spots aired during a championship game. Leadership wants to know: what was the
+total lift, and which spots get credit?
+
+```elixir
+tv_result =
+  TVAttribution.attribute(
+    obs, spots_post,
+    pre_period: pre_period,
+    post_period: post_period,
+    seasonality: 24,
+    num_samples: 30,
+    burn_in: 15,
+    seed: 501,
+    alpha: 0.05
+  )
+
+# Attribution bar chart
+tv_attr_rows =
+  Enum.map(tv_result.spots, fn s ->
+    %{label: s.spot_id, value: s.lift, lower: s[:ci_lower] || s.lift, upper: s[:ci_upper] || s.lift}
+  end)
+
+Guide.attribution_chart(tv_attr_rows,
+  title: "TV attribution: lift by spot with credible intervals"
+)
+```
+
+```elixir
+Kino.Markdown.new("""
+### TV attribution summary
+
+| Metric | Value |
+|--------|-------|
+| Total lift | #{Float.round(tv_result.total_lift, 1)} sessions |
+| Total lift SD | #{Float.round(tv_result.total_lift_sd, 1)} |
+| True total lift | #{Float.round(true_post_lift, 1)} sessions |
+| Overlap groups | #{inspect(tv_result.overlaps)} |
+
+Spots in the same overlap group have their credit allocated via Shapley values,
+ensuring fair attribution even when air windows overlap.
+""")
+```
+
+---
+
+# Part V: Trust But Verify
+
+## 17. Covariate selection: choosing the right controls
+
+Including irrelevant controls adds noise; including too many leads to overfitting. Covariate
+selection screens candidates by their correlation with the target during the pre-period.
+
+```elixir
+target_pre = Enum.take(obs, 96)
+
+candidate_matrix =
+  controls
+  |> Enum.map(&Enum.take(&1, 96))
+  |> Nx.tensor()
+  |> Nx.transpose()
+
+selection = CovariateSelection.select(target_pre, candidate_matrix,
+  threshold: 0.15,
+  max_controls: 2
+)
+
+corr_rows =
+  Enum.map(selection.correlations, fn {idx, corr} ->
+    %{candidate: "control_#{idx}", correlation: Float.round(corr, 3), selected?: idx in selection.selected_indices}
+  end)
+
+Kino.DataTable.new(corr_rows)
+```
+
+## 18. Breaking your own results: five diagnostic checks
+
+Before publishing any causal estimate, try to break it. These five checks catch the most
+common failure modes:
+
+```elixir
+post_obs_list = Enum.slice(obs, 96..143)
+
+{rolling_cf, rolling_fit} =
+  RollingBaseline.fit_and_predict(
+    Enum.take(obs, 96), 48,
+    num_seasons: 24,
+    num_samples: 30,
+    burn_in: 15,
+    seed: 500
+  )
+
+actual_t = Nx.tensor(post_obs_list)
+baseline_t = Nx.tensor(rolling_cf.mean)
+state_var_t = Nx.tensor(rolling_cf.variance)
+indices = Enum.to_list(0..(length(post_obs_list) - 1))
+
+# 1. Prediction error
+pred_err = Validation.prediction_error(actual_t, baseline_t, indices)
+
+# 2. Coverage
+coverage = Validation.coverage(actual_t, baseline_t, state_var_t, rolling_cf.obs_variance, indices)
+
+# 3. Durbin-Watson (residual autocorrelation)
+residuals = Nx.subtract(actual_t, baseline_t)
+dw = Validation.durbin_watson(residuals, indices)
+
+# 4. Placebo test
+estimate_fn = fn sessions, idxs ->
+  vals = Enum.map(idxs, &Enum.at(sessions, &1))
+  lift = Enum.sum(vals) - length(vals) * (Enum.sum(sessions) / length(sessions))
+  sd = max(abs(lift) * 0.1, 1.0)
+  %{lift_sessions: lift, lift_pct: lift / max(Enum.sum(sessions), 1.0),
+    lift_ci95: %{lower: lift - 1.96 * sd, upper: lift + 1.96 * sd, sd: sd}}
+end
+
+placebo = Validation.placebo_test(post_obs_list, Enum.to_list(5..12), estimate_fn)
+
+# 5. Effect stability
+stability =
+  Validation.effect_stability(
+    summary_structured.cumulative_effect.mean,
+    fn window ->
+      h = max(1, div(window, 60))
+      post_slice = Enum.take(post_obs_list, h)
+      base_slice = Enum.take(counterfactual_mean, h)
+      Enum.zip(post_slice, base_slice) |> Enum.reduce(0.0, fn {a, b}, acc -> acc + (a - b) end)
+    end,
+    120, 30
+  )
+
+# Aggregate assessment
+assessment =
+  Validation.assess(%{
+    prediction_error: pred_err,
+    coverage: coverage,
+    durbin_watson: dw,
+    placebo: placebo,
+    effect_stability: stability
+  })
+
+release_ready? = Enum.all?(assessment, fn {_k, v} -> v in [:pass, :skip] end)
+```
+
+```elixir
+Kino.Markdown.new("""
+### Validation dashboard
+
+| Check | What it tests | Result |
+|-------|--------------|--------|
+| Prediction error | Does the baseline predict well out-of-sample? | #{Map.get(assessment, :prediction_error, :skip)} |
+| Coverage | Do credible intervals contain actuals? | #{Map.get(assessment, :coverage, :skip)} |
+| Durbin-Watson | Are residuals autocorrelated? (want ~2.0) | #{Map.get(assessment, :durbin_watson, :skip)} |
+| Placebo | Does the method find false effects in null periods? | #{Map.get(assessment, :placebo, :skip)} |
+| Stability | Does the effect estimate stabilize? | #{Map.get(assessment, :effect_stability, :skip)} |
+
+**Release ready?** #{if release_ready?, do: "Yes ✓ — all checks pass", else: "No ✗ — investigate failing checks before publishing"}
+""")
+```
+
+### Calibration: can we recover a known lift?
+
+The ultimate sanity check. Generate completely fresh data with a known lift, run the full
+estimator, and check whether the credible interval covers the truth.
+
+```elixir
+calibration =
+  Validation.known_lift_injection(
+    40.0,
+    Components.local_level_spec(),
+    n_pre: 60,
+    n_post: 20,
+    num_samples: 40,
+    burn_in: 20,
+    seed: 2026,
+    credible_level: 0.95
+  )
+
+Kino.Markdown.new("""
+### Calibration result
+
+| Metric | Value |
+|--------|-------|
+| True injected lift | #{calibration.true_lift} |
+| Estimated mean | #{Float.round(calibration.estimated_mean, 1)} |
+| 95% CI covers truth? | #{if calibration.covered, do: "Yes ✓", else: "No ✗"} |
+| Relative error | #{Float.round(100 * calibration.relative_error, 1)}% |
+
+A well-calibrated method should cover the true value ~95% of the time when using 95% intervals.
+""")
+```
+
+---
+
+# Part VI: Forecasting Beyond Causal Inference
+
+## 19. Bayesian forecasting with credible intervals
+
+Causal impact asks "what *would have* happened?" Forecasting asks "what *will* happen?" Same
+engine, different direction. The posterior draws from the MCMC sampler each produce a different
+future trajectory, giving calibrated prediction intervals.
+
+```elixir
+train = Enum.take(obs, 120)
+test = Enum.drop(obs, 120)
+
+forecast =
+  Forecaster.fit_predict(train, length(test),
+    seasonality: 24,
+    num_samples: 40,
+    burn_in: 20,
+    seed: 15
+  )
+
+band_rows =
+  0..(length(test) - 1)
+  |> Enum.map(fn t ->
+    %{t: t, mean: Enum.at(forecast.mean, t), lower: Enum.at(forecast.lower, t), upper: Enum.at(forecast.upper, t)}
+  end)
+
+Guide.band_plot(band_rows,
+  title: "24-hour forecast: prediction band vs. actual",
+  actual: test
+)
+```
+
+```elixir
+forecast_mae = Guide.mae(test, forecast.mean)
+
+fc_coverage =
+  Enum.zip(test, Enum.zip(forecast.lower, forecast.upper))
+  |> Enum.count(fn {a, {lo, hi}} -> a >= lo and a <= hi end)
+
+Kino.Markdown.new("""
+### Forecast evaluation
+
+| Metric | Value |
+|--------|-------|
+| MAE | #{Float.round(forecast_mae, 2)} |
+| Interval coverage | #{fc_coverage}/#{length(test)} (#{Float.round(100 * fc_coverage / length(test), 0)}%) |
+
+Well-calibrated 95% intervals should contain ~95% of actual values.
+""")
+```
+
+### AR baseline comparison
+
+For context, here's a simpler autoregressive (AR) model. AR(p) predicts the next value as a
+weighted combination of the p most recent values. No structural decomposition, no seasonality
+modeling — just recent history.
+
+```elixir
+ar_forecast =
+  BstsNx.BCT.ARForecaster.fit_predict(train, length(test),
+    order: 2,
+    num_samples: 200,
+    seed: 17
+  )
+
+ar_mae = Guide.mae(test, ar_forecast.mean)
+
+Kino.Markdown.new("""
+### BSTS vs. AR(2) comparison
+
+| Model | MAE |
+|-------|-----|
+| BSTS (trend + seasonal) | #{Float.round(forecast_mae, 2)} |
+| AR(2) | #{Float.round(ar_mae, 2)} |
+
+BSTS typically outperforms simple AR models when the data has clear structural patterns
+(trend, seasonality). AR models can be competitive for short horizons when autocorrelation
+is the dominant signal.
+""")
+```
+
+---
+
+# Epilogue
+
+## 20. When to use what: a decision guide
+
+```elixir
+Kino.Markdown.new("""
+### Which API for which question?
+
+| Question | Module | Key function |
+|----------|--------|-------------|
+| "Did this intervention have a causal effect?" | `CausalImpact` | `estimate/4` or `estimate_structured/5` |
+| "Just tell me if it was significant" | `InterventionAnalysis` | `analyze/3` |
+| "Which marketing channel drove the most lift?" | `MarketingLift` | `measure_lift/3` |
+| "Did this policy change work?" | `PolicyEvaluator` | `evaluate/3` |
+| "Which TV spots deserve credit?" | `TVAttribution` | `attribute/3` |
+| "How much should we order next week?" | `DemandForecaster` | `forecast/2` + `safety_stock/2` |
+| "What will happen in the next N periods?" | `Forecaster` | `fit_predict/3` |
+| "Is this data point abnormal?" | `AnomalyDetector` | `fit/2` + `score/2` |
+| "Causal impact + attribution in one call" | `Pipeline` | `run/6` |
+| "Can I trust these results?" | `Validation` | `assess/1` |
+
+### How complexity flows
+
+```
+Components ──► ModelSpec ──► GibbsSampler ──► CausalImpact ──► Pipeline
+    │              │              │               │               │
+    └──► compose   └──► specs     └──► posterior   └──► effect     └──► attribution
+```
+
+Every high-level API ultimately calls the same statistical engine. Understanding
+the engine (Parts II-III) lets you diagnose problems and tune parameters in any
+domain application (Part IV).
+""")
+```
+
+## 21. API reference
+
+```elixir
+modules = [
+  BstsNx.KalmanFilter, BstsNx.Smoother, BstsNx.GibbsSampler,
+  BstsNx.Components, BstsNx.CausalImpact, BstsNx.InterventionAnalysis,
+  BstsNx.Forecaster, BstsNx.Pipeline,
+  BstsNx.Applications.AnomalyDetector, BstsNx.Applications.DemandForecaster,
+  BstsNx.Applications.MarketingLift, BstsNx.Applications.PolicyEvaluator,
+  BstsNx.Applications.TVAttribution,
+  BstsNx.SpotAttributor, BstsNx.ShapleyAllocator,
+  BstsNx.CovariateSelection, BstsNx.Validation, BstsNx.Diagnostics,
+  BstsNx.Synthetic.Generator, BstsNx.Synthetic.Adstock
+]
+
+rows =
+  for mod <- modules,
+      {fun, arity} <- mod.__info__(:functions),
+      fun not in [:module_info, :__info__] do
+    %{module: inspect(mod), function: "#{fun}/#{arity}"}
+  end
+
+Kino.DataTable.new(rows)
+```
+
+## 22. Exercises for the curious
+
+1. **Sensitivity analysis**: Change `config.effect.coefficient` from 12.0 to 5.0. How does
+   the causal impact estimate and its uncertainty change? At what effect size does the signal
+   become indistinguishable from noise?
+
+2. **Model complexity**: Run the causal impact estimator with just a local level model, then
+   with trend + seasonality, then with trend + seasonality + controls. Compare recovery
+   accuracy. When does added complexity help vs. hurt?
+
+3. **Speed vs. accuracy**: Replace `method: :mcmc` with `method: :filter` in the intervention
+   analysis. How much faster is it? How much accuracy do you lose?
+
+4. **Overlapping spots**: Edit the spot definitions to create more overlap. How do the Shapley
+   allocations change? What happens when all spots have identical windows?
+
+5. **Anomaly injection**: Add anomalies at different magnitudes (5, 10, 20, 50 units above
+   baseline). At what magnitude does the detector reliably flag them? How does the alpha
+   threshold affect the trade-off between detection and false alarms?
+
+6. **Calibration sweep**: Run `known_lift_injection` with true lifts of 10, 20, 40, 80, 160.
+   Plot coverage vs. true lift. Is the method better calibrated for large or small effects?
+
+## 23. What you've learned
+
+| Section | Concept | Key insight |
+|---------|---------|-------------|
+| 1-2 | The problem | Raw data is signal + noise; your eyes can't tell them apart |
+| 3 | Synthetic data | Test on known truth before trusting on real data |
+| 4 | Adstock + saturation | Marketing effects carry over and diminish — domain knowledge matters |
+| 5 | Kalman filter | Optimal online blending of model prediction and noisy observation |
+| 6 | RTS smoother | Hindsight (backward pass) always improves estimates |
+| 7 | Gibbs sampler | When you don't know the parameters, alternate: sample states, then sample parameters |
+| 8-9 | Causal impact | Fit pre-period → project counterfactual → subtract from actual |
+| 10-11 | Shapley attribution | Fair credit allocation across overlapping interventions |
+| 12 | Marketing lift | Same engine, marketing framing |
+| 13 | Demand forecasting | Posterior intervals → safety stock that accounts for uncertainty |
+| 14 | Anomaly detection | Kalman prediction errors as calibrated anomaly scores |
+| 15 | Policy evaluation | Interrupted time series = causal impact for policy |
+| 16 | TV attribution | Full pipeline: model → counterfactual → Shapley → per-spot credit |
+| 17-18 | Validation | Placebo tests, coverage checks, calibration — break your results before publishing |
+
+The unifying idea: **decompose** the series into structure + noise, **project** the structure
+forward to build a counterfactual or forecast, and **compare** the projection against reality
+to measure effects, detect anomalies, or quantify uncertainty.
+
+Every section used the same underlying engine. The only thing that changed was the question.
