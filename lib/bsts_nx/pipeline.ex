@@ -1,23 +1,15 @@
 defmodule BstsNx.Pipeline do
   @moduledoc """
-  End-to-end pipeline: CausalImpact estimation → SpotAttributor.
+  End-to-end counterfactual attribution pipeline.
 
-  Chains `CausalImpact.estimate_structured/5` with
-  `SpotAttributor.attribute_posterior/5` so that a single call produces
-  per-spot TV lift attributions with Shapley allocation for overlaps.
+  Operational mode is the default: it delegates to `BstsNx.Operational` for a
+  forecast-first fixed-variance counterfactual, then passes the result to
+  `SpotAttributor.attribute/4`.
 
-  The pipeline:
-
-  1. Fits a structured state-space model on the pre-period via MCMC
-  2. Generates posterior counterfactual draws for the post-period
-  3. Propagates each draw through SpotAttributor to preserve correlation
-  4. Aggregates per-spot lift distributions across draws
-
-  Since each posterior counterfactual draw already includes observation
-  noise from the forward simulation, `obs_variance` is set to 0.0 to
-  avoid double-counting.  The posterior propagation approach is more
-  accurate than collapsing to mean/variance first because it preserves
-  the correlation structure across time steps.
+  Bayesian mode remains available with `mode: :bayesian`: it chains
+  `CausalImpact.estimate_structured/5` with
+  `SpotAttributor.attribute_posterior/5` to propagate posterior draws through
+  attribution for offline analysis.
 
   ## Usage
 
@@ -31,23 +23,25 @@ defmodule BstsNx.Pipeline do
         %{id: "spot_2", window_start: 3, window_end: 8}
       ]
 
-      result = Pipeline.run(observations, {1, 70}, {71, 84}, spots, spec,
-        num_samples: 200, seed: 42
-      )
+      result = Pipeline.run(observations, {1, 70}, {71, 84}, spots, spec)
 
       result.attributions      # SpotAttributor result with per-spot lifts
-      result.causal_impact     # raw CausalImpact posterior samples
-      result.summary           # CausalImpact summary statistics
+      result.summary           # operational counterfactual summary
+      result.execution         # explicit method/baseline/backend metadata
   """
 
   alias BstsNx.CausalImpact
+  alias BstsNx.Execution
+  alias BstsNx.Operational
   alias BstsNx.SpotAttributor
 
   @typedoc "Full pipeline result."
   @type pipeline_result :: %{
           attributions: SpotAttributor.attribution_result(),
-          causal_impact: CausalImpact.impact_result(),
-          summary: map()
+          causal_impact: CausalImpact.impact_result() | nil,
+          summary: map(),
+          counterfactual: SpotAttributor.counterfactual() | nil,
+          execution: Execution.t()
         }
 
   @doc """
@@ -58,7 +52,7 @@ defmodule BstsNx.Pipeline do
     * `observations` — full time series (list of numbers)
     * `pre_period` — `{start, end}` (1-based inclusive) for model fitting
     * `post_period` — `{start, end}` (1-based inclusive) for impact assessment;
-      must immediately follow `pre_period`
+      gaps after `pre_period` are allowed
     * `spots` — list of spot maps with 0-based half-open windows
       `[window_start, window_end)` relative to the post-period start
     * `spec` — `%BstsNx.ModelSpec{}` defining the state-space model
@@ -68,6 +62,8 @@ defmodule BstsNx.Pipeline do
 
   Forwarded to `CausalImpact.estimate_structured/5`:
 
+    * `:mode` — `:operational` (default filter baseline) or `:bayesian`
+      (posterior MCMC propagation)
     * `:num_samples` — posterior draws (default: 200)
     * `:burn_in` — burn-in period (default: `num_samples / 2`)
     * `:thin` — thinning interval (default: 1)
@@ -106,32 +102,51 @@ defmodule BstsNx.Pipeline do
 
     validate_spot_windows!(spots, n_post)
 
+    mode = Execution.resolve_mode!(opts, :operational)
     {sa_opts, ci_opts} = split_options(opts)
 
-    # 1. CausalImpact estimation
-    ci_result =
-      CausalImpact.estimate_structured(observations, pre_period, post_period, spec, ci_opts)
+    case mode do
+      :operational ->
+        Operational.run(observations, pre_period, post_period, spots, spec, opts)
 
-    ci_summary = CausalImpact.summary(ci_result)
-
-    # 2. Propagate each posterior draw through SpotAttributor
-    attribution_result =
-      SpotAttributor.attribute_posterior(
-        ci_result.actual,
-        spots,
-        ci_result.counterfactual,
-        0.0,
-        sa_opts
-      )
-
-    %{
-      attributions: attribution_result,
-      causal_impact: ci_result,
-      summary: ci_summary
-    }
+      :bayesian ->
+        run_bayesian(observations, pre_period, post_period, spots, spec, sa_opts, ci_opts)
+    end
   end
 
   # ── Private helpers ──────────────────────────────────────────────────
+
+  defp run_bayesian(observations, pre_period, post_period, spots, spec, sa_opts, ci_opts) do
+    {elapsed_us, result} =
+      Execution.measure(fn ->
+        ci_result =
+          CausalImpact.estimate_structured(observations, pre_period, post_period, spec, ci_opts)
+
+        ci_summary = CausalImpact.summary(ci_result)
+
+        attribution_result =
+          SpotAttributor.attribute_posterior(
+            ci_result.actual,
+            spots,
+            ci_result.counterfactual,
+            0.0,
+            sa_opts
+          )
+
+        %{
+          attributions: attribution_result,
+          causal_impact: ci_result,
+          summary: ci_summary,
+          counterfactual: nil
+        }
+      end)
+
+    Map.put(
+      result,
+      :execution,
+      Execution.metadata(:bayesian, :elixir_nx, :elixir_mcmc, elapsed_us)
+    )
+  end
 
   defp validate_spot_windows!(spots, n_post) do
     Enum.each(spots, fn spot ->
@@ -151,8 +166,9 @@ defmodule BstsNx.Pipeline do
 
   defp split_options(opts) do
     sa_keys = [:alpha, :shapley_samples, :decay]
+    pipeline_keys = [:mode, :method]
     sa_raw = Keyword.take(opts, sa_keys)
-    ci_opts = Keyword.drop(opts, sa_keys)
+    ci_opts = Keyword.drop(opts, sa_keys ++ pipeline_keys)
 
     # Map :shapley_samples → :n_samples for SpotAttributor
     sa_opts =

@@ -60,7 +60,8 @@ defmodule BstsNx.Applications.TVAttribution do
           total_lift_sd: float(),
           overlaps: [[String.t()]],
           causal_impact_summary: map(),
-          raw_pipeline: Pipeline.pipeline_result() | nil
+          raw_pipeline: Pipeline.pipeline_result() | nil,
+          execution: BstsNx.Execution.t()
         }
 
   @doc """
@@ -105,7 +106,8 @@ defmodule BstsNx.Applications.TVAttribution do
       total_lift_sd: result.attributions.total_lift_sd,
       overlaps: result.attributions.overlap_groups,
       causal_impact_summary: result.summary,
-      raw_pipeline: result
+      raw_pipeline: result,
+      execution: result.execution
     }
   end
 
@@ -166,15 +168,14 @@ defmodule BstsNx.Applications.TVAttribution do
 
   # -- Private --
 
-  defp resolve_spec(observations, {pre_start, _pre_end}, opts) do
+  defp resolve_spec(observations, pre_period, opts) do
     # TV attribution defaults to 96 seasonal periods (15-min intervals in a day)
     tv_opts =
       opts
       |> Keyword.take([:model_spec, :seasonality, :regressors])
       |> Keyword.put_new(:seasonality, 96)
 
-    obs_at_start = [Enum.at(observations, pre_start - 1) || 0.0]
-    {spec, _method} = ModelBuilder.build_spec(obs_at_start, tv_opts)
+    {spec, _method} = ModelBuilder.build_intervention_spec(observations, pre_period, tv_opts)
     spec
   end
 end

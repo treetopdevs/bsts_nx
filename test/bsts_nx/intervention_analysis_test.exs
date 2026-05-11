@@ -23,6 +23,14 @@ defmodule BstsNx.InterventionAnalysisTest do
       assert is_map(result.summary)
       assert is_boolean(result.significant?)
       assert result.alpha == 0.05
+      assert result.execution.mode == :operational
+      assert result.execution.baseline == :forecast
+
+      assert result.execution.method_used in [
+               :scalar_forecast_filter,
+               :structured_forecast_filter
+             ]
+
       # The cumulative effect should be positive (around 5 * 10 = 50)
       assert result.summary.cumulative_effect.mean > 0
     end
@@ -117,6 +125,29 @@ defmodule BstsNx.InterventionAnalysisTest do
       assert result.impact == nil
       assert is_map(result.summary)
       assert result.summary.cumulative_effect.mean > 0
+      assert result.execution.mode == :operational
+      assert result.execution.method_used == :scalar_forecast_filter
+    end
+
+    test "method mcmc compatibility alias runs bayesian lane" do
+      :rand.seed(:exsss, {510, 511, 512})
+      pre = Enum.map(1..20, fn _ -> 50.0 + :rand.normal() end)
+      post = Enum.map(1..5, fn _ -> 55.0 + :rand.normal() end)
+      obs = pre ++ post
+
+      result =
+        InterventionAnalysis.analyze(
+          obs,
+          %{pre_period: {1, 20}, post_period: {21, 25}},
+          method: :mcmc,
+          num_samples: 5,
+          burn_in: 2,
+          seed: 42
+        )
+
+      assert result.impact != nil
+      assert result.execution.mode == :bayesian
+      assert result.execution.method_used == :elixir_mcmc
     end
   end
 
@@ -309,6 +340,7 @@ defmodule BstsNx.InterventionAnalysisTest do
 
       assert result.model_spec != nil
       assert is_map(result.summary)
+      assert result.execution.fallback? == false
     end
   end
 end

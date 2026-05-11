@@ -20,6 +20,9 @@ defmodule BstsNx.PipelineTest do
       assert Map.has_key?(result, :attributions)
       assert Map.has_key?(result, :causal_impact)
       assert Map.has_key?(result, :summary)
+      assert Map.has_key?(result, :counterfactual)
+      assert Map.has_key?(result, :execution)
+      assert result.execution.mode == :operational
     end
 
     test "attributions has SpotAttributor structure" do
@@ -44,6 +47,7 @@ defmodule BstsNx.PipelineTest do
 
       result =
         Pipeline.run(obs, {1, 30}, {31, 40}, spots, spec,
+          mode: :bayesian,
           num_samples: 5,
           burn_in: 2,
           seed: 42
@@ -63,6 +67,7 @@ defmodule BstsNx.PipelineTest do
 
       result =
         Pipeline.run(obs, {1, 30}, {31, 40}, spots, spec,
+          mode: :bayesian,
           num_samples: 5,
           burn_in: 2,
           seed: 42
@@ -72,6 +77,7 @@ defmodule BstsNx.PipelineTest do
       assert is_list(summary.point_effects)
       assert is_map(summary.cumulative_effect)
       assert is_map(summary.relative_effect)
+      assert result.execution.mode == :bayesian
     end
   end
 
@@ -120,6 +126,27 @@ defmodule BstsNx.PipelineTest do
       [attr] = result.attributions.attributions
       assert attr.window_start == 2
       assert attr.window_end == 7
+    end
+
+    test "allows a gap between pre_period and post_period" do
+      :rand.seed(:exsss, {210, 211, 212})
+      pre = Enum.map(1..30, fn _ -> 50.0 + :rand.normal() * 2 end)
+      washout = Enum.map(1..4, fn _ -> 52.0 + :rand.normal() * 2 end)
+      post = Enum.map(1..6, fn _ -> 55.0 + :rand.normal() * 2 end)
+      obs = pre ++ washout ++ post
+
+      spec = Components.local_level_spec(initial_state: 50.0, initial_cov: 10.0)
+      spots = [%{id: "s1", window_start: 0, window_end: 6}]
+
+      result =
+        Pipeline.run(obs, {1, 30}, {35, 40}, spots, spec,
+          num_samples: 10,
+          burn_in: 5,
+          seed: 42
+        )
+
+      assert length(result.summary.actual) == 6
+      assert length(result.attributions.attributions) == 1
     end
   end
 
@@ -204,8 +231,8 @@ defmodule BstsNx.PipelineTest do
 
       assert result.attributions.attributions == []
       assert result.attributions.total_lift == 0.0
-      # CausalImpact still runs
-      assert length(result.causal_impact.actual) == 10
+      # Operational filter still runs.
+      assert length(result.summary.actual) == 10
     end
   end
 
@@ -241,6 +268,16 @@ defmodule BstsNx.PipelineTest do
       assert_raise ArgumentError, ~r/window_start.*>.*window_end/, fn ->
         Pipeline.run(obs, {1, 10}, {11, 20}, spots, spec, num_samples: 2, burn_in: 1, seed: 1)
       end
+    end
+
+    test "allows non-contiguous pre and post periods", %{obs: obs, spec: spec} do
+      spots = [%{id: "s1", window_start: 0, window_end: 3}]
+
+      result =
+        Pipeline.run(obs, {1, 10}, {13, 20}, spots, spec, num_samples: 2, burn_in: 1, seed: 1)
+
+      assert length(result.summary.actual) == 8
+      assert length(result.attributions.attributions) == 1
     end
   end
 

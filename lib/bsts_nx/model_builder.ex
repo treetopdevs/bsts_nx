@@ -85,6 +85,44 @@ defmodule BstsNx.ModelBuilder do
   end
 
   @doc """
+  Builds an intervention-analysis model spec from full observations.
+
+  The pre-period controls initial-state choices for default trend components,
+  while full-series regressors are preserved so post-period counterfactuals have
+  the observation rows they need.
+  """
+  @spec build_intervention_spec([number()], {pos_integer(), pos_integer()}, keyword()) ::
+          {ModelSpec.t() | nil, :structured | :scalar}
+  def build_intervention_spec(observations, pre_period, opts \\ []) do
+    validate_pre_period!(observations, pre_period)
+
+    case Keyword.get(opts, :model_spec) do
+      %ModelSpec{} = spec ->
+        {spec, :structured}
+
+      nil ->
+        {pre_start, pre_end} = pre_period
+        pre_count = pre_end - pre_start + 1
+        pre_obs = Enum.slice(observations, pre_start - 1, pre_count)
+
+        opts =
+          case Keyword.fetch(opts, :regressors) do
+            {:ok, regressors} ->
+              Keyword.put(
+                opts,
+                :regressors,
+                validate_regressor_rows!(regressors, length(observations))
+              )
+
+            :error ->
+              opts
+          end
+
+        build_spec(pre_obs, opts)
+    end
+  end
+
+  @doc """
   Builds a model spec that includes control series as regression covariates.
 
   Used by `MarketingLift` and `PolicyEvaluator` when `:control_series` is provided.
@@ -334,16 +372,36 @@ defmodule BstsNx.ModelBuilder do
             "future_regressors columns (#{p}) must match training regressors (#{n_regression_dims})"
     end
 
-    h_last =
-      case spec.h do
-        list when is_list(list) -> List.last(list)
-        %Nx.Tensor{} = h -> h
-      end
-
     static_h =
-      if Nx.rank(h_last) == 2,
-        do: Nx.slice(h_last, [0, 0], [1, n_non_reg]),
-        else: Nx.reshape(Nx.slice(h_last, [0], [n_non_reg]), {1, n_non_reg})
+      case spec.h do
+        list when is_list(list) ->
+          rows = Enum.map(list, &BstsNx.Utils.h_to_row_tensor/1)
+
+          static_rows =
+            Enum.map(rows, fn h_row ->
+              Nx.slice(h_row, [0], [n_non_reg])
+            end)
+
+          [first_static | rest_static] = static_rows
+
+          varying_non_reg? =
+            Enum.any?(rest_static, fn h_row ->
+              Nx.all_close(h_row, first_static, atol: 1.0e-10, rtol: 1.0e-10)
+              |> Nx.to_number() == 0
+            end)
+
+          if varying_non_reg? do
+            raise ArgumentError,
+                  "build_future_h/3 requires a time-invariant non-regression H portion; " <>
+                    "pass a model spec with static trend/seasonal observation mapping"
+          end
+
+          Nx.reshape(first_static, {1, n_non_reg})
+
+        %Nx.Tensor{} = h ->
+          h_row = BstsNx.Utils.h_to_row_tensor(h)
+          Nx.reshape(Nx.slice(h_row, [0], [n_non_reg]), {1, n_non_reg})
+      end
 
     static_h_batched = Nx.broadcast(static_h, {horizon, n_non_reg})
     combined = Nx.concatenate([static_h_batched, future_t], axis: 1)
@@ -416,6 +474,39 @@ defmodule BstsNx.ModelBuilder do
 
   defp maybe_put_regressors(opts, nil), do: opts
   defp maybe_put_regressors(opts, regressors), do: Keyword.put(opts, :regressors, regressors)
+
+  defp validate_pre_period!(observations, {pre_start, pre_end})
+       when is_integer(pre_start) and is_integer(pre_end) do
+    n = length(observations)
+
+    if pre_start < 1 or pre_end < pre_start or pre_end > n do
+      raise ArgumentError,
+            "pre_period must be {start, end} within [1, #{n}], got: #{inspect({pre_start, pre_end})}"
+    end
+  end
+
+  defp validate_pre_period!(observations, pre_period) do
+    raise ArgumentError,
+          "pre_period must be {start, end} within [1, #{length(observations)}], got: #{inspect(pre_period)}"
+  end
+
+  defp validate_regressor_rows!(regressors, expected_rows) do
+    tensor = ensure_tensor(regressors)
+
+    if Nx.rank(tensor) != 2 do
+      raise ArgumentError,
+            "regressors must be a rank-2 tensor/list with #{expected_rows} rows, got shape #{inspect(Nx.shape(tensor))}"
+    end
+
+    rows = Nx.axis_size(tensor, 0)
+
+    if rows != expected_rows do
+      raise ArgumentError,
+            "regressors row count (#{rows}) must match observations (#{expected_rows})"
+    end
+
+    tensor
+  end
 
   defp maybe_select_controls(observations, regressors, opts) do
     case normalize_control_selection(Keyword.get(opts, :control_selection)) do

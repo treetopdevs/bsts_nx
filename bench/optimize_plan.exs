@@ -1,6 +1,6 @@
 Mix.Task.run("app.start")
 
-alias BstsNx.{Components, GibbsSampler}
+alias BstsNx.{Components, GibbsSampler, Operational}
 
 defmodule BstsNx.Bench.OptimizePlan do
   @moduledoc false
@@ -10,6 +10,56 @@ defmodule BstsNx.Bench.OptimizePlan do
     scalar_obs = scalar_observations(200)
     structured_obs = structured_observations(96)
     structured_spec = structured_spec(structured_obs)
+    operational_obs = operational_observations()
+
+    scalar_operational_spec =
+      Components.local_level_spec(initial_state: hd(operational_obs), initial_cov: 10.0)
+
+    structured_operational_spec =
+      Components.local_linear_trend_spec(
+        initial_level: hd(operational_obs),
+        initial_slope: 0.0,
+        initial_cov_level: 10.0,
+        initial_cov_slope: 1.0,
+        var_level: 0.8,
+        var_slope: 0.02,
+        obs_var: 4.0
+      )
+
+    operational_spots = [
+      %{id: "spot_a", window_start: 0, window_end: 12},
+      %{id: "spot_b", window_start: 12, window_end: 24}
+    ]
+
+    prepared_scalar = Operational.prepare(scalar_operational_spec, {1, 96}, {97, 144})
+    prepared_structured = Operational.prepare(structured_operational_spec, {1, 96}, {97, 144})
+
+    scalar_forecast =
+      benchmark_warm(fn ->
+        Operational.forecast(prepared_scalar, operational_obs)
+      end)
+
+    structured_forecast =
+      benchmark_warm(fn ->
+        Operational.forecast(prepared_structured, operational_obs)
+      end)
+
+    guide_pipeline =
+      benchmark_warm(fn ->
+        Operational.run(prepared_scalar, operational_obs, operational_spots,
+          alpha: 0.05,
+          shapley_samples: 250
+        )
+      end)
+
+    batch_obs = batch_operational_observations(2_000)
+    batch_spec = structured_spec(batch_obs)
+    batch_prepared = Operational.prepare(batch_spec, {1, 1_500}, {1_501, 2_000})
+
+    batch_pipeline =
+      benchmark_warm(fn ->
+        Operational.run(batch_prepared, batch_obs, operational_spots, shapley_samples: 250)
+      end)
 
     scalar = benchmark(fn -> run_scalar(scalar_obs, seed) end)
     structured = benchmark(fn -> run_structured(structured_obs, structured_spec, seed) end)
@@ -18,7 +68,17 @@ defmodule BstsNx.Bench.OptimizePlan do
       generated_at: DateTime.utc_now() |> DateTime.to_iso8601(),
       git_sha: git_sha(),
       backend: inspect(Nx.default_backend()),
+      budgets_us: %{
+        prepared_scalar_forecast: 25_000,
+        prepared_structured_forecast: 100_000,
+        guide_operational_pipeline: 100_000,
+        batch_operational_pipeline: 1_000_000
+      },
       scenarios: %{
+        prepared_scalar_forecast: scalar_forecast,
+        prepared_structured_forecast: structured_forecast,
+        guide_operational_pipeline: guide_pipeline,
+        batch_operational_pipeline: batch_pipeline,
         scalar_gibbs: scalar,
         structured_gibbs: structured
       }
@@ -33,6 +93,7 @@ defmodule BstsNx.Bench.OptimizePlan do
 
     IO.puts("Wrote benchmark results to #{output_path}")
     IO.puts(json)
+    enforce_operational_budgets!(results)
   end
 
   defp run_scalar(observations, seed) do
@@ -68,9 +129,52 @@ defmodule BstsNx.Bench.OptimizePlan do
     end)
   end
 
+  defp operational_observations do
+    Enum.map(0..143, fn t ->
+      baseline = 80.0 + 0.05 * t + 7.0 * :math.sin(2.0 * :math.pi() * t / 24.0)
+      lift = if t >= 96, do: 12.0, else: 0.0
+      baseline + lift
+    end)
+  end
+
+  defp batch_operational_observations(n) do
+    Enum.map(0..(n - 1), fn t ->
+      baseline = 100.0 + 0.02 * t + 8.0 * :math.sin(2.0 * :math.pi() * t / 24.0)
+      lift = if t >= 1_500, do: 9.0, else: 0.0
+      baseline + lift
+    end)
+  end
+
   defp benchmark(fun) do
     {elapsed_us, result} = :timer.tc(fun)
     Map.put(result, :elapsed_us, elapsed_us)
+  end
+
+  defp benchmark_warm(fun) do
+    {cold_us, _result} = :timer.tc(fun)
+
+    warm_runs =
+      Enum.map(1..5, fn _ ->
+        {elapsed_us, result} = :timer.tc(fun)
+        Map.put(normalize_result(result), :elapsed_us, elapsed_us)
+      end)
+
+    best = Enum.min_by(warm_runs, & &1.elapsed_us)
+    best |> Map.put(:cold_elapsed_us, cold_us) |> Map.put(:warm_runs, length(warm_runs))
+  end
+
+  defp normalize_result(%{attributions: attributions, execution: execution}) do
+    %{
+      total_lift: attributions.total_lift,
+      method_used: Atom.to_string(execution.method_used)
+    }
+  end
+
+  defp normalize_result(%{summary: summary, execution: execution}) do
+    %{
+      cumulative_effect: summary.cumulative_effect.mean,
+      method_used: Atom.to_string(execution.method_used)
+    }
   end
 
   defp git_sha do
@@ -118,6 +222,24 @@ defmodule BstsNx.Bench.OptimizePlan do
     str
     |> String.replace("\\", "\\\\")
     |> String.replace("\"", "\\\"")
+  end
+
+  defp enforce_operational_budgets!(results) do
+    failures =
+      results.budgets_us
+      |> Enum.flat_map(fn {scenario, budget_us} ->
+        elapsed_us = results.scenarios[scenario].elapsed_us
+
+        if elapsed_us > budget_us do
+          ["#{scenario} elapsed #{elapsed_us}us exceeds #{budget_us}us"]
+        else
+          []
+        end
+      end)
+
+    if failures != [] do
+      raise "Operational benchmark budget exceeded:\n" <> Enum.join(failures, "\n")
+    end
   end
 end
 

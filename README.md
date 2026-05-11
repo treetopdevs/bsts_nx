@@ -93,6 +93,43 @@ summary = BstsNx.CausalImpact.summary(result)
 summary.cumulative_effect.mean
 ```
 
+### Operational pipeline mode
+
+High-level pipeline APIs now default to an operational Elixir/Nx lane:
+forecast-first fixed-variance filters plus spot attribution. This is the path
+intended for Elixir data pipelines and bounded-latency demos.
+
+```elixir
+spec = BstsNx.Components.local_level_spec(initial_state: 50.0, initial_cov: 10.0)
+spots = [%{id: "spot_1", window_start: 0, window_end: 10}]
+
+prepared = BstsNx.Operational.prepare(spec, {1, 60}, {61, 90})
+
+result =
+  BstsNx.Operational.run(prepared, obs, spots,
+    return: :lists
+  )
+
+result.execution.method_used
+#=> :scalar_forecast_filter
+
+result =
+  BstsNx.Pipeline.run(obs, {1, 60}, {61, 90}, spots, spec,
+    mode: :operational
+  )
+
+result.execution.method_used
+#=> :scalar_forecast_filter
+```
+
+Use `baseline: :smooth` only when you explicitly want the older
+mask-and-smooth compatibility behavior. Use `return: :tensors` for hot paths
+that should keep vector outputs in Nx tensors until presentation time.
+
+Use `mode: :bayesian` when you want the slower Elixir MCMC posterior-draw workflow.
+For offline validation and reporting, `BstsNx.RSidecar` can call R's CRAN
+`CausalImpact`/`bsts` stack when `Rscript` and those packages are installed.
+
 ## Missing observations
 
 `BstsNx.KalmanFilter` supports missing observations as `nil` or `NaN`.
@@ -130,6 +167,11 @@ Current limitations remain in some paths:
 - compiled `defn` filter/smoother paths are scalar-oriented;
 - structured Gibbs samplers currently learn a diagonal `Q` and scalar observation variance `R`;
 - structured MCMC workflows currently target scalar observations per time step.
+
+The near-term direction is an Elixir-first operational pipeline with explicit
+execution metadata, plus optional R-backed offline parity/reporting. The goal is
+not to outpace CRAN `bsts`/`CausalImpact` immediately, but to make causal impact
+and attribution usable inside Elixir systems while using R as a reference.
 
 The roadmap includes richer component families and full multivariate-observation support
 through structured MCMC and downstream APIs.

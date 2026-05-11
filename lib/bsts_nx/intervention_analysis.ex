@@ -50,8 +50,10 @@ defmodule BstsNx.InterventionAnalysis do
   """
 
   alias BstsNx.CausalImpact
+  alias BstsNx.Components
+  alias BstsNx.Execution
   alias BstsNx.ModelBuilder
-  require Logger
+  alias BstsNx.Operational
 
   @type intervention_config :: %{
           pre_period: {pos_integer(), pos_integer()},
@@ -63,7 +65,8 @@ defmodule BstsNx.InterventionAnalysis do
           summary: map(),
           significant?: boolean(),
           alpha: float(),
-          model_spec: BstsNx.ModelSpec.t() | nil
+          model_spec: BstsNx.ModelSpec.t() | nil,
+          execution: Execution.t()
         }
 
   @doc """
@@ -102,7 +105,12 @@ defmodule BstsNx.InterventionAnalysis do
     * `:num_samples` - number of posterior MCMC samples (default: 200)
     * `:burn_in` - burn-in iterations (default: num_samples / 2)
     * `:seed` - integer PRNG seed for reproducibility
-    * `:method` - `:mcmc` (default) or `:filter` for fast non-MCMC estimation
+    * `:mode` - `:operational` (default, fast filter path) or `:bayesian`
+      (Elixir MCMC path)
+    * `:method` - compatibility alias: `:filter` maps to `mode: :operational`,
+      `:mcmc` maps to `mode: :bayesian` when `:mode` is omitted
+    * `:fallback` - pass `:mcmc` to explicitly allow a slow MCMC fallback when
+      a structured operational filter is unsupported by the current backend
 
   ## Returns
 
@@ -171,11 +179,7 @@ defmodule BstsNx.InterventionAnalysis do
             "seasonality must be an integer >= 2, got: #{inspect(seasonality)}"
     end
 
-    method = Keyword.get(opts, :method, :mcmc)
-
-    if method not in [:mcmc, :filter] do
-      raise ArgumentError, "method must be :mcmc or :filter, got: #{inspect(method)}"
-    end
+    mode = Execution.resolve_mode!(opts, :operational)
 
     # If control_series is provided, delegate to ModelBuilder for regression composition
     controls = Keyword.get(opts, :control_series)
@@ -201,15 +205,15 @@ defmodule BstsNx.InterventionAnalysis do
 
           # Preserve method and alpha from original opts
           merged
-          |> Keyword.put(:method, method)
+          |> Keyword.put(:mode, mode)
           |> Keyword.put(:alpha, alpha)
       end
 
-    case method do
-      :mcmc ->
+    case mode do
+      :bayesian ->
         analyze_mcmc(observations, pre_period, post_period, alpha, effective_opts)
 
-      :filter ->
+      :operational ->
         analyze_filter(observations, pre_period, post_period, alpha, effective_opts)
     end
   end
@@ -290,106 +294,89 @@ defmodule BstsNx.InterventionAnalysis do
   # -- Private implementation --
 
   defp analyze_mcmc(observations, pre_period, post_period, alpha, opts) do
-    model_spec = resolve_model_spec(observations, pre_period, opts)
+    {elapsed_us, result} =
+      Execution.measure(fn ->
+        model_spec = resolve_model_spec(observations, pre_period, opts)
 
-    ci_opts =
-      opts
-      |> Keyword.drop([:model_spec, :seasonality, :alpha, :method, :control_series])
+        ci_opts =
+          opts
+          |> Keyword.drop([:model_spec, :seasonality, :alpha, :method, :mode, :control_series])
 
-    impact =
-      if model_spec do
-        CausalImpact.estimate_structured(
-          observations,
-          pre_period,
-          post_period,
-          model_spec,
-          ci_opts
-        )
-      else
-        CausalImpact.estimate(observations, pre_period, post_period, ci_opts)
-      end
+        impact =
+          if model_spec do
+            CausalImpact.estimate_structured(
+              observations,
+              pre_period,
+              post_period,
+              model_spec,
+              ci_opts
+            )
+          else
+            CausalImpact.estimate(observations, pre_period, post_period, ci_opts)
+          end
 
-    summary = CausalImpact.summary(impact)
-    sig = is_significant?(summary, alpha)
+        summary = CausalImpact.summary(impact)
+        sig = is_significant?(summary, alpha)
 
-    %{
-      impact: impact,
-      summary: summary,
-      significant?: sig,
-      alpha: alpha,
-      model_spec: model_spec
-    }
+        %{
+          impact: impact,
+          summary: summary,
+          significant?: sig,
+          alpha: alpha,
+          model_spec: model_spec
+        }
+      end)
+
+    Map.put(
+      result,
+      :execution,
+      Execution.metadata(:bayesian, :elixir_nx, :elixir_mcmc, elapsed_us)
+    )
   end
 
   defp analyze_filter(
          observations,
          {_pre_start, _pre_end} = pre_period,
-         {post_start, post_end},
+         post_period,
          alpha,
          opts
        ) do
-    # Convert 1-based inclusive periods to 0-based intervention indices
-    intervention_indices = Enum.to_list((post_start - 1)..(post_end - 1))
-
-    # Resolve model spec to check if we need the structured fast path
     model_spec = resolve_model_spec(observations, pre_period, opts)
 
-    filter_opts =
-      opts
-      |> Keyword.drop([
-        :model_spec,
-        :seasonality,
-        :method,
-        :num_samples,
-        :burn_in,
-        :control_series
-      ])
-      |> Keyword.put(:alpha, alpha)
-      |> Keyword.put_new(:x0, 0.0)
-      |> Keyword.put_new(:p0, 1.0)
+    spec =
+      model_spec ||
+        Components.local_level_spec(
+          initial_state: Keyword.get(opts, :x0, List.first(observations) || 0.0),
+          initial_cov: Keyword.get(opts, :p0, 1.0),
+          process_var: Keyword.get(opts, :q, 1.0),
+          obs_var: Keyword.get(opts, :r, 1.0)
+        )
 
-    try do
-      summary =
-        if model_spec do
-          CausalImpact.estimate_structured_from_filter(
-            observations,
-            intervention_indices,
-            model_spec,
-            filter_opts
-          )
-        else
-          CausalImpact.estimate_from_filter(observations, intervention_indices, filter_opts)
-        end
+    prepared =
+      Operational.prepare(
+        spec,
+        pre_period,
+        post_period,
+        opts
+        |> Keyword.put(:alpha, alpha)
+        |> Keyword.drop([:mode, :method, :num_samples, :burn_in, :control_series])
+      )
 
-      sig = is_significant_filter?(summary)
+    forecast = Operational.forecast(prepared, observations, alpha: alpha)
+    summary = forecast.summary
 
-      %{
-        impact: nil,
-        summary: summary,
-        significant?: sig,
-        alpha: alpha,
-        model_spec: model_spec
-      }
-    rescue
-      e in RuntimeError ->
-        if backend_lu_missing?(e) do
-          Logger.warning(
-            "Filter path requires Nx.Backend.lu/3 which is unavailable on the current backend; " <>
-              "falling back to MCMC analysis"
-          )
-
-          fallback = analyze_mcmc(observations, pre_period, {post_start, post_end}, alpha, opts)
-          %{fallback | impact: nil}
-        else
-          reraise(e, __STACKTRACE__)
-        end
-    end
+    %{
+      impact: nil,
+      summary: summary,
+      significant?: is_significant?(summary, alpha),
+      alpha: alpha,
+      model_spec: model_spec,
+      execution: forecast.execution
+    }
   end
 
-  defp resolve_model_spec(observations, {pre_start, _pre_end}, opts) do
-    obs_at_start = [Enum.at(observations, pre_start - 1) || 0.0]
-
-    case ModelBuilder.build_spec(obs_at_start, opts) do
+  defp resolve_model_spec(observations, pre_period, opts) do
+    case ModelBuilder.build_intervention_spec(observations, pre_period, opts) do
       {spec, :structured} -> spec
       {nil, :scalar} -> nil
     end
@@ -403,14 +390,6 @@ defmodule BstsNx.InterventionAnalysis do
       {_, :nan} -> false
       {lower, upper} -> lower > 0.0 or upper < 0.0
     end
-  end
-
-  defp is_significant_filter?(summary) do
-    is_significant?(summary, 0.05)
-  end
-
-  defp backend_lu_missing?(%RuntimeError{message: message}) do
-    String.contains?(message, "Nx.Backend.lu/3 not implemented")
   end
 
   defp format_num(n), do: ModelBuilder.format_num(n)

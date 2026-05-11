@@ -196,6 +196,36 @@ defmodule BstsNx.ModelBuilderTest do
     end
   end
 
+  describe "build_intervention_spec/3" do
+    test "uses pre-period values for default initial level" do
+      observations = [100.0, 101.0, 102.0, 10.0, 11.0, 12.0]
+
+      {spec, :structured} =
+        ModelBuilder.build_intervention_spec(observations, {4, 6}, seasonality: 3)
+
+      assert Nx.to_flat_list(spec.x0) |> hd() == 10.0
+    end
+
+    test "preserves full-series regressor rows" do
+      observations = [1.0, 2.0, 3.0, 4.0]
+      regressors = Nx.tensor([[10.0], [20.0], [30.0], [40.0]])
+
+      {spec, :structured} =
+        ModelBuilder.build_intervention_spec(observations, {1, 2}, regressors: regressors)
+
+      assert is_list(spec.h)
+      assert length(spec.h) == 4
+    end
+
+    test "rejects regressors that do not cover the full series" do
+      assert_raise ArgumentError, ~r/regressors row count/, fn ->
+        ModelBuilder.build_intervention_spec([1.0, 2.0, 3.0], {1, 2},
+          regressors: Nx.tensor([[1.0], [2.0]])
+        )
+      end
+    end
+  end
+
   describe "build_future_h/3" do
     test "produces per-step observation matrices" do
       regressors = Nx.tensor([[1.0], [2.0], [3.0]])
