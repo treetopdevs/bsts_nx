@@ -7,9 +7,26 @@ defmodule BstsNx.RSidecar do
   """
 
   alias BstsNx.Execution
+  import Bitwise, only: [band: 2]
+  require Logger
 
   @default_timeout_ms 120_000
   @max_payload_cells 500_000
+  @max_error_output_bytes 4_096
+  @availability_sentinel "BSTS_NX_R_SIDECAR_READY"
+  @missing_packages_sentinel "BSTS_NX_R_PACKAGES_MISSING"
+  @sidecar_env_allowlist [
+    "PATH",
+    "HOME",
+    "TMPDIR",
+    "LANG",
+    "LC_ALL",
+    "LC_CTYPE",
+    "R_HOME",
+    "R_LIBS",
+    "R_LIBS_USER",
+    "R_LIBS_SITE"
+  ]
 
   @type run_result :: %{
           summary: [map()],
@@ -59,12 +76,12 @@ defmodule BstsNx.RSidecar do
         ) ::
           {:ok, run_result()} | {:error, map()}
   def run_report(observations, pre_period, post_period, opts) do
-    with {:ok, rscript} <- rscript_path(),
+    with {:ok, timeout_ms} <- timeout_ms(opts),
+         {:ok, rscript} <- rscript_path(),
          :ok <- require_r_packages(rscript),
          :ok <- validate_periods(observations, pre_period, post_period),
-         {:ok, data_path} <- write_payload_file(observations, Keyword.get(opts, :regressors)) do
-      timeout_ms = timeout_ms(opts)
-
+         {:ok, data_path, temp_dir} <-
+           write_payload_file(observations, Keyword.get(opts, :regressors)) do
       env =
         [
           {"BSTS_NX_DATA_PATH", data_path},
@@ -86,23 +103,31 @@ defmodule BstsNx.RSidecar do
 
         case result do
           {out, 0} ->
-            parsed = parse_output(out)
+            case parse_output(out) do
+              {:ok, parsed} ->
+                {:ok,
+                 Map.put(
+                   parsed,
+                   :execution,
+                   Execution.metadata(:bayesian, :r_sidecar, :r_causal_impact, elapsed_us)
+                 )}
 
-            {:ok,
-             Map.put(
-               parsed,
-               :execution,
-               Execution.metadata(:bayesian, :r_sidecar, :r_causal_impact, elapsed_us)
-             )}
+              {:error, reason} ->
+                {:error, reason}
+            end
 
           {out, status} ->
-            {:error, %{reason: :r_failed, status: status, output: String.trim(out)}}
+            Logger.debug(fn ->
+              "R sidecar failed with status #{status}:\n#{String.trim(out)}"
+            end)
+
+            {:error, %{reason: :r_failed, status: status, output_excerpt: output_excerpt(out)}}
 
           :timeout ->
             {:error, %{reason: :r_timeout, timeout_ms: timeout_ms}}
         end
       after
-        File.rm(data_path)
+        cleanup_payload(data_path, temp_dir)
       end
     else
       {:error, reason} when is_atom(reason) -> {:error, %{reason: reason}}
@@ -110,13 +135,20 @@ defmodule BstsNx.RSidecar do
     end
   rescue
     e ->
+      Logger.error(Exception.format(:error, e, __STACKTRACE__))
       {:error, %{reason: :r_system_error, message: Exception.message(e)}}
   end
 
   defp rscript_path do
+    env_path =
+      case System.get_env("BSTS_NX_RSCRIPT") do
+        nil -> nil
+        value -> String.trim(value)
+      end
+
     cond do
-      path = System.get_env("BSTS_NX_RSCRIPT") ->
-        {:ok, path}
+      is_binary(env_path) and env_path != "" ->
+        validate_rscript_override(env_path)
 
       path = System.find_executable("Rscript") ->
         {:ok, path}
@@ -126,30 +158,154 @@ defmodule BstsNx.RSidecar do
     end
   end
 
+  defp validate_rscript_override(path) do
+    expanded = Path.expand(path)
+
+    with true <- Path.basename(expanded) in ["Rscript", "Rscript.exe"],
+         {:ok, %{type: :regular}} <- File.lstat(expanded),
+         {:ok, %{type: :regular, mode: mode}} <- File.stat(expanded),
+         true <- band(mode, 0o111) != 0 do
+      {:ok, expanded}
+    else
+      _ -> {:error, :invalid_rscript_path}
+    end
+  end
+
   defp require_r_packages(rscript) do
     code = """
     ok <- requireNamespace("CausalImpact", quietly = TRUE) &&
       requireNamespace("bsts", quietly = TRUE)
-    quit(status = if (ok) 0 else 10)
+    if (ok) {
+      cat("#{@availability_sentinel}\\n")
+      quit(status = 0)
+    } else {
+      cat("#{@missing_packages_sentinel}\\n")
+      quit(status = 10)
+    }
     """
 
     case system_cmd(rscript, ["-e", code], [stderr_to_stdout: true], 30_000) do
-      {_out, 0} -> :ok
-      {_out, _status} -> {:error, :r_packages_not_installed}
-      :timeout -> {:error, :r_timeout}
+      {out, 0} ->
+        if sentinel_line?(out, @availability_sentinel) do
+          :ok
+        else
+          {:error, :rscript_invalid}
+        end
+
+      {out, _status} ->
+        if sentinel_line?(out, @missing_packages_sentinel) do
+          {:error, :r_packages_not_installed}
+        else
+          {:error, :r_unavailable}
+        end
+
+      :timeout ->
+        {:error, :r_timeout}
     end
   rescue
     _ -> {:error, :r_unavailable}
   end
 
-  defp system_cmd(command, args, opts, timeout_ms) do
-    task = Task.async(fn -> System.cmd(command, args, opts) end)
+  defp sentinel_line?(output, sentinel) do
+    output
+    |> String.split(["\r\n", "\n", "\r"], trim: true)
+    |> Enum.any?(&(String.trim(&1) == sentinel))
+  end
 
-    case Task.yield(task, timeout_ms) || Task.shutdown(task, :brutal_kill) do
-      {:ok, result} -> result
-      nil -> :timeout
+  defp system_cmd(command, args, opts, timeout_ms) do
+    port_opts =
+      [
+        :binary,
+        :exit_status,
+        args: args,
+        env: sidecar_env(Keyword.get(opts, :env, []))
+      ]
+      |> maybe_stderr_to_stdout(Keyword.get(opts, :stderr_to_stdout, false))
+
+    port = Port.open({:spawn_executable, String.to_charlist(command)}, port_opts)
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+
+    collect_port(port, [], deadline)
+  end
+
+  defp maybe_stderr_to_stdout(port_opts, true), do: [:stderr_to_stdout | port_opts]
+  defp maybe_stderr_to_stdout(port_opts, _false), do: port_opts
+
+  defp collect_port(port, chunks, deadline) do
+    timeout = max(deadline - System.monotonic_time(:millisecond), 0)
+
+    receive do
+      {^port, {:data, data}} ->
+        collect_port(port, [data | chunks], deadline)
+
+      {^port, {:exit_status, status}} ->
+        {chunks |> Enum.reverse() |> IO.iodata_to_binary(), status}
+    after
+      timeout ->
+        terminate_port(port)
+        :timeout
     end
   end
+
+  defp terminate_port(port) do
+    os_pid =
+      case Port.info(port, :os_pid) do
+        {:os_pid, pid} -> pid
+        _ -> nil
+      end
+
+    if is_integer(os_pid) do
+      kill_os_pid(os_pid, "-TERM")
+    end
+
+    try do
+      Port.close(port)
+    rescue
+      _ -> :ok
+    catch
+      :exit, _ -> :ok
+    end
+
+    if is_integer(os_pid) do
+      Process.sleep(20)
+      kill_os_pid(os_pid, "-KILL")
+    end
+
+    :ok
+  end
+
+  defp kill_os_pid(pid, signal) do
+    System.cmd("kill", [signal, Integer.to_string(pid)], stderr_to_stdout: true)
+    :ok
+  rescue
+    _ -> :ok
+  end
+
+  defp sidecar_env(extra_env) do
+    cleared_parent =
+      System.get_env()
+      |> Map.keys()
+      |> Enum.map(fn key -> {String.to_charlist(key), false} end)
+
+    allowed_parent =
+      @sidecar_env_allowlist
+      |> Enum.flat_map(fn key ->
+        case System.get_env(key) do
+          nil -> []
+          value -> [{String.to_charlist(key), String.to_charlist(value)}]
+        end
+      end)
+
+    explicit =
+      Enum.map(extra_env, fn {key, value} ->
+        {to_env_charlist(key), to_env_charlist(value)}
+      end)
+
+    cleared_parent ++ allowed_parent ++ explicit
+  end
+
+  defp to_env_charlist(value) when is_binary(value), do: String.to_charlist(value)
+  defp to_env_charlist(value), do: value |> to_string() |> String.to_charlist()
 
   defp validate_periods(observations, {pre_start, pre_end}, {post_start, post_end}) do
     n = length(observations)
@@ -179,20 +335,46 @@ defmodule BstsNx.RSidecar do
         |> Enum.join("\n")
         |> Kernel.<>("\n")
 
-      path =
-        Path.join(
-          System.tmp_dir!(),
-          "bsts_nx_r_sidecar_#{System.unique_integer([:positive, :monotonic])}.tsv"
-        )
+      temp_dir = private_temp_dir()
+      path = Path.join(temp_dir, "payload.tsv")
 
-      with :ok <- File.write(path, data, [:write, :exclusive]),
-           :ok <- File.chmod(path, 0o600) do
-        {:ok, path}
-      else
+      case File.mkdir(temp_dir) do
+        :ok ->
+          with :ok <- File.chmod(temp_dir, 0o700),
+               :ok <- File.write(path, data, [:write, :exclusive]),
+               :ok <- File.chmod(path, 0o600) do
+            {:ok, path, temp_dir}
+          else
+            {:error, reason} ->
+              cleanup_payload(path, temp_dir)
+              payload_write_error(reason)
+          end
+
         {:error, reason} ->
-          File.rm(path)
-          {:error, %{reason: :payload_write_failed, message: :file.format_error(reason)}}
+          payload_write_error(reason)
       end
+    end
+  end
+
+  defp payload_write_error(reason) do
+    {:error, %{reason: :payload_write_failed, message: :file.format_error(reason)}}
+  end
+
+  defp private_temp_dir do
+    Path.join(
+      System.tmp_dir!(),
+      "bsts_nx_r_sidecar_#{System.unique_integer([:positive, :monotonic])}"
+    )
+  end
+
+  defp cleanup_payload(data_path, temp_dir) do
+    expanded_temp = Path.expand(temp_dir)
+    expected_prefix = Path.join(System.tmp_dir!(), "bsts_nx_r_sidecar_") |> Path.expand()
+
+    if String.starts_with?(expanded_temp, expected_prefix) do
+      File.rm_rf(temp_dir)
+    else
+      File.rm(data_path)
     end
   end
 
@@ -276,13 +458,52 @@ defmodule BstsNx.RSidecar do
   end
 
   defp timeout_ms(opts) do
-    env_timeout =
-      case System.get_env("BSTS_NX_R_TIMEOUT_MS") do
-        nil -> nil
-        value -> String.to_integer(value)
-      end
+    if Keyword.has_key?(opts, :timeout_ms) do
+      case parse_timeout_ms(Keyword.fetch!(opts, :timeout_ms)) do
+        {:ok, timeout} ->
+          {:ok, timeout}
 
-    Keyword.get(opts, :timeout_ms, env_timeout || @default_timeout_ms)
+        :error ->
+          {:error, %{reason: :invalid_timeout_option, value: Keyword.fetch!(opts, :timeout_ms)}}
+      end
+    else
+      env_timeout_ms()
+    end
+  end
+
+  defp env_timeout_ms do
+    case System.get_env("BSTS_NX_R_TIMEOUT_MS") do
+      nil ->
+        {:ok, @default_timeout_ms}
+
+      value ->
+        case parse_timeout_ms(value) do
+          {:ok, timeout} -> {:ok, timeout}
+          :error -> {:error, %{reason: :invalid_timeout_env, value: value}}
+        end
+    end
+  end
+
+  defp parse_timeout_ms(timeout_ms) when is_integer(timeout_ms) and timeout_ms > 0,
+    do: {:ok, timeout_ms}
+
+  defp parse_timeout_ms(value) when is_binary(value) do
+    case Integer.parse(String.trim(value)) do
+      {timeout_ms, ""} when timeout_ms > 0 -> {:ok, timeout_ms}
+      _ -> :error
+    end
+  end
+
+  defp parse_timeout_ms(_value), do: :error
+
+  defp output_excerpt(output) do
+    trimmed = String.trim(output)
+
+    if byte_size(trimmed) <= @max_error_output_bytes do
+      trimmed
+    else
+      binary_part(trimmed, 0, @max_error_output_bytes) <> "\n...[truncated]"
+    end
   end
 
   defp r_code do
@@ -337,11 +558,16 @@ defmodule BstsNx.RSidecar do
   end
 
   defp parse_output(output) do
-    %{
-      summary: output |> extract_block("SUMMARY") |> parse_table(),
-      report: output |> extract_block("REPORT") |> String.trim(),
-      series: output |> extract_block("SERIES") |> parse_table()
-    }
+    with {:ok, summary} <- extract_block(output, "SUMMARY"),
+         {:ok, report} <- extract_block(output, "REPORT"),
+         {:ok, series} <- extract_block(output, "SERIES") do
+      {:ok,
+       %{
+         summary: parse_table(summary),
+         report: String.trim(report),
+         series: parse_table(series)
+       }}
+    end
   end
 
   defp extract_block(output, name) do
@@ -350,10 +576,13 @@ defmodule BstsNx.RSidecar do
 
     case String.split(output, begin_marker, parts: 2) do
       [_before, rest] ->
-        rest |> String.split(end_marker, parts: 2) |> hd()
+        case String.split(rest, end_marker, parts: 2) do
+          [block, _after] -> {:ok, block}
+          _ -> {:error, %{reason: :missing_r_output_marker, marker: name}}
+        end
 
       _ ->
-        ""
+        {:error, %{reason: :missing_r_output_marker, marker: name}}
     end
   end
 

@@ -1,6 +1,7 @@
 defmodule BstsNx.Diagnostics do
   require Logger
   alias BstsNx.Utils
+  alias BstsNx.Validation
 
   @moduledoc """
   Diagnostic statistics for assessing convergence of MCMC chains.
@@ -242,10 +243,7 @@ defmodule BstsNx.Diagnostics do
   @spec geweke_pass?([number()], keyword()) :: boolean() | :nan
   def geweke_pass?(chain, opts \\ []) do
     alpha = Keyword.get(opts, :alpha, 0.05)
-
-    if not is_number(alpha) or alpha <= 0.0 or alpha >= 1.0 do
-      raise ArgumentError, "alpha must be in (0, 1), got: #{inspect(alpha)}"
-    end
+    Validation.validate_alpha!(alpha)
 
     case geweke_z(chain, opts) do
       :nan -> :nan

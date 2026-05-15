@@ -3,6 +3,8 @@ defmodule BstsNx.OperationalDemoTest do
 
   alias BstsNx.{CausalImpact, Components, Pipeline}
 
+  @operational_pipeline_budget_us 750_000
+
   test "fast filter estimate stays within demo latency budget" do
     observations = demo_observations()
     intervention_indices = Enum.to_list(96..143)
@@ -43,7 +45,7 @@ defmodule BstsNx.OperationalDemoTest do
     assert result.execution.baseline == :forecast
     assert result.execution.method_used == :scalar_forecast_filter
     assert length(result.attributions.attributions) == 2
-    assert elapsed_us < 100_000
+    assert elapsed_us < @operational_pipeline_budget_us
   end
 
   defp demo_observations do

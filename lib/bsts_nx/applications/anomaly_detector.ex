@@ -52,6 +52,7 @@ defmodule BstsNx.Applications.AnomalyDetector do
   alias BstsNx.GibbsSampler
   alias BstsNx.KalmanFilter
   alias BstsNx.ModelBuilder
+  alias BstsNx.Validation
 
   @type detector :: %{
           method: :mcmc | :filter,
@@ -122,10 +123,7 @@ defmodule BstsNx.Applications.AnomalyDetector do
 
     method = Keyword.get(opts, :method, :mcmc)
     alpha = Keyword.get(opts, :alpha, 0.01)
-
-    if not is_number(alpha) or alpha <= 0.0 or alpha >= 1.0 do
-      raise ArgumentError, "alpha must be between 0 and 1 (exclusive), got: #{inspect(alpha)}"
-    end
+    Validation.validate_alpha!(alpha, "alpha must be between 0 and 1 (exclusive)")
 
     if method not in [:mcmc, :filter] do
       raise ArgumentError, "method must be :mcmc or :filter, got: #{inspect(method)}"
@@ -355,9 +353,14 @@ defmodule BstsNx.Applications.AnomalyDetector do
     x0 = Keyword.get(opts, :x0, List.first(obs_list) || 0.0)
     p0 = Keyword.get(opts, :p0, 1.0)
 
-    # Run filter through training data to get final state
-    obs_tensor = Nx.tensor(obs_list, type: {:f, 32})
-    {xs, ps} = KalmanFilter.filter_defn(obs_tensor, f, h, q, r, x0, p0)
+    # Run filter through training data to get final state. Keep list inputs on
+    # the binary backend here so f64 observations are not narrowed by an
+    # accelerator backend before the compiled scalar filter sees them.
+    {xs, ps} =
+      Nx.with_default_backend(Nx.BinaryBackend, fn ->
+        obs_tensor = Nx.tensor(obs_list, type: {:f, 64})
+        KalmanFilter.filter_defn(obs_tensor, f, h, q, r, x0, p0)
+      end)
 
     final_x = take_scalar_at(xs, t - 1)
     final_p = take_scalar_at(ps, t - 1)
@@ -499,22 +502,7 @@ defmodule BstsNx.Applications.AnomalyDetector do
         %{means: Enum.reverse(means_rev), vars: Enum.reverse(vars_rev)}
       end)
 
-    means =
-      Enum.map(0..(horizon - 1), fn idx ->
-        step_means = Enum.map(per_sample, &Enum.at(&1.means, idx))
-        Enum.sum(step_means) / n_samples
-      end)
-
-    sds =
-      Enum.map(0..(horizon - 1), fn idx ->
-        step_means = Enum.map(per_sample, &Enum.at(&1.means, idx))
-        step_noise_vars = Enum.map(per_sample, &Enum.at(&1.vars, idx))
-        between = sample_variance(step_means)
-        avg_noise = Enum.sum(step_noise_vars) / n_samples
-        :math.sqrt(max(between + avg_noise, 1.0e-12))
-      end)
-
-    {means, sds}
+    aggregate_prediction_moments(per_sample, n_samples)
   end
 
   defp forward_scalar_predictions(samples, horizon) do
@@ -534,16 +522,26 @@ defmodule BstsNx.Applications.AnomalyDetector do
         %{means: List.duplicate(level, horizon), vars: vars}
       end)
 
-    means =
-      Enum.map(0..(horizon - 1), fn idx ->
-        step_means = Enum.map(per_sample, &Enum.at(&1.means, idx))
-        Enum.sum(step_means) / n_samples
-      end)
+    aggregate_prediction_moments(per_sample, n_samples)
+  end
+
+  defp aggregate_prediction_moments(per_sample, n_samples) do
+    mean_columns =
+      per_sample
+      |> Enum.map(& &1.means)
+      |> BstsNx.Utils.transpose_rows()
+
+    var_columns =
+      per_sample
+      |> Enum.map(& &1.vars)
+      |> BstsNx.Utils.transpose_rows()
+
+    means = Enum.map(mean_columns, &(Enum.sum(&1) / n_samples))
 
     sds =
-      Enum.map(0..(horizon - 1), fn idx ->
-        step_means = Enum.map(per_sample, &Enum.at(&1.means, idx))
-        step_noise_vars = Enum.map(per_sample, &Enum.at(&1.vars, idx))
+      mean_columns
+      |> Enum.zip(var_columns)
+      |> Enum.map(fn {step_means, step_noise_vars} ->
         between = sample_variance(step_means)
         avg_noise = Enum.sum(step_noise_vars) / n_samples
         :math.sqrt(max(between + avg_noise, 1.0e-12))
@@ -631,13 +629,20 @@ defmodule BstsNx.Applications.AnomalyDetector do
 
   defp fallback_extrapolation(%{posterior_mean: means, posterior_sd: sds}, horizon)
        when is_list(means) and is_list(sds) do
+    means_tuple = List.to_tuple(means)
+    sds_tuple = List.to_tuple(sds)
+    means_fallback = tuple_last_or_default(means_tuple, 0.0)
+    sds_fallback = tuple_last_or_default(sds_tuple, 1.0)
+    sds_len = tuple_size(sds_tuple)
+
     pred_means =
-      Enum.map(0..(horizon - 1), fn idx -> Enum.at(means, idx) || List.last(means) || 0.0 end)
+      Enum.map(0..(horizon - 1), fn idx ->
+        tuple_value_or_default(means_tuple, idx, means_fallback)
+      end)
 
     pred_sds =
       Enum.map(0..(horizon - 1), fn idx ->
-        sds_len = length(sds)
-        base_sd = Enum.at(sds, idx) || List.last(sds) || 1.0
+        base_sd = tuple_value_or_default(sds_tuple, idx, sds_fallback)
 
         if idx >= sds_len do
           extra_steps = idx - sds_len + 1
@@ -652,6 +657,17 @@ defmodule BstsNx.Applications.AnomalyDetector do
 
   defp fallback_extrapolation(_detector, horizon) do
     {List.duplicate(0.0, horizon), List.duplicate(1.0, horizon)}
+  end
+
+  defp tuple_value_or_default(tuple, idx, default) do
+    if idx < tuple_size(tuple), do: elem(tuple, idx), else: default
+  end
+
+  defp tuple_last_or_default(tuple, default) do
+    case tuple_size(tuple) do
+      0 -> default
+      size -> elem(tuple, size - 1)
+    end
   end
 
   defp sample_variance(values) do

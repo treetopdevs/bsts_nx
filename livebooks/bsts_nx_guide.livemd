@@ -27,7 +27,9 @@ with code and basic probability, but no prior knowledge of state-space models or
 ## Setup
 
 ```elixir
-project_root = "/Users/nicholas/develop/bsts_nx"
+project_root =
+  System.get_env("BSTS_NX_PROJECT_ROOT") ||
+    Path.expand("..", __DIR__)
 
 Mix.install(
   [

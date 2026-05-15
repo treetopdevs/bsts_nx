@@ -67,6 +67,21 @@ defmodule BstsNx.Applications.AnomalyDetectorTest do
       {score2, _det2} = AnomalyDetector.score_one(det1, 200.0)
       assert abs(score2.z_score) > 2.0
     end
+
+    test "filter training preserves f64 precision for list observations" do
+      high_precision = 16_777_217.0
+
+      detector =
+        AnomalyDetector.fit(List.duplicate(high_precision, 8),
+          method: :filter,
+          x0: 0.0,
+          p0: 1.0e12,
+          q: 1.0e-9,
+          r: 1.0e-6
+        )
+
+      assert_in_delta detector.filter_state, high_precision, 0.1
+    end
   end
 
   describe "detect/3" do
@@ -252,6 +267,29 @@ defmodule BstsNx.Applications.AnomalyDetectorTest do
   end
 
   describe "structured forward uncertainty" do
+    test "fallback extrapolation reuses trailing posterior moments" do
+      detector = %{
+        method: :mcmc,
+        z_threshold: 3.0,
+        posterior_mean: [10.0, 12.0],
+        posterior_sd: [2.0, 3.0],
+        posterior_samples: nil,
+        mcmc_model: nil,
+        spec: nil
+      }
+
+      scores = AnomalyDetector.score(detector, [10.0, 12.0, 12.0, 12.0])
+
+      assert Enum.map(scores, & &1.predicted) == [10.0, 12.0, 12.0, 12.0]
+
+      assert Enum.map(scores, & &1.predicted_sd) == [
+               2.0,
+               3.0,
+               3.0 * :math.sqrt(1.1),
+               3.0 * :math.sqrt(1.2)
+             ]
+    end
+
     test "score/2 accumulates state covariance over the horizon" do
       spec =
         BstsNx.Components.local_level_spec(

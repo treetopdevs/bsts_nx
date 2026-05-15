@@ -177,11 +177,21 @@ defmodule BstsNx.BCT.ARForecasterTest do
       assert length(forecast.mean) == 6
     end
 
-    test "matches separate fit and predict when prediction seed is advanced" do
+    test "matches separate fit and predict when prediction key is split" do
       data = synthetic_series(85)
       opts = [order: 2, num_samples: 35, alpha: 0.1, seed: 123]
 
-      predict_opts = opts |> Keyword.put(:horizon, 9) |> Keyword.put(:seed, 124)
+      predict_key =
+        123
+        |> Nx.Random.key()
+        |> Nx.Random.split(parts: 2)
+        |> BstsNx.Utils.split_key_at(1)
+
+      predict_opts =
+        opts
+        |> Keyword.put(:horizon, 9)
+        |> Keyword.put(:key, predict_key)
+        |> Keyword.delete(:seed)
 
       separate =
         data

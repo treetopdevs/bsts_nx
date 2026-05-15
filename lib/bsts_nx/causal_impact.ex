@@ -24,7 +24,12 @@ defmodule BstsNx.CausalImpact do
   """
 
   alias BstsNx.GibbsSampler
+  alias BstsNx.Validation
+  import BstsNx.Utils, only: [split_key_at: 2]
   import Nx.Defn
+
+  @default_alpha 0.05
+  @near_zero_denominator 1.0e-15
 
   @type impact_result :: %{
           point_effects: list(list(float())),
@@ -65,34 +70,9 @@ defmodule BstsNx.CausalImpact do
           {pos_integer(), pos_integer()},
           keyword()
         ) :: impact_result()
-  def estimate(observations, {pre_start, pre_end}, {post_start, post_end}, opts \\ []) do
-    # Coerce any Nx scalar elements to plain numbers so downstream
-    # Enum arithmetic (:math.pow, Enum.sum, etc.) doesn't crash.
-    observations = Enum.map(observations, &to_number/1)
-    obs_count = length(observations)
+  def estimate(observations, pre_period, post_period, opts \\ []) do
+    period = period_context(observations, pre_period, post_period)
 
-    # Validate indices
-    if pre_start < 1 or pre_end < pre_start do
-      raise ArgumentError, "invalid pre_period: must satisfy 1 <= start <= end"
-    end
-
-    if pre_end > obs_count do
-      raise ArgumentError,
-            "pre_period end (#{pre_end}) extends beyond observations (#{obs_count})"
-    end
-
-    if post_end > obs_count do
-      raise ArgumentError,
-            "post_period end (#{post_end}) extends beyond observations (#{obs_count})"
-    end
-
-    if post_start <= pre_end or post_end < post_start do
-      raise ArgumentError, "post_period must satisfy pre_end < start <= end"
-    end
-
-    # Extract pre and post subsets
-    pre_data = Enum.slice(observations, pre_start - 1, pre_end - pre_start + 1)
-    post_data = Enum.slice(observations, post_start - 1, post_end - post_start + 1)
     # Determine number of samples
     num_samples = Keyword.get(opts, :num_samples, 200)
     burn_in = Keyword.get(opts, :burn_in, div(num_samples, 2))
@@ -100,24 +80,17 @@ defmodule BstsNx.CausalImpact do
     # Fit Gibbs sampler on the pre-period data only to sample latent states and variances.
     # Use provided burn_in and thin options to control chain length.
     # Default initial state to first observation for faster convergence.
-    init_state = Keyword.get(opts, :initial_state, List.first(pre_data) || 0.0)
+    init_state = Keyword.get(opts, :initial_state, List.first(period.pre_data) || 0.0)
     init_cov = Keyword.get(opts, :initial_cov, 1.0)
     process_var = Keyword.get(opts, :process_var, 1.0)
     obs_var_init = Keyword.get(opts, :obs_var, 1.0)
 
     {sampler_key, cf_base_key} = derive_estimate_keys(opts)
-
-    gibbs_opts =
-      opts
-      |> Keyword.delete(:num_samples)
-      |> Keyword.delete(:seed)
-      |> Keyword.put(:key, sampler_key)
-      |> Keyword.put(:burn_in, burn_in)
-      |> Keyword.put(:thin, thin)
+    gibbs_opts = mcmc_opts(opts, sampler_key, burn_in, thin)
 
     pre_samples =
       GibbsSampler.sample(
-        pre_data,
+        period.pre_data,
         num_samples,
         init_state,
         init_cov,
@@ -126,50 +99,25 @@ defmodule BstsNx.CausalImpact do
         gibbs_opts
       )
 
-    # Determine number of post steps
-    n_post = post_end - post_start + 1
-    gap_count = post_start - pre_end - 1
-    # Split into one key per sample for independent counterfactual draws
-    cf_keys = Nx.Random.split(cf_base_key, parts: length(pre_samples))
-
     # Collect point effects and counterfactual predictions per sample by forward simulation
-    effects =
-      Enum.with_index(pre_samples)
-      |> Enum.map(fn {sample, idx} ->
+    {baselines, point_effects_list} =
+      simulate_effects(pre_samples, period.post_data, cf_base_key, fn sample, key ->
         # final state of pre-period
         final_state = List.last(sample.states)
         init_val = Nx.to_number(final_state)
         q = Nx.to_number(sample.process_var)
         r = Nx.to_number(sample.obs_var)
         # generate counterfactual by forward simulation (random walk with observation noise)
-        cf =
-          generate_counterfactual(init_val, q, r, n_post, split_key_at(cf_keys, idx), gap_count)
-
-        # compute point effects as difference between actual post data and counterfactual
-        point_effects =
-          Enum.zip(post_data, cf)
-          |> Enum.map(fn {a, b} -> a - b end)
-
-        {cf, point_effects}
+        generate_counterfactual(init_val, q, r, period.n_post, key, period.gap_count)
       end)
 
-    # separate baselines and effects
-    {baselines, point_effects_list} = Enum.unzip(effects)
-    # compute cumulative and relative effects per sample
-    cumulative_effects = Enum.map(point_effects_list, &Enum.sum/1)
-    baseline_sums = Enum.map(baselines, &Enum.sum/1)
-    relative_effects = relative_effects_for_draws(cumulative_effects, baseline_sums)
-
-    # build result struct
-    %{
-      point_effects: point_effects_list,
-      cumulative_effects: cumulative_effects,
-      relative_effects: relative_effects,
-      actual: post_data,
-      counterfactual: baselines,
-      pre_period: {pre_start, pre_end},
-      post_period: {post_start, post_end}
-    }
+    build_impact_result(
+      period.post_data,
+      baselines,
+      point_effects_list,
+      period.pre_period,
+      period.post_period
+    )
   end
 
   @doc """
@@ -200,92 +148,119 @@ defmodule BstsNx.CausalImpact do
         ) :: impact_result()
   def estimate_structured(
         observations,
-        {pre_start, pre_end},
-        {post_start, post_end},
+        pre_period,
+        post_period,
         %BstsNx.ModelSpec{} = spec,
         opts \\ []
       ) do
-    observations = Enum.map(observations, &to_number/1)
-    obs_count = length(observations)
-
-    if pre_start < 1 or pre_end < pre_start do
-      raise ArgumentError, "invalid pre_period: must satisfy 1 <= start <= end"
-    end
-
-    if pre_end > obs_count do
-      raise ArgumentError,
-            "pre_period end (#{pre_end}) extends beyond observations (#{obs_count})"
-    end
-
-    if post_start <= pre_end or post_end < post_start do
-      raise ArgumentError, "post_period must satisfy pre_end < start <= end"
-    end
-
-    if post_end > obs_count do
-      raise ArgumentError,
-            "post_period end (#{post_end}) extends beyond observations (#{obs_count})"
-    end
-
-    pre_data = Enum.slice(observations, pre_start - 1, pre_end - pre_start + 1)
-    post_data = Enum.slice(observations, post_start - 1, post_end - post_start + 1)
+    period = period_context(observations, pre_period, post_period)
 
     num_samples = Keyword.get(opts, :num_samples, 200)
     burn_in = Keyword.get(opts, :burn_in, div(num_samples, 2))
     thin = Keyword.get(opts, :thin, 1)
 
     {sampler_key, cf_base_key} = derive_estimate_keys(opts)
-
-    gibbs_opts =
-      opts
-      |> Keyword.delete(:num_samples)
-      |> Keyword.delete(:seed)
-      |> Keyword.put(:key, sampler_key)
-      |> Keyword.put(:burn_in, burn_in)
-      |> Keyword.put(:thin, thin)
+    gibbs_opts = mcmc_opts(opts, sampler_key, burn_in, thin)
 
     # Slice H for the pre-period so sample_structured gets matching lengths
     state_dim = Nx.axis_size(spec.f, 0)
-    pre_spec = slice_spec_h(spec, pre_start - 1, length(pre_data), state_dim)
-    pre_samples = GibbsSampler.sample_structured(pre_data, pre_spec, num_samples, gibbs_opts)
+    pre_spec = slice_spec_h(spec, period.pre_start - 1, length(period.pre_data), state_dim)
 
-    n_post = post_end - post_start + 1
-    gap_count = post_start - pre_end - 1
-    cf_keys = Nx.Random.split(cf_base_key, parts: length(pre_samples))
+    pre_samples =
+      GibbsSampler.sample_structured(period.pre_data, pre_spec, num_samples, gibbs_opts)
 
     # Get post-period H entries for counterfactual forward simulation
-    post_h = post_period_h(spec.h, post_start - 1, n_post, state_dim)
+    post_h = post_period_h(spec.h, period.post_start - 1, period.n_post, state_dim)
 
-    effects =
-      Enum.with_index(pre_samples)
-      |> Enum.map(fn {sample, idx} ->
+    {baselines, point_effects_list} =
+      simulate_effects(pre_samples, period.post_data, cf_base_key, fn sample, key ->
         final_state = List.last(sample.states)
         q_mat = sample.q_matrix
         r = Nx.to_number(sample.obs_var)
 
         # Forward-simulate the state-space model for counterfactual
-        cf =
-          generate_structured_counterfactual(
-            final_state,
-            spec.f,
-            post_h,
-            q_mat,
-            r,
-            n_post,
-            split_key_at(cf_keys, idx),
-            gap_count
-          )
-
-        point_effects =
-          Enum.zip(post_data, cf)
-          |> Enum.map(fn {a, b} -> a - b end)
-
-        {cf, point_effects}
+        generate_structured_counterfactual(
+          final_state,
+          spec.f,
+          post_h,
+          q_mat,
+          r,
+          key,
+          period.gap_count
+        )
       end)
 
-    {baselines, point_effects_list} = Enum.unzip(effects)
+    build_impact_result(
+      period.post_data,
+      baselines,
+      point_effects_list,
+      period.pre_period,
+      period.post_period
+    )
+  end
+
+  defp period_context(
+         observations,
+         {pre_start, pre_end} = pre_period,
+         {post_start, post_end} = post_period
+       ) do
+    # Coerce any Nx scalar elements to plain numbers so downstream
+    # Enum arithmetic (:math.pow, Enum.sum, etc.) doesn't crash.
+    observations = Enum.map(observations, &to_number/1)
+    obs_count = length(observations)
+
+    Validation.validate_study_periods!(obs_count, pre_start, pre_end, post_start, post_end)
+
+    pre_data = Enum.slice(observations, pre_start - 1, pre_end - pre_start + 1)
+    post_data = Enum.slice(observations, post_start - 1, post_end - post_start + 1)
+
+    %{
+      observations: observations,
+      pre_data: pre_data,
+      post_data: post_data,
+      pre_period: pre_period,
+      post_period: post_period,
+      pre_start: pre_start,
+      pre_end: pre_end,
+      post_start: post_start,
+      post_end: post_end,
+      n_post: post_end - post_start + 1,
+      gap_count: post_start - pre_end - 1
+    }
+  end
+
+  defp mcmc_opts(opts, sampler_key, burn_in, thin) do
+    opts
+    |> Keyword.delete(:num_samples)
+    |> Keyword.delete(:seed)
+    |> Keyword.put(:key, sampler_key)
+    |> Keyword.put(:burn_in, burn_in)
+    |> Keyword.put(:thin, thin)
+  end
+
+  defp simulate_effects(samples, post_data, cf_base_key, counterfactual_fun) do
+    cf_keys = Nx.Random.split(cf_base_key, parts: length(samples))
+
+    samples
+    |> Enum.with_index()
+    |> Enum.map(fn {sample, idx} ->
+      cf = counterfactual_fun.(sample, split_key_at(cf_keys, idx))
+      point_effects = point_effects(post_data, cf)
+
+      {cf, point_effects}
+    end)
+    |> Enum.unzip()
+  end
+
+  defp point_effects(actual_vals, baseline_vals) do
+    Enum.zip(actual_vals, baseline_vals)
+    |> Enum.map(fn {actual, baseline} -> actual - baseline end)
+  end
+
+  defp build_impact_result(post_data, baselines, point_effects_list, pre_period, post_period) do
     cumulative_effects = Enum.map(point_effects_list, &Enum.sum/1)
     baseline_sums = Enum.map(baselines, &Enum.sum/1)
-    relative_effects = relative_effects_for_draws(cumulative_effects, baseline_sums)
+    relative_effects = Validation.relative_effects(cumulative_effects, baseline_sums)
 
     %{
       point_effects: point_effects_list,
@@ -293,8 +268,8 @@ defmodule BstsNx.CausalImpact do
       relative_effects: relative_effects,
       actual: post_data,
       counterfactual: baselines,
-      pre_period: {pre_start, pre_end},
-      post_period: {post_start, post_end}
+      pre_period: pre_period,
+      post_period: post_period
     }
   end
 
@@ -358,8 +333,10 @@ defmodule BstsNx.CausalImpact do
                 |> Enum.zip()
                 |> Enum.map(&Tuple.to_list/1)
 
-              lower = Enum.map(effect_columns, &percentile_linear(&1, lower_q))
-              upper = Enum.map(effect_columns, &percentile_linear(&1, upper_q))
+              {lower, upper} =
+                effect_columns
+                |> Enum.map(&percentile_bounds_linear(&1, lower_q, upper_q))
+                |> Enum.unzip()
 
               {lower, upper}
             end
@@ -385,12 +362,13 @@ defmodule BstsNx.CausalImpact do
 
         true ->
           v_t = Nx.tensor(vals, type: {:f, 64})
+          {lower, upper} = percentile_bounds_linear(vals, lower_q, upper_q)
 
           %{
             mean: v_t |> Nx.mean() |> Nx.to_number(),
             sd: v_t |> Nx.standard_deviation(ddof: 1) |> Nx.to_number(),
-            lower: percentile_linear(vals, lower_q),
-            upper: percentile_linear(vals, upper_q)
+            lower: lower,
+            upper: upper
           }
       end
     end
@@ -445,13 +423,17 @@ defmodule BstsNx.CausalImpact do
     * `:baseline` – list of smoothed baseline values during intervention
   """
   @spec estimate_from_filter(Nx.t() | [number()], [non_neg_integer()], keyword()) :: map()
-  def estimate_from_filter(observations, intervention_indices, opts \\ []) do
-    obs_tensor =
-      case observations do
-        %Nx.Tensor{} -> observations
-        list when is_list(list) -> Nx.tensor(list, type: {:f, 32})
-      end
+  def estimate_from_filter(observations, intervention_indices, opts \\ [])
 
+  def estimate_from_filter(observations, intervention_indices, opts) when is_list(observations) do
+    Nx.with_default_backend(Nx.BinaryBackend, fn ->
+      observations
+      |> Nx.tensor(type: {:f, 64})
+      |> estimate_from_filter(intervention_indices, opts)
+    end)
+  end
+
+  def estimate_from_filter(%Nx.Tensor{} = obs_tensor, intervention_indices, opts) do
     t = Nx.axis_size(obs_tensor, 0)
     f = Keyword.get(opts, :f, 1.0)
     h = Keyword.get(opts, :h, 1.0)
@@ -459,50 +441,17 @@ defmodule BstsNx.CausalImpact do
     r = Keyword.get(opts, :r, 1.0)
     x0 = Keyword.get(opts, :x0, 0.0)
     p0 = Keyword.get(opts, :p0, 1.0)
-    alpha = Keyword.get(opts, :alpha, 0.05)
+    alpha = Keyword.get(opts, :alpha, @default_alpha)
 
-    if not is_number(alpha) or alpha <= 0 or alpha >= 1 do
-      raise ArgumentError, "alpha must be in (0, 1), got: #{inspect(alpha)}"
-    end
+    Validation.validate_alpha!(alpha)
 
-    z = BstsNx.Utils.z_score(alpha)
-
-    valid_indices =
-      intervention_indices
-      |> Enum.filter(fn idx -> idx >= 0 and idx < t end)
-      |> Enum.uniq()
-      |> Enum.sort()
+    valid_indices = valid_filter_indices(intervention_indices, t)
 
     if valid_indices == [] do
       # No valid intervention indices — return zero-effect result
-      %{
-        point_effects: %{mean: [], lower: [], upper: []},
-        cumulative_effect: %{
-          mean: 0.0,
-          sd: 0.0,
-          lower: 0.0,
-          upper: 0.0,
-          cross_cov_included: false
-        },
-        relative_effect: %{mean: 0.0, sd: 0.0, lower: 0.0, upper: 0.0},
-        actual: [],
-        baseline: [],
-        baseline_variance: [],
-        obs_variance: r_to_number(r)
-      }
+      empty_filter_summary(r_to_number(r), false)
     else
-      # Build NaN mask for intervention period
-      mask_flags = :array.new(t, default: 0)
-
-      mask_flags =
-        Enum.reduce(valid_indices, mask_flags, fn idx, arr ->
-          :array.set(idx, 1, arr)
-        end)
-
-      mask_list = Enum.map(0..(t - 1), fn i -> :array.get(i, mask_flags) end)
-      mask = Nx.equal(Nx.tensor(mask_list, type: {:u, 8}), 1)
-      nan_vec = Nx.broadcast(Nx.Constants.nan(), {t})
-      masked_obs = Nx.select(mask, nan_vec, obs_tensor)
+      masked_obs = mask_observations_at_indices(obs_tensor, t, valid_indices)
 
       # Filter
       {xs, ps} = BstsNx.KalmanFilter.filter_defn(masked_obs, f, h, q, r, x0, p0)
@@ -525,8 +474,7 @@ defmodule BstsNx.CausalImpact do
         |> Enum.map(fn {hi, v} -> max(hi * hi * v, 0.0) end)
 
       # Point effects
-      point_effects_mean =
-        Enum.zip(actual_vals, baseline_vals) |> Enum.map(fn {a, b} -> a - b end)
+      point_effects_mean = point_effects(actual_vals, baseline_vals)
 
       # Observation-level variance: h_t^2 * p_t + r
       r_num = r_to_number(r)
@@ -534,14 +482,6 @@ defmodule BstsNx.CausalImpact do
       point_sds =
         Enum.zip(h_vals, state_var_vals)
         |> Enum.map(fn {hi, v} -> :math.sqrt(max(hi * hi * v + r_num, 0.0)) end)
-
-      point_lower =
-        Enum.zip(point_effects_mean, point_sds)
-        |> Enum.map(fn {m, s} -> m - z * s end)
-
-      point_upper =
-        Enum.zip(point_effects_mean, point_sds)
-        |> Enum.map(fn {m, s} -> m + z * s end)
 
       # Cumulative effect with cross-covariance correction.
       # Smoothed state errors at adjacent time steps are correlated through
@@ -554,110 +494,31 @@ defmodule BstsNx.CausalImpact do
       # where delta_t = h_t * P^s_t if t is an intervention index, else 0.
       # The cross-covariance sum accumulates h_j * A_j only at intervention
       # indices j.
-      cum_mean = Enum.sum(point_effects_mean)
+      cum_sd =
+        scalar_cumulative_sd_with_cross_covariance(
+          valid_indices,
+          h,
+          h_vals,
+          state_var_vals,
+          ps,
+          sps,
+          f,
+          q,
+          r_num,
+          t
+        )
 
-      f_num = if is_number(f), do: f * 1.0, else: Nx.to_number(Nx.tensor(f))
-      q_num = if is_number(q), do: q * 1.0, else: Nx.to_number(Nx.tensor(q))
-
-      n_intervention = length(valid_indices)
-
-      # Diagonal variance: sum(h_i^2 * P^s_i)
-      diag_var =
-        Enum.zip(h_vals, state_var_vals)
-        |> Enum.map(fn {hi, v} -> hi * hi * v end)
-        |> Enum.sum()
-
-      # Cross-covariance correction propagated through all time steps
-      cross_var_sum =
-        if n_intervention >= 2 do
-          min_idx = Enum.min(valid_indices)
-          max_idx = Enum.max(valid_indices)
-
-          # Extract filtered variances and smoothed variances for the full
-          # range [min_idx, max_idx] so we can propagate through gaps.
-          # Use :array for O(1) random access (lists would be O(n) per Enum.at call).
-          all_ps = ps |> Nx.to_flat_list() |> :array.from_list()
-          all_sps = sps |> Nx.to_flat_list() |> :array.from_list()
-
-          # Build intervention set for O(1) membership checks
-          intervention_set = MapSet.new(valid_indices)
-
-          # Compute h value at any time step
-          h_at = h_at_step_fn(h, t)
-
-          # Smoother gain at time step k
-          gain_at = fn k ->
-            pf = :array.get(k, all_ps)
-            denom = f_num * pf * f_num + q_num
-            if abs(denom) < 1.0e-15, do: 0.0, else: pf * f_num / denom
-          end
-
-          # Propagate accumulator A through every time step from
-          # min_idx+1 to max_idx, accumulating cross terms at intervention steps.
-          {_a_final, cv_sum} =
-            Enum.reduce((min_idx + 1)..max_idx//1, {0.0, 0.0}, fn step, {a_prev, cs} ->
-              prev = step - 1
-              g_prev = gain_at.(prev)
-
-              delta =
-                if MapSet.member?(intervention_set, prev) do
-                  h_at.(prev) * :array.get(prev, all_sps)
-                else
-                  0.0
-                end
-
-              a_step = g_prev * (a_prev + delta)
-
-              cs_new =
-                if MapSet.member?(intervention_set, step) do
-                  cs + h_at.(step) * a_step
-                else
-                  cs
-                end
-
-              {a_step, cs_new}
-            end)
-
-          cv_sum
-        else
-          0.0
-        end
-
-      cum_var = diag_var + n_intervention * r_num + 2.0 * cross_var_sum
-      cum_sd = :math.sqrt(max(cum_var, 0.0))
-
-      # Relative
-      baseline_sum = Enum.sum(baseline_vals)
-
-      rel_mean =
-        if abs(baseline_sum) < 1.0e-10, do: 0.0, else: cum_mean / baseline_sum
-
-      rel_sd =
-        if abs(baseline_sum) < 1.0e-10, do: 0.0, else: cum_sd / abs(baseline_sum)
-
-      %{
-        point_effects: %{
-          mean: point_effects_mean,
-          lower: point_lower,
-          upper: point_upper
-        },
-        cumulative_effect: %{
-          mean: cum_mean,
-          sd: cum_sd,
-          lower: cum_mean - z * cum_sd,
-          upper: cum_mean + z * cum_sd
-        },
-        relative_effect: %{
-          mean: rel_mean,
-          sd: rel_sd,
-          lower: rel_mean - z * rel_sd,
-          upper: rel_mean + z * rel_sd
-        },
+      build_filter_summary(%{
         actual: actual_vals,
         baseline: baseline_vals,
         baseline_variance: baseline_variance_vals,
-        obs_variance: r_num
-      }
+        point_effects: point_effects_mean,
+        point_sds: point_sds,
+        cumulative_sd: cum_sd,
+        obs_variance: r_num,
+        alpha: alpha,
+        cross_cov_included: true
+      })
     end
   end
 
@@ -683,79 +544,41 @@ defmodule BstsNx.CausalImpact do
           BstsNx.ModelSpec.t(),
           keyword()
         ) :: map()
-  def estimate_structured_from_filter(observations, intervention_indices, spec, opts \\ []) do
-    obs_tensor =
-      case observations do
-        %Nx.Tensor{} -> observations
-        list when is_list(list) -> Nx.tensor(list, type: {:f, 32})
-      end
+  def estimate_structured_from_filter(observations, intervention_indices, spec, opts \\ [])
 
+  def estimate_structured_from_filter(observations, intervention_indices, spec, opts)
+      when is_list(observations) do
+    Nx.with_default_backend(Nx.BinaryBackend, fn ->
+      observations
+      |> Nx.tensor(type: {:f, 64})
+      |> estimate_structured_from_filter(intervention_indices, spec, opts)
+    end)
+  end
+
+  def estimate_structured_from_filter(%Nx.Tensor{} = obs_tensor, intervention_indices, spec, opts) do
     t = Nx.axis_size(obs_tensor, 0)
-    alpha = Keyword.get(opts, :alpha, 0.05)
+    alpha = Keyword.get(opts, :alpha, @default_alpha)
 
-    if not is_number(alpha) or alpha <= 0 or alpha >= 1 do
-      raise ArgumentError, "alpha must be in (0, 1), got: #{inspect(alpha)}"
-    end
+    Validation.validate_alpha!(alpha)
 
-    z = BstsNx.Utils.z_score(alpha)
-
-    valid_indices =
-      intervention_indices
-      |> Enum.filter(fn idx -> idx >= 0 and idx < t end)
-      |> Enum.uniq()
-      |> Enum.sort()
+    valid_indices = valid_filter_indices(intervention_indices, t)
 
     if valid_indices == [] do
-      %{
-        point_effects: %{mean: [], lower: [], upper: []},
-        cumulative_effect: %{mean: 0.0, sd: 0.0, lower: 0.0, upper: 0.0},
-        relative_effect: %{mean: 0.0, sd: 0.0, lower: 0.0, upper: 0.0},
-        actual: [],
-        baseline: [],
-        baseline_variance: [],
-        obs_variance: 0.0
-      }
+      empty_filter_summary(0.0, false)
     else
-      # Extract fixed structural matrices from priors.
-      # For fast filter we use the mode/mean of the prior distributions.
-      # ModelSpec stores `prior_scale` and `prior_shape` for each diagonal Q entry.
-      q_diag_map =
-        Enum.map(spec.q_specs, fn q_spec ->
-          prior_shape = to_number(q_spec.prior_shape)
-          prior_scale = to_number(q_spec.prior_scale)
-          # Filter-only path does not adapt via MCMC; use a regularized mean-like
-          # initializer instead of the inverse-gamma mode to reduce under-dispersion.
-          denom = max(prior_shape - 1.0, 0.5)
-          {q_spec.dim_index, prior_scale / denom}
-        end)
-        |> Map.new()
-
-      # Any dimension not given in q_specs has 0.0 variance
+      # Extract fixed structural matrices from the configured ModelSpec values.
+      # This filter-only path does not resample variances; callers that want
+      # prior/posterior adaptation should use the MCMC path.
       state_dim = Nx.axis_size(spec.f, 0)
-      q_diag = Enum.map(0..(state_dim - 1), fn dim -> Map.get(q_diag_map, dim, 0.0) end)
+      q_matrix = Validation.fixed_q_matrix(spec.q_specs, state_dim)
 
-      q_matrix = Nx.make_diagonal(Nx.tensor(q_diag, type: {:f, 64}))
-
-      obs_prior_shape = to_number(spec.obs_prior_shape)
-      obs_prior_scale = to_number(spec.obs_prior_scale)
-      r_val = obs_prior_scale / max(obs_prior_shape - 1.0, 0.5)
+      r_val = to_number(spec.obs_var)
       r_tensor = Nx.tensor(r_val, type: {:f, 64})
 
       x0 = spec.x0 |> BstsNx.Utils.to_tensor() |> Nx.as_type({:f, 64}) |> Nx.flatten()
       p0 = spec.p0 |> BstsNx.Utils.to_tensor() |> Nx.as_type({:f, 64})
 
-      # Build NaN mask for intervention period
-      mask_flags = :array.new(t, default: 0)
-
-      mask_flags =
-        Enum.reduce(valid_indices, mask_flags, fn idx, arr ->
-          :array.set(idx, 1, arr)
-        end)
-
-      mask_list = Enum.map(0..(t - 1), fn i -> :array.get(i, mask_flags) end)
-      mask = Nx.equal(Nx.tensor(mask_list, type: {:u, 8}), 1)
-      nan_vec = Nx.broadcast(Nx.Constants.nan(), {t})
-      masked_obs = Nx.select(mask, nan_vec, obs_tensor)
+      masked_obs = mask_observations_at_indices(obs_tensor, t, valid_indices)
 
       h_tensor = normalize_structured_h_for_filter(spec.h, t, state_dim)
 
@@ -791,8 +614,7 @@ defmodule BstsNx.CausalImpact do
       baseline_vals =
         Nx.sum(Nx.multiply(h_flat, sxs_interventions), axes: [1]) |> Nx.to_flat_list()
 
-      point_effects_mean =
-        Enum.zip(actual_vals, baseline_vals) |> Enum.map(fn {a, b} -> a - b end)
+      point_effects_mean = point_effects(actual_vals, baseline_vals)
 
       # Observation-level variance: H_t * P_t * H_t^T + R.
       # Compute this with explicit batched multiplies to avoid backend-specific
@@ -833,60 +655,177 @@ defmodule BstsNx.CausalImpact do
       point_sds = Nx.sqrt(p_projected_vars) |> Nx.to_flat_list()
       baseline_variance_vals = baseline_projected_vars |> Nx.to_flat_list()
 
-      point_lower =
-        Enum.zip(point_effects_mean, point_sds) |> Enum.map(fn {m, s} -> m - z * s end)
-
-      point_upper =
-        Enum.zip(point_effects_mean, point_sds) |> Enum.map(fn {m, s} -> m + z * s end)
-
-      cum_mean = Enum.sum(point_effects_mean)
       diag_var = Nx.sum(p_projected_vars) |> Nx.to_number()
 
-      # For cross-covariance approximation in structured multidimensional filters,
-      # we skip the full backward RTS lag-covariance pass for speed, adopting independence
-      # assumption of the prediction errors. This is standard in highly paramaterized fast causal impact.
-      cum_sd = :math.sqrt(diag_var)
+      cross_var_sum =
+        structured_smoother_cross_covariance_sum(
+          valid_indices,
+          h_tensor,
+          filt_ps,
+          sps,
+          spec.f,
+          q_matrix
+        )
 
-      baseline_sum = Enum.sum(baseline_vals)
-      rel_mean = if abs(baseline_sum) < 1.0e-10, do: 0.0, else: cum_mean / baseline_sum
-      rel_sd = if abs(baseline_sum) < 1.0e-10, do: 0.0, else: cum_sd / abs(baseline_sum)
+      cum_sd = :math.sqrt(max(diag_var + 2.0 * cross_var_sum, 0.0))
 
-      %{
-        point_effects: %{
-          mean: point_effects_mean,
-          lower: point_lower,
-          upper: point_upper
-        },
-        cumulative_effect: %{
-          mean: cum_mean,
-          sd: cum_sd,
-          lower: cum_mean - z * cum_sd,
-          upper: cum_mean + z * cum_sd,
-          cross_cov_included: false
-        },
-        relative_effect: %{
-          mean: rel_mean,
-          sd: rel_sd,
-          lower: rel_mean - z * rel_sd,
-          upper: rel_mean + z * rel_sd
-        },
+      build_filter_summary(%{
         actual: actual_vals,
         baseline: baseline_vals,
         baseline_variance: baseline_variance_vals,
-        obs_variance: r_val
-      }
+        point_effects: point_effects_mean,
+        point_sds: point_sds,
+        cumulative_sd: cum_sd,
+        obs_variance: r_val,
+        alpha: alpha,
+        cross_cov_included: true
+      })
     end
+  end
+
+  defp valid_filter_indices(intervention_indices, t) do
+    intervention_indices
+    |> Enum.filter(fn idx -> idx >= 0 and idx < t end)
+    |> Enum.uniq()
+    |> Enum.sort()
+  end
+
+  defp empty_filter_summary(obs_variance, cross_cov_included) do
+    %{
+      point_effects: %{mean: [], lower: [], upper: []},
+      cumulative_effect: %{
+        mean: 0.0,
+        sd: 0.0,
+        lower: 0.0,
+        upper: 0.0,
+        cross_cov_included: cross_cov_included
+      },
+      relative_effect: %{mean: 0.0, sd: 0.0, lower: 0.0, upper: 0.0},
+      actual: [],
+      baseline: [],
+      baseline_variance: [],
+      obs_variance: obs_variance
+    }
+  end
+
+  defp build_filter_summary(%{
+         actual: actual_vals,
+         baseline: baseline_vals,
+         baseline_variance: baseline_variance_vals,
+         point_effects: point_effects_mean,
+         point_sds: point_sds,
+         cumulative_sd: cum_sd,
+         obs_variance: obs_variance,
+         alpha: alpha,
+         cross_cov_included: cross_cov_included
+       }) do
+    z = BstsNx.Utils.z_score(alpha)
+    cum_mean = Enum.sum(point_effects_mean)
+    baseline_sum = Enum.sum(baseline_vals)
+    relative_effect = Validation.relative_effect_summary(cum_mean, cum_sd, baseline_sum, z)
+
+    point_lower =
+      Enum.zip(point_effects_mean, point_sds)
+      |> Enum.map(fn {m, s} -> m - z * s end)
+
+    point_upper =
+      Enum.zip(point_effects_mean, point_sds)
+      |> Enum.map(fn {m, s} -> m + z * s end)
+
+    %{
+      point_effects: %{
+        mean: point_effects_mean,
+        lower: point_lower,
+        upper: point_upper
+      },
+      cumulative_effect: %{
+        mean: cum_mean,
+        sd: cum_sd,
+        lower: cum_mean - z * cum_sd,
+        upper: cum_mean + z * cum_sd,
+        cross_cov_included: cross_cov_included
+      },
+      relative_effect: relative_effect,
+      actual: actual_vals,
+      baseline: baseline_vals,
+      baseline_variance: baseline_variance_vals,
+      obs_variance: obs_variance
+    }
+  end
+
+  defp scalar_cumulative_sd_with_cross_covariance(
+         valid_indices,
+         h,
+         h_vals,
+         state_var_vals,
+         ps,
+         sps,
+         f,
+         q,
+         r_num,
+         t
+       ) do
+    n_intervention = length(valid_indices)
+
+    # Diagonal variance: sum(h_i^2 * P^s_i)
+    diag_var =
+      Enum.zip(h_vals, state_var_vals)
+      |> Enum.map(fn {hi, v} -> hi * hi * v end)
+      |> Enum.sum()
+
+    cross_var_sum =
+      if n_intervention >= 2 do
+        min_idx = Enum.min(valid_indices)
+        max_idx = Enum.max(valid_indices)
+        f_num = if is_number(f), do: f * 1.0, else: Nx.to_number(Nx.tensor(f))
+        q_num = if is_number(q), do: q * 1.0, else: Nx.to_number(Nx.tensor(q))
+
+        all_ps = ps |> Nx.to_flat_list() |> :array.from_list()
+        all_sps = sps |> Nx.to_flat_list() |> :array.from_list()
+        intervention_set = MapSet.new(valid_indices)
+        h_at = h_at_step_fn(h, t)
+
+        gain_at = fn k ->
+          pf = :array.get(k, all_ps)
+          denom = f_num * pf * f_num + q_num
+          if abs(denom) < @near_zero_denominator, do: 0.0, else: pf * f_num / denom
+        end
+
+        {_a_final, cv_sum} =
+          Enum.reduce((min_idx + 1)..max_idx//1, {0.0, 0.0}, fn step, {a_prev, cs} ->
+            prev = step - 1
+            g_prev = gain_at.(prev)
+
+            delta =
+              if MapSet.member?(intervention_set, prev) do
+                h_at.(prev) * :array.get(prev, all_sps)
+              else
+                0.0
+              end
+
+            a_step = g_prev * (a_prev + delta)
+
+            cs_new =
+              if MapSet.member?(intervention_set, step) do
+                cs + h_at.(step) * a_step
+              else
+                cs
+              end
+
+            {a_step, cs_new}
+          end)
+
+        cv_sum
+      else
+        0.0
+      end
+
+    cum_var = diag_var + n_intervention * r_num + 2.0 * cross_var_sum
+    :math.sqrt(max(cum_var, 0.0))
   end
 
   defp r_to_number(r) when is_number(r), do: r * 1.0
   defp r_to_number(%Nx.Tensor{} = r), do: Nx.to_number(r)
-
-  defp relative_effects_for_draws(cumulative_effects, baseline_sums) do
-    Enum.zip(cumulative_effects, baseline_sums)
-    |> Enum.map(fn {cumulative_effect, baseline_sum} ->
-      if abs(baseline_sum) > 1.0e-10, do: cumulative_effect / baseline_sum, else: 0.0
-    end)
-  end
 
   # Returns a function that gives h at any time step index.
   defp h_at_step_fn(h, _t) when is_number(h), do: fn _step -> h * 1.0 end
@@ -954,6 +893,61 @@ defmodule BstsNx.CausalImpact do
     end
   end
 
+  defp structured_smoother_cross_covariance_sum(valid_indices, h_tensor, filt_ps, sps, f, q) do
+    case valid_indices do
+      [] ->
+        0.0
+
+      [_single] ->
+        0.0
+
+      indices ->
+        f = Nx.as_type(f, {:f, 64})
+        q = Nx.as_type(q, {:f, 64})
+
+        gains =
+          indices
+          |> Enum.min_max()
+          |> then(fn {min_idx, max_idx} ->
+            if min_idx >= max_idx do
+              %{}
+            else
+              Map.new(min_idx..(max_idx - 1), fn idx ->
+                {idx, smoother_gain_at(filt_ps, f, q, idx)}
+              end)
+            end
+          end)
+
+        for i <- indices, j <- indices, i < j, reduce: 0.0 do
+          acc ->
+            cov_ij = smooth_state_cross_covariance(i, j, sps, gains)
+            h_i = BstsNx.Utils.take_time_slice_at(h_tensor, i)
+            h_j = BstsNx.Utils.take_time_slice_at(h_tensor, j)
+
+            projected =
+              h_i
+              |> Nx.dot(cov_ij)
+              |> Nx.dot(h_j)
+              |> Nx.to_number()
+
+            acc + projected
+        end
+    end
+  end
+
+  defp smoother_gain_at(filt_ps, f, q, idx) do
+    p_filt = BstsNx.Utils.take_time_slice_at(filt_ps, idx) |> Nx.as_type({:f, 64})
+    p_pred_next = Nx.add(Nx.dot(Nx.dot(f, p_filt), Nx.transpose(f)), q)
+    rhs = Nx.dot(f, p_filt)
+    BstsNx.Utils.safe_solve(p_pred_next, rhs) |> Nx.transpose()
+  end
+
+  defp smooth_state_cross_covariance(i, j, sps, gains) when i < j do
+    Enum.reduce((j - 1)..i//-1, BstsNx.Utils.take_time_slice_at(sps, j), fn idx, cov ->
+      gains |> Map.fetch!(idx) |> Nx.dot(cov)
+    end)
+  end
+
   # Generates a counterfactual trajectory by forward simulation of a random walk
   # with observation noise, using Nx.Random for PRNG consistency with the rest
   # of the library.
@@ -997,7 +991,6 @@ defmodule BstsNx.CausalImpact do
          post_h,
          q_matrix,
          obs_var,
-         _n_steps,
          key,
          gap_steps
        ) do
@@ -1155,10 +1148,24 @@ defmodule BstsNx.CausalImpact do
     end
   end
 
+  defp mask_observations_at_indices(obs_tensor, t, indices) do
+    mask_flags = :array.new(t, default: 0)
+
+    mask_flags =
+      Enum.reduce(indices, mask_flags, fn idx, arr ->
+        :array.set(idx, 1, arr)
+      end)
+
+    mask_list = Enum.map(0..(t - 1), fn i -> :array.get(i, mask_flags) end)
+    mask = Nx.equal(Nx.tensor(mask_list, type: {:u, 8}), 1)
+    nan_vec = Nx.broadcast(Nx.Constants.nan(), {t})
+    Nx.select(mask, nan_vec, obs_tensor)
+  end
+
   defp to_number(%Nx.Tensor{} = t), do: Nx.to_number(t)
   defp to_number(x) when is_number(x), do: x + 0.0
 
-  defp percentile_linear(values, quantile) when is_list(values) do
+  defp percentile_bounds_linear(values, lower_quantile, upper_quantile) when is_list(values) do
     sorted =
       values
       |> Enum.map(&to_number/1)
@@ -1166,38 +1173,57 @@ defmodule BstsNx.CausalImpact do
 
     case sorted do
       [] ->
-        :nan
+        {:nan, :nan}
 
       [v] ->
-        v
+        {v, v}
 
       _ ->
-        n = length(sorted)
-        position = quantile * (n - 1)
-        lo = trunc(Float.floor(position))
-        hi = trunc(Float.ceil(position))
-        weight = position - lo
-
+        last = length(sorted) - 1
         sorted_t = List.to_tuple(sorted)
-        lo_v = elem(sorted_t, lo)
-        hi_v = elem(sorted_t, hi)
-        lo_v + weight * (hi_v - lo_v)
+
+        {
+          linear_percentile(sorted_t, last, lower_quantile),
+          linear_percentile(sorted_t, last, upper_quantile)
+        }
     end
   end
 
-  defp split_key_at(keys, idx) do
-    Nx.slice_along_axis(keys, idx, 1, axis: 0)
-    |> Nx.squeeze(axes: [0])
+  defp linear_percentile(sorted_t, last, quantile) do
+    position = quantile * last
+    lo = trunc(Float.floor(position))
+    hi = trunc(Float.ceil(position))
+    weight = position - lo
+
+    lo_v = elem(sorted_t, lo)
+    hi_v = elem(sorted_t, hi)
+    lo_v + weight * (hi_v - lo_v)
   end
 
   defp derive_estimate_keys(opts) do
     root_key =
-      case Keyword.get(opts, :key) do
-        %Nx.Tensor{} = key -> key
-        _ -> Nx.Random.key(Keyword.get(opts, :seed, System.os_time()))
+      case Keyword.fetch(opts, :key) do
+        {:ok, %Nx.Tensor{} = key} ->
+          validate_prng_key!(key)
+
+        {:ok, other} ->
+          raise ArgumentError,
+                "key must be an Nx.Random key tensor of shape {2}, got: #{inspect(other)}"
+
+        :error ->
+          Nx.Random.key(Keyword.get(opts, :seed, System.os_time()))
       end
 
     split_keys = Nx.Random.split(root_key, parts: 2)
     {split_key_at(split_keys, 0), split_key_at(split_keys, 1)}
+  end
+
+  defp validate_prng_key!(%Nx.Tensor{} = key) do
+    if Nx.shape(key) == {2} do
+      key
+    else
+      raise ArgumentError,
+            "key must be an Nx.Random key tensor of shape {2}, got shape #{inspect(Nx.shape(key))}"
+    end
   end
 end

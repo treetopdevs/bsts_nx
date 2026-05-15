@@ -85,6 +85,33 @@ defmodule BstsNx.OperationalTest do
                     1.0e-9
   end
 
+  test "forecast cumulative interval includes cross-step covariance" do
+    observations = List.duplicate(0.0, 16)
+
+    spec =
+      Components.local_level_spec(
+        initial_state: 0.0,
+        initial_cov: 1.0,
+        process_var: 1.0,
+        obs_var: 0.1
+      )
+
+    summary =
+      spec
+      |> Operational.prepare({1, 6}, {7, 16})
+      |> Operational.forecast(observations)
+      |> Map.fetch!(:summary)
+
+    independent_var =
+      Enum.sum(summary.baseline_variance) +
+        length(summary.baseline_variance) * summary.obs_variance
+
+    cumulative_var = summary.cumulative_effect.sd * summary.cumulative_effect.sd
+
+    assert summary.cumulative_effect.cross_cov_included == true
+    assert cumulative_var > independent_var * 1.5
+  end
+
   test "tensor return keeps vector fields as tensors with list-equivalent values" do
     observations = demo_observations()
     spec = Components.local_linear_trend_spec(initial_level: hd(observations), obs_var: 2.0)

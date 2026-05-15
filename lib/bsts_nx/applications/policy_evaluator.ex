@@ -67,6 +67,7 @@ defmodule BstsNx.Applications.PolicyEvaluator do
 
   alias BstsNx.InterventionAnalysis
   alias BstsNx.ModelBuilder
+  alias BstsNx.Validation
 
   @type intervention :: %{
           intervention_name: String.t(),
@@ -123,10 +124,7 @@ defmodule BstsNx.Applications.PolicyEvaluator do
     alpha = Keyword.get(opts, :alpha, 0.05)
     lag = Keyword.get(opts, :lag, 0)
     post_end = Keyword.get(opts, :post_period_end, n)
-
-    if not is_number(alpha) or alpha <= 0.0 or alpha >= 1.0 do
-      raise ArgumentError, "alpha must be between 0 and 1 (exclusive), got: #{inspect(alpha)}"
-    end
+    Validation.validate_alpha!(alpha, "alpha must be between 0 and 1 (exclusive)")
 
     if not is_integer(lag) or lag < 0 do
       raise ArgumentError, "lag must be a non-negative integer, got: #{inspect(lag)}"

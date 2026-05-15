@@ -22,6 +22,22 @@ defmodule BstsNx.ModelBuilder do
     :seasonality,
     :model_spec,
     :method,
+    :mode,
+    :fallback,
+    :allow_mcmc_fallback,
+    :return,
+    :baseline,
+    :key,
+    :thin,
+    :n_samples,
+    :initial_state,
+    :initial_cov,
+    :process_var,
+    :obs_var,
+    :x0,
+    :p0,
+    :q,
+    :r,
     :regression_mode,
     :regression_opts,
     :control_regression_mode,
@@ -207,9 +223,7 @@ defmodule BstsNx.ModelBuilder do
           end
       end
 
-    result =
-      opts
-      |> Keyword.take([:alpha, :num_samples, :burn_in, :seed, :method])
+    result = Keyword.take(opts, @analysis_passthrough_opts)
 
     if spec == nil do
       result

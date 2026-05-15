@@ -270,6 +270,14 @@ defmodule BstsNx.PipelineTest do
       end
     end
 
+    test "raises when spot window is empty", %{obs: obs, spec: spec} do
+      spots = [%{id: "bad", window_start: 3, window_end: 3}]
+
+      assert_raise ArgumentError, ~r/empty window/, fn ->
+        Pipeline.run(obs, {1, 10}, {11, 20}, spots, spec, num_samples: 2, burn_in: 1, seed: 1)
+      end
+    end
+
     test "allows non-contiguous pre and post periods", %{obs: obs, spec: spec} do
       spots = [%{id: "s1", window_start: 0, window_end: 3}]
 

@@ -110,6 +110,29 @@ defmodule BstsNx.CausalImpactStructuredTest do
     end
   end
 
+  describe "shared study period validation" do
+    setup do
+      spec = Components.local_level_spec()
+      obs = Enum.map(1..20, fn i -> i * 1.0 end)
+      %{spec: spec, obs: obs}
+    end
+
+    test "scalar and structured estimates reject overlapping post periods with the same message",
+         %{spec: spec, obs: obs} do
+      assert_raise ArgumentError, "post_period must satisfy pre_end < start <= end", fn ->
+        CausalImpact.estimate(obs, {1, 10}, {10, 12}, num_samples: 1, burn_in: 0, seed: 1)
+      end
+
+      assert_raise ArgumentError, "post_period must satisfy pre_end < start <= end", fn ->
+        CausalImpact.estimate_structured(obs, {1, 10}, {10, 12}, spec,
+          num_samples: 1,
+          burn_in: 0,
+          seed: 1
+        )
+      end
+    end
+  end
+
   # ── Seasonal model ─────────────────────────────────────────────────────
 
   describe "estimate_structured with seasonal model" do

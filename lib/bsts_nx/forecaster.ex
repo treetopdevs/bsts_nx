@@ -44,6 +44,7 @@ defmodule BstsNx.Forecaster do
   alias BstsNx.GibbsSampler
   alias BstsNx.ModelBuilder
   alias BstsNx.ModelSpec
+  alias BstsNx.Validation
 
   @type fit_result :: %{
           posterior_samples: list(),
@@ -164,10 +165,7 @@ defmodule BstsNx.Forecaster do
     end
 
     alpha = Keyword.get(opts, :alpha, 0.05)
-
-    if not is_number(alpha) or alpha <= 0.0 or alpha >= 1.0 do
-      raise ArgumentError, "alpha must be between 0 and 1 (exclusive), got: #{inspect(alpha)}"
-    end
+    Validation.validate_alpha!(alpha, "alpha must be between 0 and 1 (exclusive)")
 
     seed = Keyword.get(opts, :seed, System.os_time())
     key = Keyword.get(opts, :key, Nx.Random.key(seed))
@@ -284,7 +282,7 @@ defmodule BstsNx.Forecaster do
          base_key,
          future_regressors
        ) do
-    sample_key_rows = Nx.Random.split(base_key, parts: length(samples)) |> Nx.to_list()
+    sample_keys = Nx.Random.split(base_key, parts: length(samples))
     n_state = Nx.axis_size(spec.f, 0)
 
     # Build per-step H: if future_regressors provided, use build_future_h;
@@ -306,8 +304,8 @@ defmodule BstsNx.Forecaster do
 
     h_rows = Enum.map(h_list, &BstsNx.Utils.h_to_row_tensor/1)
 
-    Enum.zip(samples, sample_key_rows)
-    |> Enum.map(fn {sample, sample_key_row} ->
+    Enum.with_index(samples)
+    |> Enum.map(fn {sample, idx} ->
       final_state = List.last(sample.states)
       q_matrix = sample.q_matrix
       obs_var = Nx.to_number(sample.obs_var)
@@ -315,10 +313,10 @@ defmodule BstsNx.Forecaster do
 
       q_diag = Nx.take_diagonal(q_matrix)
       q_sds = Nx.sqrt(Nx.max(q_diag, Nx.tensor(0.0)))
-      sample_key = Nx.tensor(sample_key_row, type: Nx.type(base_key))
-      [key_state_row, key_obs_row] = Nx.Random.split(sample_key, parts: 2) |> Nx.to_list()
-      key_state = Nx.tensor(key_state_row, type: Nx.type(base_key))
-      key_obs = Nx.tensor(key_obs_row, type: Nx.type(base_key))
+      sample_key = BstsNx.Utils.split_key_at(sample_keys, idx)
+      split_keys = Nx.Random.split(sample_key, parts: 2)
+      key_state = BstsNx.Utils.split_key_at(split_keys, 0)
+      key_obs = BstsNx.Utils.split_key_at(split_keys, 1)
       {proc_noise, _} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {horizon, n_state})
       {obs_noise, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {horizon})
       proc_rows = proc_noise |> Nx.multiply(q_sds) |> Nx.to_list()
@@ -348,8 +346,8 @@ defmodule BstsNx.Forecaster do
     case Keyword.get(opts, :key) do
       %Nx.Tensor{} = key ->
         split_keys = Nx.Random.split(key, parts: 2)
-        fit_key = Nx.slice_along_axis(split_keys, 0, 1, axis: 0) |> Nx.squeeze(axes: [0])
-        predict_key = Nx.slice_along_axis(split_keys, 1, 1, axis: 0) |> Nx.squeeze(axes: [0])
+        fit_key = BstsNx.Utils.split_key_at(split_keys, 0)
+        predict_key = BstsNx.Utils.split_key_at(split_keys, 1)
 
         {
           opts |> Keyword.put(:key, fit_key) |> Keyword.delete(:seed),
@@ -358,27 +356,39 @@ defmodule BstsNx.Forecaster do
 
       _ ->
         case Keyword.get(opts, :seed) do
-          seed when is_integer(seed) -> {opts, Keyword.put(opts, :seed, seed + 1)}
-          _ -> {opts, opts}
+          seed when is_integer(seed) ->
+            split_keys = Nx.Random.split(Nx.Random.key(seed), parts: 2)
+
+            {
+              opts
+              |> Keyword.put(:key, BstsNx.Utils.split_key_at(split_keys, 0))
+              |> Keyword.delete(:seed),
+              opts
+              |> Keyword.put(:key, BstsNx.Utils.split_key_at(split_keys, 1))
+              |> Keyword.delete(:seed)
+            }
+
+          _ ->
+            {opts, opts}
         end
     end
   end
 
   defp predict_scalar(%{posterior_samples: samples}, horizon, base_key) do
-    sample_key_rows = Nx.Random.split(base_key, parts: length(samples)) |> Nx.to_list()
+    sample_keys = Nx.Random.split(base_key, parts: length(samples))
 
-    Enum.zip(samples, sample_key_rows)
-    |> Enum.map(fn {sample, sample_key_row} ->
+    Enum.with_index(samples)
+    |> Enum.map(fn {sample, idx} ->
       final_state = Nx.to_number(List.last(sample.states))
       q = Nx.to_number(sample.process_var)
       r = Nx.to_number(sample.obs_var)
       sd_q = :math.sqrt(max(q, 0.0))
       sd_r = :math.sqrt(max(r, 0.0))
 
-      sample_key = Nx.tensor(sample_key_row, type: Nx.type(base_key))
-      [key_process_row, key_obs_row] = Nx.Random.split(sample_key, parts: 2) |> Nx.to_list()
-      key_process = Nx.tensor(key_process_row, type: Nx.type(base_key))
-      key_obs = Nx.tensor(key_obs_row, type: Nx.type(base_key))
+      sample_key = BstsNx.Utils.split_key_at(sample_keys, idx)
+      split_keys = Nx.Random.split(sample_key, parts: 2)
+      key_process = BstsNx.Utils.split_key_at(split_keys, 0)
+      key_obs = BstsNx.Utils.split_key_at(split_keys, 1)
       {proc_noise, _} = Nx.Random.normal(key_process, 0.0, 1.0, shape: {horizon})
       {obs_noise, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {horizon})
 
@@ -486,9 +496,8 @@ defmodule BstsNx.Forecaster do
 
   defp h_to_row(%Nx.Tensor{} = h_t) do
     h_t
-    |> Nx.flatten()
+    |> BstsNx.Utils.h_to_row_tensor()
     |> Nx.to_flat_list()
-    |> Enum.map(&(&1 + 0.0))
   end
 
   # Observation coercion delegated to ModelBuilder.coerce_obs/1

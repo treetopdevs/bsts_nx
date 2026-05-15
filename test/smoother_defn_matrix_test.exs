@@ -77,4 +77,21 @@ defmodule BstsNx.SmootherDefnMatrixTest do
     assert Nx.all_close(states_a, states_b, atol: 1.0e-6, rtol: 1.0e-6) |> Nx.to_number() == 1
     assert Nx.to_flat_list(key_a) == Nx.to_flat_list(key_b)
   end
+
+  test "simulate_from_filtered_defn_matrix uses all-or-nothing fallback for partial-NaN cholesky retry" do
+    filtered_xs = Nx.tensor([[0.0, 0.0]], type: {:f, 64})
+    filtered_ps = Nx.tensor([[[1.0, :nan], [:nan, 1.0]]], type: {:f, 64})
+    f = Nx.eye(2, type: {:f, 64})
+    q = Nx.eye(2, type: {:f, 64})
+    key = Nx.Random.key(123)
+
+    {states, _key_out} =
+      Smoother.simulate_from_filtered_defn_matrix(filtered_xs, filtered_ps, f, q, key)
+
+    {eps, _} = Nx.Random.normal(key, 0.0, 1.0, shape: {1, 2})
+    fallback_scale = :math.sqrt(0.001001000001)
+    expected = Nx.multiply(eps, fallback_scale)
+
+    assert Nx.all_close(states, expected, atol: 1.0e-8, rtol: 1.0e-8) |> Nx.to_number() == 1
+  end
 end

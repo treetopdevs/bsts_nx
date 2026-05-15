@@ -9,6 +9,141 @@ defmodule BstsNx.ValidationTest do
 
   # (helpers removed — not needed; synthetic data is built inline)
 
+  describe "shared validation helpers" do
+    test "validate_alpha!/2 accepts open-interval alpha values" do
+      assert Validation.validate_alpha!(0.05) == :ok
+    end
+
+    test "validate_alpha!/2 preserves caller-specific error wording" do
+      assert_raise ArgumentError, ~r/alpha must be in \(0, 1\), got: 1.0/, fn ->
+        Validation.validate_alpha!(1.0)
+      end
+
+      assert_raise ArgumentError, ~r/alpha must be a number in \(0, 1\), got: 0/, fn ->
+        Validation.validate_alpha!(0, "alpha must be a number in (0, 1)")
+      end
+    end
+
+    test "relative effect helpers use the existing zero-baseline convention" do
+      assert Validation.relative_effect(12.0, 24.0) == 0.5
+      assert Validation.relative_effect(12.0, 0.0) == 0.0
+
+      assert Validation.relative_effects([10.0, 20.0, 30.0], [100.0, 0.0, -60.0]) == [
+               0.1,
+               0.0,
+               -0.5
+             ]
+
+      summary = Validation.relative_effect_summary(10.0, 2.0, 20.0, 1.96)
+      assert summary == %{mean: 0.5, sd: 0.1, lower: 0.304, upper: 0.696}
+    end
+
+    test "fixed variance helpers build diagonal Q matrices with explicit source semantics" do
+      q_specs = [
+        %{dim_index: 0, initial: 0.2, prior_shape: 3.0, prior_scale: 8.0},
+        %{dim_index: 2, initial: 0.4, prior_shape: 1.0, prior_scale: 2.0}
+      ]
+
+      initial_q = Validation.fixed_q_matrix(q_specs, 3)
+      prior_q = Validation.fixed_q_matrix(q_specs, 3, source: :prior_mean)
+
+      [initial_level, initial_missing, initial_slope] =
+        Nx.to_flat_list(Nx.take_diagonal(initial_q))
+
+      assert_in_delta initial_level, 0.2, 1.0e-6
+      assert initial_missing == 0.0
+      assert_in_delta initial_slope, 0.4, 1.0e-6
+
+      assert Nx.to_flat_list(Nx.take_diagonal(prior_q)) == [4.0, 0.0, 4.0]
+      assert Validation.fixed_variance_from_q_spec(hd(q_specs)) == 0.2
+      assert Validation.fixed_variance_from_q_spec(hd(q_specs), :prior_mean) == 4.0
+      assert Validation.fixed_variance_from_prior(1.0, 2.0) == 4.0
+    end
+
+    test "fixed Q matrix rejects duplicate or out-of-range q_specs" do
+      assert_raise ArgumentError, ~r/q_specs dim_index values must be unique/, fn ->
+        Validation.fixed_q_matrix(
+          [
+            %{dim_index: 0, initial: 0.2, prior_shape: 3.0, prior_scale: 8.0},
+            %{dim_index: 0, initial: 0.4, prior_shape: 3.0, prior_scale: 8.0}
+          ],
+          2
+        )
+      end
+
+      assert_raise ArgumentError, ~r/q_specs dim_index must be in \[0, 1\]/, fn ->
+        Validation.fixed_q_matrix(
+          [%{dim_index: 2, initial: 0.2, prior_shape: 3.0, prior_scale: 8.0}],
+          2
+        )
+      end
+    end
+
+    test "validate_spot_windows!/3 preserves post-period and series error wording" do
+      valid_spots = [%{id: "ok", window_start: 0, window_end: 5}]
+      assert Validation.validate_spot_windows!(valid_spots, 5) == :ok
+
+      assert_raise ArgumentError, ~r/is outside the post period \(0\.\.5\)/, fn ->
+        Validation.validate_spot_windows!([%{id: "bad", window_start: 0, window_end: 6}], 5)
+      end
+
+      assert_raise ArgumentError, ~r/is out of bounds for series of length 5/, fn ->
+        Validation.validate_spot_windows!(
+          [%{id: "bad", window_start: -1, window_end: 3}],
+          5,
+          context: :series
+        )
+      end
+
+      assert_raise ArgumentError, ~r/window_start.*>.*window_end/, fn ->
+        Validation.validate_spot_windows!([%{id: "bad", window_start: 4, window_end: 3}], 5)
+      end
+
+      assert_raise ArgumentError,
+                   ~r/empty window.*window_start must be less than window_end/,
+                   fn ->
+                     Validation.validate_spot_windows!(
+                       [%{id: "bad", window_start: 3, window_end: 3}],
+                       5
+                     )
+                   end
+    end
+
+    test "validate_study_periods!/5 centralizes causal period checks" do
+      assert Validation.validate_study_periods!(10, 1, 5, 6, 10) == :ok
+
+      assert_raise ArgumentError,
+                   ~r/pre_period end \(11\) extends beyond observations \(10\)/,
+                   fn ->
+                     Validation.validate_study_periods!(10, 1, 11, 12, 12)
+                   end
+
+      assert_raise ArgumentError, ~r/post_period must satisfy pre_end < start <= end/, fn ->
+        Validation.validate_study_periods!(10, 1, 5, 5, 6)
+      end
+    end
+
+    test "attribution_options/1 preserves explicit n_samples over shapley_samples" do
+      opts =
+        Validation.attribution_options(
+          alpha: 0.1,
+          shapley_samples: 50,
+          n_samples: 5,
+          decay: 0.8,
+          key: Nx.Random.key(4),
+          value_fn_mode: :diminishing,
+          ignored: true
+        )
+
+      assert opts[:alpha] == 0.1
+      assert opts[:n_samples] == 5
+      assert opts[:decay] == 0.8
+      assert opts[:value_fn_mode] == :diminishing
+      refute Keyword.has_key?(opts, :shapley_samples)
+      refute Keyword.has_key?(opts, :ignored)
+    end
+  end
+
   # ---------------------------------------------------------------
   # 1. prediction_error
   # ---------------------------------------------------------------

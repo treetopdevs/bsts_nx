@@ -30,7 +30,9 @@ Each section below is a chapter in that investigation.
 _Story beat:_ 08:00 AM. The war room opens, and we load the tooling before touching the data.
 
 ```elixir
-project_root = "/Users/nicholas/develop/bsts_nx"
+project_root =
+  System.get_env("BSTS_NX_PROJECT_ROOT") ||
+    Path.expand("..", __DIR__)
 
 Mix.install(
   [
@@ -332,7 +334,7 @@ defmodule NotebookHelpers do
       Fix:
       1) Runtime -> Disconnect and Reconnect
       2) Reopen this notebook from disk:
-         /Users/nicholas/develop/bsts_nx/livebooks/bsts_nx_statistical_journey.livemd
+         #{Path.join([project_root, "livebooks", "bsts_nx_statistical_journey.livemd"])}
       3) Run setup cell again and confirm:
          Notebook revision: 2026-03-01 (EMLX-first, safe_to_number guard)
       """

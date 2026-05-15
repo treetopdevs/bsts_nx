@@ -19,8 +19,13 @@ defmodule BstsNx.Distributions do
   supported; broadcasting is not implemented.
   """
 
-  import BstsNx.Utils, only: [to_tensor: 1, derive_exsss_seed: 1]
+  import BstsNx.Utils, only: [to_tensor: 1, derive_exsss_seed: 1, split_key_at: 2]
   require Nx.Defn
+
+  # Vectorized Marsaglia-Tsang loops stop only after every lane accepts. Small
+  # alpha values can leave a single lane in the rejection tail well past the
+  # scalar 10k cap, so this stays high enough to avoid false non-convergence
+  # while still bounding compiled loops and activating the conservative fallback.
   @gamma_rejection_max_iters 50_000
 
   @doc """
@@ -279,9 +284,9 @@ defmodule BstsNx.Distributions do
         {iter + 1, accepted_new, gamma_new, key_after_u, d_in, c_in, eps_in}
       end
 
-    # In defn we cannot raise from inside the kernel. Use a conservative fallback
-    # only for entries that failed to accept after max iterations.
-    fallback = Nx.max(d, eps)
+    # In defn we cannot raise from inside the kernel. Surface pathological
+    # rejection exhaustion as NaN instead of silently returning a point mass.
+    fallback = Nx.broadcast(Nx.Constants.nan() |> Nx.as_type({:f, 64}), {n})
     gamma_accepted = Nx.select(Nx.equal(accepted_out, 1), gamma_out, fallback)
 
     {u_small_raw, key_after_small} = Nx.Random.uniform(key_out, 0.0, 1.0, shape: {n})
@@ -409,11 +414,6 @@ defmodule BstsNx.Distributions do
     rand_state = rand_state_from_key(draw_key)
     {sample, _rs2} = inv_gamma_draw(alpha, beta, max_value, rand_state)
     {Nx.tensor(sample), next_key}
-  end
-
-  defp split_key_at(keys, idx) do
-    Nx.slice_along_axis(keys, idx, 1, axis: 0)
-    |> Nx.squeeze(axes: [0])
   end
 
   defp inv_gamma_draw(alpha_i, beta_i, max_value, rand_state) do

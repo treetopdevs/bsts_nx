@@ -109,6 +109,34 @@ defmodule BstsNx.ModelBuilderTest do
       assert %BstsNx.ModelSpec{} = result[:model_spec]
     end
 
+    test "preserves execution and sampling passthrough options with controls" do
+      obs = [1.0, 2.0, 3.0]
+      controls = [[10.0, 20.0, 30.0]]
+      key = Nx.Random.key(123)
+
+      result =
+        ModelBuilder.build_opts_with_controls(obs, controls,
+          mode: :operational,
+          fallback: :mcmc,
+          allow_mcmc_fallback: true,
+          return: :tensors,
+          key: key,
+          thin: 3,
+          n_samples: 17,
+          seed: 42
+        )
+
+      assert result[:mode] == :operational
+      assert result[:fallback] == :mcmc
+      assert result[:allow_mcmc_fallback] == true
+      assert result[:return] == :tensors
+      assert result[:key] == key
+      assert result[:thin] == 3
+      assert result[:n_samples] == 17
+      assert result[:seed] == 42
+      assert %BstsNx.ModelSpec{} = result[:model_spec]
+    end
+
     test "produces structured spec with controls and seasonality" do
       obs = [1.0, 2.0, 3.0]
       controls = [[10.0, 20.0, 30.0]]

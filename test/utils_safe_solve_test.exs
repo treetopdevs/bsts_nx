@@ -46,6 +46,18 @@ defmodule BstsNxUtilsSafeSolveTest do
       assert not Utils.has_non_finite?(x)
     end
 
+    test "keeps scalar jitter on the same side of a near-zero negative denominator" do
+      a = Nx.tensor(-1.0e-16)
+      b = Nx.tensor([1.0, -2.0])
+
+      x = Utils.safe_solve(a, b)
+      [first, second] = Nx.to_flat_list(x)
+
+      assert first < 0.0
+      assert second > 0.0
+      assert not Utils.has_non_finite?(x)
+    end
+
     test "falls back to finite zeros when matrix solve outputs non-finite values" do
       a = Nx.eye(2)
 
@@ -80,6 +92,34 @@ defmodule BstsNxUtilsSafeSolveTest do
     test "returns true for tensor with Inf" do
       inf_tensor = Nx.stack([Nx.tensor(1.0), Nx.Constants.infinity(), Nx.tensor(3.0)])
       assert Utils.has_non_finite?(inf_tensor)
+    end
+  end
+
+  describe "split_key_at/2" do
+    test "extracts a single PRNG subkey from a split key tensor" do
+      keys = Nx.Random.key(123) |> Nx.Random.split(parts: 3)
+
+      extracted = Utils.split_key_at(keys, 1)
+
+      expected =
+        Nx.slice_along_axis(keys, 1, 1, axis: 0)
+        |> Nx.squeeze(axes: [0])
+
+      assert Nx.shape(extracted) == {2}
+      assert Nx.type(extracted) == Nx.type(expected)
+      assert Nx.to_flat_list(extracted) == Nx.to_flat_list(expected)
+    end
+  end
+
+  describe "h_to_row_tensor/1" do
+    test "normalizes rank-1 and single-row H tensors to the same row vector" do
+      rank1 = Utils.h_to_row_tensor(Nx.tensor([1.0, 2.0, 3.0]))
+      single_row = Utils.h_to_row_tensor(Nx.tensor([[1.0, 2.0, 3.0]]))
+
+      assert Nx.shape(rank1) == {3}
+      assert Nx.shape(single_row) == {3}
+      assert Nx.to_flat_list(rank1) == [1.0, 2.0, 3.0]
+      assert Nx.to_flat_list(single_row) == [1.0, 2.0, 3.0]
     end
   end
 

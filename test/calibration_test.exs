@@ -4,6 +4,12 @@ defmodule BstsNx.CalibrationTest do
   alias BstsNx.Validation
   alias BstsNx.Components
 
+  @compiled_backend? match?(EMLX.Backend, Nx.default_backend()) or
+                       match?({EMLX.Backend, _}, Nx.default_backend()) or
+                       match?(EXLA.Backend, Nx.default_backend()) or
+                       match?({EXLA.Backend, _}, Nx.default_backend())
+  @relative_error_timeout if(@compiled_backend?, do: 300_000, else: 120_000)
+
   # Shared spec and options for faster tests
   @base_opts [
     n_pre: 80,
@@ -187,7 +193,7 @@ defmodule BstsNx.CalibrationTest do
   # -------------------------------------------------------------------
 
   describe "relative error" do
-    @tag timeout: 120_000
+    @tag timeout: @relative_error_timeout
     test "relative error is less than 1.0 for moderate lift with enough samples" do
       spec =
         Components.local_level_spec(

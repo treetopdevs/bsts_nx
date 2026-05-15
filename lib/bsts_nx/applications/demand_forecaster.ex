@@ -59,6 +59,8 @@ defmodule BstsNx.Applications.DemandForecaster do
   alias BstsNx.Forecaster
   alias BstsNx.GibbsSampler
   alias BstsNx.ModelBuilder
+  alias BstsNx.Validation
+  import BstsNx.Utils, only: [split_key_at: 2]
 
   @type forecast_result :: %{
           mean: [float()],
@@ -215,10 +217,7 @@ defmodule BstsNx.Applications.DemandForecaster do
 
     alpha = Keyword.get(opts, :alpha, 0.05)
     num_samples = Keyword.get(opts, :num_samples, 200)
-
-    if not is_number(alpha) or alpha <= 0.0 or alpha >= 1.0 do
-      raise ArgumentError, "alpha must be between 0 and 1 (exclusive), got: #{inspect(alpha)}"
-    end
+    Validation.validate_alpha!(alpha, "alpha must be between 0 and 1 (exclusive)")
 
     if not is_integer(num_samples) or num_samples <= 0 do
       raise ArgumentError, "num_samples must be a positive integer, got: #{inspect(num_samples)}"
@@ -247,23 +246,18 @@ defmodule BstsNx.Applications.DemandForecaster do
     samples = GibbsSampler.sample_structured(obs_list, spec, num_samples, sampler_opts)
 
     # Forward simulation with future regressors
-    key_rows = Nx.Random.split(forecast_key, parts: length(samples)) |> Nx.to_list()
+    sample_keys = Nx.Random.split(forecast_key, parts: length(samples))
 
     trajectories =
-      Enum.zip(samples, key_rows)
-      |> Enum.map(fn {sample, key_row} ->
-        sample_key = Nx.tensor(key_row, type: Nx.type(forecast_key))
+      Enum.with_index(samples)
+      |> Enum.map(fn {sample, idx} ->
+        sample_key = split_key_at(sample_keys, idx)
         forward_simulate_demand(sample, spec, future_h, horizon, sample_key)
       end)
 
     result = aggregate(trajectories, horizon, alpha)
 
     {result, samples, spec, obs_list}
-  end
-
-  defp split_key_at(keys, idx) do
-    Nx.slice_along_axis(keys, idx, 1, axis: 0)
-    |> Nx.squeeze(axes: [0])
   end
 
   defp build_demand_model(obs_list, horizon, seasonality, regressors) do
@@ -342,13 +336,13 @@ defmodule BstsNx.Applications.DemandForecaster do
     q_diag = Nx.take_diagonal(q_matrix)
     q_sds = Nx.sqrt(Nx.max(q_diag, Nx.tensor(0.0)))
 
-    step_key_rows = Nx.Random.split(key, parts: horizon) |> Nx.to_list()
+    step_keys = Nx.Random.split(key, parts: horizon)
 
     state_obs_rows =
-      Enum.map(step_key_rows, fn step_key_row ->
-        step_key = Nx.tensor(step_key_row, type: Nx.type(key))
-        [state_key_row, obs_key_row] = Nx.Random.split(step_key, parts: 2) |> Nx.to_list()
-        {state_key_row, obs_key_row}
+      Enum.map(0..(horizon - 1)//1, fn idx ->
+        step_key = split_key_at(step_keys, idx)
+        split_keys = Nx.Random.split(step_key, parts: 2)
+        {split_key_at(split_keys, 0), split_key_at(split_keys, 1)}
       end)
 
     # Resolve H for each future step
@@ -357,11 +351,8 @@ defmodule BstsNx.Applications.DemandForecaster do
     # Iterate h_list directly to avoid O(n²) Enum.at access
     {_, trajectory} =
       Enum.zip(h_list, state_obs_rows)
-      |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_t, {state_key_row, obs_key_row}},
+      |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_t, {key_state, key_obs}},
                                                        {state, acc} ->
-        key_state = Nx.tensor(state_key_row, type: Nx.type(key))
-        key_obs = Nx.tensor(obs_key_row, type: Nx.type(key))
-
         {z_state, _} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {n_state})
         noise = Nx.multiply(z_state, q_sds)
         next_state = Nx.add(Nx.dot(spec.f, state), noise)

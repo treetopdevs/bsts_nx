@@ -20,6 +20,10 @@ defmodule BstsNx.Smoother do
   require Nx.Defn
   require Logger
 
+  @cholesky_jitter 1.0e-6
+  @near_zero_covariance 1.0e-15
+  @min_covariance 1.0e-12
+
   @doc """
   Compiled RTS backward smoother for one-dimensional systems.
 
@@ -96,7 +100,7 @@ defmodule BstsNx.Smoother do
         p_pred_next = f_in * p_filt * f_in + q_in
         # Smoothing gain: C_k = P_filt * F / P_pred_next
         # Guard against zero predicted covariance (perfect state knowledge)
-        near_zero_p = Nx.abs(p_pred_next) < 1.0e-15
+        near_zero_p = Nx.abs(p_pred_next) < @near_zero_covariance
         safe_pred = Nx.select(near_zero_p, 1.0, p_pred_next)
         c = Nx.select(near_zero_p, 0.0, p_filt * f_in / safe_pred)
         # Smoothed state from previously stored smooth_{i+1}
@@ -119,7 +123,7 @@ defmodule BstsNx.Smoother do
     sxs = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(xs)), {t, n})
     sps = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(ps)), {t, n, n})
     i_n = Nx.eye(n, type: Nx.type(ps))
-    eps = Nx.tensor(1.0e-6, type: Nx.type(ps))
+    eps = Nx.tensor(@cholesky_jitter, type: Nx.type(ps))
 
     last_idx = t - 1
     sxs = Nx.put_slice(sxs, [last_idx, 0], Nx.new_axis(take_vector_at(xs, last_idx), 0))
@@ -141,19 +145,14 @@ defmodule BstsNx.Smoother do
 
         p_pred_next_reg = Nx.add(p_pred_next, Nx.multiply(i_eye, eps_in))
         rhs = Nx.dot(f_in, p_filt)
-        c = Nx.LinAlg.solve(p_pred_next_reg, rhs) |> Nx.transpose()
+        c = matrix_gain_solve(p_pred_next_reg, rhs)
 
         x_smooth_next = take_vector_at(sxs_acc, i + 1)
         p_smooth_next = take_matrix_at(sps_acc, i + 1)
 
         x_smooth = Nx.add(x_filt, Nx.dot(c, Nx.subtract(x_smooth_next, x_pred_next)))
 
-        p_smooth =
-          Nx.add(
-            p_filt,
-            Nx.dot(Nx.dot(c, Nx.subtract(p_smooth_next, p_pred_next)), Nx.transpose(c))
-          )
-          |> then(&Nx.multiply(Nx.add(&1, Nx.transpose(&1)), 0.5))
+        p_smooth = matrix_rts_covariance(p_filt, c, p_smooth_next, p_pred_next)
 
         sxs_new = Nx.put_slice(sxs_acc, [i, 0], Nx.new_axis(x_smooth, 0))
         sps_new = Nx.put_slice(sps_acc, [i, 0, 0], Nx.new_axis(p_smooth, 0))
@@ -171,7 +170,7 @@ defmodule BstsNx.Smoother do
     sxs = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(xs)), {t, n})
     sps = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(ps)), {t, n, n})
     i_n = Nx.eye(n, type: Nx.type(ps))
-    eps = Nx.tensor(1.0e-6, type: Nx.type(ps))
+    eps = Nx.tensor(@cholesky_jitter, type: Nx.type(ps))
 
     last_idx = t - 1
     sxs = Nx.put_slice(sxs, [last_idx, 0], Nx.new_axis(take_vector_at(xs, last_idx), 0))
@@ -193,19 +192,14 @@ defmodule BstsNx.Smoother do
 
         p_pred_next_reg = Nx.add(p_pred_next, Nx.multiply(i_eye, eps_in))
         rhs = Nx.dot(f_in, p_filt)
-        c = Nx.dot(Nx.LinAlg.pinv(p_pred_next_reg), rhs) |> Nx.transpose()
+        c = matrix_gain_pinv(p_pred_next_reg, rhs)
 
         x_smooth_next = take_vector_at(sxs_acc, i + 1)
         p_smooth_next = take_matrix_at(sps_acc, i + 1)
 
         x_smooth = Nx.add(x_filt, Nx.dot(c, Nx.subtract(x_smooth_next, x_pred_next)))
 
-        p_smooth =
-          Nx.add(
-            p_filt,
-            Nx.dot(Nx.dot(c, Nx.subtract(p_smooth_next, p_pred_next)), Nx.transpose(c))
-          )
-          |> then(&Nx.multiply(Nx.add(&1, Nx.transpose(&1)), 0.5))
+        p_smooth = matrix_rts_covariance(p_filt, c, p_smooth_next, p_pred_next)
 
         sxs_new = Nx.put_slice(sxs_acc, [i, 0], Nx.new_axis(x_smooth, 0))
         sps_new = Nx.put_slice(sps_acc, [i, 0, 0], Nx.new_axis(p_smooth, 0))
@@ -288,7 +282,7 @@ defmodule BstsNx.Smoother do
         x_pred_next = f_in * x_filt
         p_pred_next = f_in * p_filt * f_in + q_in
         # Smoothing gain: C_k = P_filt * F / P_pred_next
-        near_zero_p = Nx.abs(p_pred_next) < 1.0e-15
+        near_zero_p = Nx.abs(p_pred_next) < @near_zero_covariance
         safe_pred = Nx.select(near_zero_p, 1.0, p_pred_next)
         c = Nx.select(near_zero_p, 0.0, p_filt * f_in / safe_pred)
         # Smoothed state from previously stored smooth_{i+1}
@@ -391,7 +385,7 @@ defmodule BstsNx.Smoother do
     last_idx = t - 1
 
     x_t_mean = take_scalar_at(smoothed_xs, last_idx)
-    p_t_cov = take_scalar_at(smoothed_ps, last_idx) |> Nx.max(1.0e-12)
+    p_t_cov = take_scalar_at(smoothed_ps, last_idx) |> Nx.max(@min_covariance)
     x_t = x_t_mean + Nx.sqrt(p_t_cov) * take_scalar_at(eps, last_idx)
     states = Nx.put_slice(states, [last_idx], Nx.reshape(x_t, {1}))
 
@@ -406,13 +400,13 @@ defmodule BstsNx.Smoother do
         p_filt = take_scalar_at(fps, i)
         x_pred_next = f_in * x_filt
         p_pred_next = f_in * p_filt * f_in + q_in
-        near_zero_p = Nx.abs(p_pred_next) < 1.0e-15
+        near_zero_p = Nx.abs(p_pred_next) < @near_zero_covariance
         safe_pred = Nx.select(near_zero_p, 1.0, p_pred_next)
         j = Nx.select(near_zero_p, 0.0, p_filt * f_in / safe_pred)
 
         x_next = take_scalar_at(states_acc, i + 1)
         mean = x_filt + j * (x_next - x_pred_next)
-        cov = (p_filt * (1.0 - j * f_in)) |> Nx.max(1.0e-12)
+        cov = (p_filt * (1.0 - j * f_in)) |> Nx.max(@min_covariance)
         x_i = mean + Nx.sqrt(cov) * take_scalar_at(eps_in, i)
         states_new = Nx.put_slice(states_acc, [i], Nx.reshape(x_i, {1}))
 
@@ -430,7 +424,7 @@ defmodule BstsNx.Smoother do
     last_idx = t - 1
 
     x_t_mean = take_scalar_at(filtered_xs, last_idx)
-    p_t_cov = take_scalar_at(filtered_ps, last_idx) |> Nx.max(1.0e-12)
+    p_t_cov = take_scalar_at(filtered_ps, last_idx) |> Nx.max(@min_covariance)
     x_t = x_t_mean + Nx.sqrt(p_t_cov) * take_scalar_at(eps, last_idx)
     states = Nx.put_slice(states, [last_idx], Nx.reshape(x_t, {1}))
 
@@ -445,13 +439,13 @@ defmodule BstsNx.Smoother do
         p_filt = take_scalar_at(fps, i)
         x_pred_next = f_in * x_filt
         p_pred_next = f_in * p_filt * f_in + q_in
-        near_zero_p = Nx.abs(p_pred_next) < 1.0e-15
+        near_zero_p = Nx.abs(p_pred_next) < @near_zero_covariance
         safe_pred = Nx.select(near_zero_p, 1.0, p_pred_next)
         j = Nx.select(near_zero_p, 0.0, p_filt * f_in / safe_pred)
 
         x_next = take_scalar_at(states_acc, i + 1)
         mean = x_filt + j * (x_next - x_pred_next)
-        cov = (p_filt * (1.0 - j * f_in)) |> Nx.max(1.0e-12)
+        cov = (p_filt * (1.0 - j * f_in)) |> Nx.max(@min_covariance)
         x_i = mean + Nx.sqrt(cov) * take_scalar_at(eps_in, i)
         states_new = Nx.put_slice(states_acc, [i], Nx.reshape(x_i, {1}))
 
@@ -470,7 +464,7 @@ defmodule BstsNx.Smoother do
 
     states = Nx.broadcast(0.0, {t, n})
     i_n = Nx.eye(n, type: Nx.type(filtered_ps))
-    eps_reg = Nx.tensor(1.0e-6, type: Nx.type(filtered_ps))
+    eps_reg = Nx.tensor(@cholesky_jitter, type: Nx.type(filtered_ps))
 
     last_idx = t - 1
 
@@ -500,15 +494,12 @@ defmodule BstsNx.Smoother do
         # compute J gain using the same regularized solve approach as RTS.
         p_pred_next_reg = Nx.add(p_pred_next, Nx.multiply(i_eye, c_eps))
         rhs = Nx.dot(f_in, p_filt)
-        j = Nx.LinAlg.solve(p_pred_next_reg, rhs) |> Nx.transpose()
+        j = matrix_gain_solve(p_pred_next_reg, rhs)
 
         x_next = take_vector_at(states_acc, i + 1)
         mean = Nx.add(x_filt, Nx.dot(j, Nx.subtract(x_next, x_pred_next)))
 
-        # cov = P_filt - J * P_pred * J^T
-        # computed symmetrically for stability
-        j_p_jt = Nx.dot(Nx.dot(j, p_pred_next), Nx.transpose(j))
-        cov = Nx.subtract(p_filt, j_p_jt) |> symmetrize()
+        cov = matrix_conditional_covariance(p_filt, j, p_pred_next)
 
         chol_i = safe_cholesky_or_zero_defn(cov, i_eye, c_eps)
 
@@ -531,7 +522,7 @@ defmodule BstsNx.Smoother do
 
     states = Nx.broadcast(0.0, {t, n})
     i_n = Nx.eye(n, type: Nx.type(filtered_ps))
-    eps_reg = Nx.tensor(1.0e-6, type: Nx.type(filtered_ps))
+    eps_reg = Nx.tensor(@cholesky_jitter, type: Nx.type(filtered_ps))
 
     last_idx = t - 1
 
@@ -560,12 +551,11 @@ defmodule BstsNx.Smoother do
         # Fallback for backends that don't support LU-based solve in defn.
         p_pred_next_reg = Nx.add(p_pred_next, Nx.multiply(i_eye, c_eps))
         rhs = Nx.dot(f_in, p_filt)
-        j = Nx.dot(Nx.LinAlg.pinv(p_pred_next_reg), rhs) |> Nx.transpose()
+        j = matrix_gain_pinv(p_pred_next_reg, rhs)
 
         x_next = take_vector_at(states_acc, i + 1)
         mean = Nx.add(x_filt, Nx.dot(j, Nx.subtract(x_next, x_pred_next)))
-        j_p_jt = Nx.dot(Nx.dot(j, p_pred_next), Nx.transpose(j))
-        cov = Nx.subtract(p_filt, j_p_jt) |> symmetrize()
+        cov = matrix_conditional_covariance(p_filt, j, p_pred_next)
 
         chol_i = safe_cholesky_or_zero_defn(cov, i_eye, c_eps)
 
@@ -585,6 +575,27 @@ defmodule BstsNx.Smoother do
       {EMLX.Backend, _opts} -> false
       _ -> true
     end
+  end
+
+  Nx.Defn.defnp matrix_gain_solve(p_pred_next_reg, rhs) do
+    Nx.LinAlg.solve(p_pred_next_reg, rhs) |> Nx.transpose()
+  end
+
+  Nx.Defn.defnp matrix_gain_pinv(p_pred_next_reg, rhs) do
+    Nx.dot(Nx.LinAlg.pinv(p_pred_next_reg), rhs) |> Nx.transpose()
+  end
+
+  Nx.Defn.defnp matrix_rts_covariance(p_filt, gain, p_smooth_next, p_pred_next) do
+    Nx.add(
+      p_filt,
+      Nx.dot(Nx.dot(gain, Nx.subtract(p_smooth_next, p_pred_next)), Nx.transpose(gain))
+    )
+    |> symmetrize()
+  end
+
+  Nx.Defn.defnp matrix_conditional_covariance(p_filt, gain, p_pred_next) do
+    Nx.subtract(p_filt, Nx.dot(Nx.dot(gain, p_pred_next), Nx.transpose(gain)))
+    |> symmetrize()
   end
 
   Nx.Defn.defnp take_scalar_at(vec, idx) do
@@ -778,7 +789,7 @@ defmodule BstsNx.Smoother do
 
     x_sample_T =
       if Nx.rank(p_T_cov) == 0 do
-        safe_var = Nx.max(p_T_cov, Nx.tensor(1.0e-12))
+        safe_var = Nx.max(p_T_cov, Nx.tensor(@min_covariance))
         chol_T = Nx.sqrt(safe_var)
         Nx.add(x_T_mean, Nx.multiply(chol_T, eps_T))
       else
@@ -819,7 +830,7 @@ defmodule BstsNx.Smoother do
 
           x_k =
             if Nx.rank(cov) == 0 do
-              safe_cov = Nx.max(cov, Nx.tensor(1.0e-12))
+              safe_cov = Nx.max(cov, Nx.tensor(@min_covariance))
               chol_k = Nx.sqrt(safe_cov)
               Nx.add(mean, Nx.multiply(chol_k, eps_k))
             else
@@ -843,7 +854,7 @@ defmodule BstsNx.Smoother do
   # For scalar systems uses division; for matrix systems uses solve+transpose.
   defp smoother_gain(p_filt, f_t, p_pred_next) do
     if Nx.rank(p_pred_next) == 0 do
-      near_zero = Nx.less(Nx.abs(p_pred_next), 1.0e-15)
+      near_zero = Nx.less(Nx.abs(p_pred_next), @near_zero_covariance)
       safe_pred = Nx.select(near_zero, Nx.tensor(1.0), p_pred_next)
       gain = p_filt |> Nx.multiply(f_t) |> Nx.divide(safe_pred)
       Nx.select(near_zero, Nx.tensor(0.0), gain)
@@ -855,7 +866,7 @@ defmodule BstsNx.Smoother do
       if Nx.shape(p_pred_next) == {1, 1} and Nx.shape(rhs) == {1, 1} do
         p_scalar = Nx.squeeze(p_pred_next)
         rhs_scalar = Nx.squeeze(rhs)
-        near_zero = Nx.less(Nx.abs(p_scalar), 1.0e-15)
+        near_zero = Nx.less(Nx.abs(p_scalar), @near_zero_covariance)
         safe_pred = Nx.select(near_zero, Nx.tensor(1.0), p_scalar)
         gain_scalar = Nx.select(near_zero, Nx.tensor(0.0), Nx.divide(rhs_scalar, safe_pred))
         Nx.reshape(gain_scalar, {1, 1})
@@ -874,11 +885,12 @@ defmodule BstsNx.Smoother do
 
     diag = Nx.take_diagonal(cov_reg)
     diag_scale = Nx.max(Nx.mean(Nx.abs(diag)), eps)
-    retry_shift = Nx.add(Nx.multiply(diag_scale, 1.0e-6), Nx.multiply(eps, 1000.0))
+    retry_shift = Nx.add(Nx.multiply(diag_scale, @cholesky_jitter), Nx.multiply(eps, 1000.0))
     cov_retry = Nx.add(cov_reg, Nx.multiply(i_eye, retry_shift))
     chol_retry = Nx.LinAlg.cholesky(cov_retry)
     fallback = Nx.multiply(i_eye, Nx.sqrt(Nx.max(retry_shift, eps)))
-    chol_retry = Nx.select(Nx.is_nan(chol_retry), fallback, chol_retry)
+    retry_has_nan = Nx.any(Nx.is_nan(chol_retry))
+    chol_retry = Nx.select(retry_has_nan, fallback, chol_retry)
 
     Nx.select(raw_has_nan, chol_retry, chol_raw)
   end

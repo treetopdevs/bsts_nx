@@ -34,6 +34,7 @@ defmodule BstsNx.Pipeline do
   alias BstsNx.Execution
   alias BstsNx.Operational
   alias BstsNx.SpotAttributor
+  alias BstsNx.Validation
 
   @typedoc "Full pipeline result."
   @type pipeline_result :: %{
@@ -97,11 +98,6 @@ defmodule BstsNx.Pipeline do
           keyword()
         ) :: pipeline_result()
   def run(observations, pre_period, post_period, spots, spec, opts \\ []) do
-    {post_start, post_end} = post_period
-    n_post = post_end - post_start + 1
-
-    validate_spot_windows!(spots, n_post)
-
     mode = Execution.resolve_mode!(opts, :operational)
     {sa_opts, ci_opts} = split_options(opts)
 
@@ -117,6 +113,9 @@ defmodule BstsNx.Pipeline do
   # ── Private helpers ──────────────────────────────────────────────────
 
   defp run_bayesian(observations, pre_period, post_period, spots, spec, sa_opts, ci_opts) do
+    {post_start, post_end} = post_period
+    Validation.validate_spot_windows!(spots, post_end - post_start + 1)
+
     {elapsed_us, result} =
       Execution.measure(fn ->
         ci_result =
@@ -148,34 +147,12 @@ defmodule BstsNx.Pipeline do
     )
   end
 
-  defp validate_spot_windows!(spots, n_post) do
-    Enum.each(spots, fn spot ->
-      if spot.window_start < 0 or spot.window_end > n_post do
-        raise ArgumentError,
-              "spot #{spot.id} window [#{spot.window_start}, #{spot.window_end}) " <>
-                "is outside the post period (0..#{n_post})"
-      end
-
-      if spot.window_start > spot.window_end do
-        raise ArgumentError,
-              "spot #{spot.id} has window_start (#{spot.window_start}) > " <>
-                "window_end (#{spot.window_end})"
-      end
-    end)
-  end
-
   defp split_options(opts) do
-    sa_keys = [:alpha, :shapley_samples, :decay]
+    sa_keys = [:alpha, :shapley_samples, :n_samples, :decay, :key, :value_fn_mode]
     pipeline_keys = [:mode, :method]
-    sa_raw = Keyword.take(opts, sa_keys)
-    ci_opts = Keyword.drop(opts, sa_keys ++ pipeline_keys)
-
-    # Map :shapley_samples → :n_samples for SpotAttributor
-    sa_opts =
-      case Keyword.pop(sa_raw, :shapley_samples) do
-        {nil, rest} -> rest
-        {val, rest} -> Keyword.put(rest, :n_samples, val)
-      end
+    ci_only_keys = [:shapley_samples, :n_samples, :decay, :value_fn_mode]
+    sa_opts = opts |> Keyword.take(sa_keys) |> Validation.attribution_options()
+    ci_opts = Keyword.drop(opts, ci_only_keys ++ pipeline_keys)
 
     {sa_opts, ci_opts}
   end

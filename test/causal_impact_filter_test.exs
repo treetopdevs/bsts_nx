@@ -28,6 +28,7 @@ defmodule BstsNx.CausalImpactFilterTest do
     assert length(result.baseline) == 30
     assert length(result.baseline_variance) == 30
     assert result.obs_variance > 0.0
+    assert result.cumulative_effect.cross_cov_included == true
 
     # All actual values should be 15.0
     Enum.each(result.actual, fn a -> assert_in_delta(a, 15.0, 0.1) end)
@@ -69,6 +70,21 @@ defmodule BstsNx.CausalImpactFilterTest do
 
     assert is_map(result)
     assert length(result.actual) == 10
+  end
+
+  test "estimate_from_filter preserves f64 precision for list input" do
+    high_precision = 16_777_217.0
+    obs = List.duplicate(high_precision, 12)
+
+    result =
+      CausalImpact.estimate_from_filter(obs, [8],
+        q: 1.0e-9,
+        r: 1.0e-6,
+        x0: high_precision,
+        p0: 1.0e-6
+      )
+
+    assert result.actual == [high_precision]
   end
 
   test "estimate_from_filter point effects have correct structure" do
@@ -114,6 +130,19 @@ defmodule BstsNx.CausalImpactFilterTest do
     assert length(result.point_effects.mean) == 2
   end
 
+  test "estimate_from_filter empty intervention result keeps covariance metadata" do
+    result =
+      CausalImpact.estimate_from_filter(List.duplicate(10.0, 12), [],
+        q: 1.0e-3,
+        r: 0.25,
+        x0: 10.0,
+        p0: 1.0
+      )
+
+    assert result.cumulative_effect.cross_cov_included == false
+    assert result.obs_variance == 0.25
+  end
+
   test "estimate_from_filter cumulative variance includes observation noise" do
     obs = List.duplicate(10.0, 20)
     on_air = Enum.to_list(10..14)
@@ -148,9 +177,17 @@ defmodule BstsNx.CausalImpactFilterTest do
     assert is_map(result.point_effects)
     assert length(result.actual) == 10
     assert length(result.baseline) == 10
-    assert result.cumulative_effect.cross_cov_included == false
+    assert result.cumulative_effect.cross_cov_included == true
     assert length(result.baseline_variance) == 10
     assert is_float(result.obs_variance)
+  end
+
+  test "estimate_structured_from_filter empty intervention result keeps covariance metadata" do
+    spec = Components.local_level_spec(initial_state: 10.0, initial_cov: 1.0)
+
+    result = CausalImpact.estimate_structured_from_filter(List.duplicate(10.0, 12), [], spec)
+
+    assert result.cumulative_effect.cross_cov_included == false
   end
 
   if @emlx_backend? do
@@ -194,6 +231,152 @@ defmodule BstsNx.CausalImpactFilterTest do
 
     assert abs(Enum.at(anchored.baseline, 0) - 50.0) < 1.0
     assert abs(Enum.at(diffuse_wrong.baseline, 0) - 50.0) > 5.0
+  end
+
+  if @emlx_backend? do
+    @tag skip:
+           "EMLX backend does not implement Nx.Backend.lu/3 required by structured filter smoothing"
+  end
+
+  test "estimate_structured_from_filter respects ModelSpec fixed variances" do
+    observations = List.duplicate(50.0, 20)
+    intervention_indices = Enum.to_list(12..19)
+
+    low_variance_spec =
+      Components.local_level_spec(
+        initial_state: 50.0,
+        initial_cov: 1.0,
+        process_var: 1.0e-9,
+        obs_var: 1.0e-6
+      )
+
+    high_variance_spec =
+      Components.local_level_spec(
+        initial_state: 50.0,
+        initial_cov: 1.0,
+        process_var: 10.0,
+        obs_var: 25.0
+      )
+
+    low =
+      CausalImpact.estimate_structured_from_filter(
+        observations,
+        intervention_indices,
+        low_variance_spec
+      )
+
+    high =
+      CausalImpact.estimate_structured_from_filter(
+        observations,
+        intervention_indices,
+        high_variance_spec
+      )
+
+    assert_in_delta low.obs_variance, 1.0e-6, 1.0e-12
+    assert_in_delta high.obs_variance, 25.0, 1.0e-12
+    assert high.cumulative_effect.sd > low.cumulative_effect.sd * 100.0
+  end
+
+  if @emlx_backend? do
+    @tag skip:
+           "EMLX backend does not implement Nx.Backend.lu/3 required by structured filter smoothing"
+  end
+
+  test "estimate_structured_from_filter uses q_spec initial variance instead of prior mean" do
+    observations = List.duplicate(50.0, 20)
+    intervention_indices = Enum.to_list(12..19)
+
+    spec_with = fn process_var ->
+      Components.local_level_spec(
+        initial_state: 50.0,
+        initial_cov: 1.0,
+        process_var: process_var,
+        obs_var: 0.01,
+        prior_shape: 100.0,
+        prior_scale: 100.0
+      )
+    end
+
+    low_q =
+      CausalImpact.estimate_structured_from_filter(
+        observations,
+        intervention_indices,
+        spec_with.(1.0e-9)
+      )
+
+    high_q =
+      CausalImpact.estimate_structured_from_filter(
+        observations,
+        intervention_indices,
+        spec_with.(10.0)
+      )
+
+    assert_in_delta low_q.obs_variance, 0.01, 1.0e-12
+    assert_in_delta high_q.obs_variance, 0.01, 1.0e-12
+    assert high_q.cumulative_effect.sd > low_q.cumulative_effect.sd * 50.0
+  end
+
+  if @emlx_backend? do
+    @tag skip:
+           "EMLX backend does not implement Nx.Backend.lu/3 required by structured filter smoothing"
+  end
+
+  test "estimate_structured_from_filter cumulative sd includes smoother cross covariance" do
+    observations = List.duplicate(10.0, 20)
+    intervention_indices = Enum.to_list(10..14)
+
+    spec =
+      Components.local_level_spec(
+        initial_state: 10.0,
+        initial_cov: 10.0,
+        process_var: 1.0e-6,
+        obs_var: 1.0e-6
+      )
+
+    result =
+      CausalImpact.estimate_structured_from_filter(
+        observations,
+        intervention_indices,
+        spec
+      )
+
+    diagonal_only_sd =
+      result.baseline_variance
+      |> Enum.map(&(&1 + result.obs_variance))
+      |> Enum.sum()
+      |> :math.sqrt()
+
+    assert result.cumulative_effect.cross_cov_included == true
+    assert result.cumulative_effect.sd > diagonal_only_sd * 1.2
+  end
+
+  if @emlx_backend? do
+    @tag skip:
+           "EMLX backend does not implement Nx.Backend.lu/3 required by structured filter smoothing"
+  end
+
+  test "estimate_structured_from_filter normalizes mask indices before smoothing" do
+    observations = Enum.map(1..8, &(&1 * 1.0))
+    intervention_indices = [6, -1, 3, 3, 99]
+
+    spec =
+      Components.local_level_spec(
+        initial_state: 1.0,
+        initial_cov: 1.0,
+        process_var: 0.1,
+        obs_var: 0.1
+      )
+
+    result =
+      CausalImpact.estimate_structured_from_filter(
+        observations,
+        intervention_indices,
+        spec
+      )
+
+    assert result.actual == [4.0, 7.0]
+    assert length(result.baseline) == 2
+    assert length(result.point_effects.mean) == 2
   end
 
   if @emlx_backend? do

@@ -54,6 +54,7 @@ defmodule BstsNx.InterventionAnalysis do
   alias BstsNx.Execution
   alias BstsNx.ModelBuilder
   alias BstsNx.Operational
+  alias BstsNx.Validation
 
   @type intervention_config :: %{
           pre_period: {pos_integer(), pos_integer()},
@@ -68,6 +69,48 @@ defmodule BstsNx.InterventionAnalysis do
           model_spec: BstsNx.ModelSpec.t() | nil,
           execution: Execution.t()
         }
+
+  @known_analysis_opts [
+    :model_spec,
+    :seasonality,
+    :control_series,
+    :control_selection,
+    :control_selection_pre_period,
+    :control_regression_mode,
+    :control_regression_opts,
+    :alpha,
+    :num_samples,
+    :burn_in,
+    :thin,
+    :seed,
+    :key,
+    :mode,
+    :method,
+    :fallback,
+    :allow_mcmc_fallback,
+    :initial_state,
+    :initial_cov,
+    :process_var,
+    :obs_var,
+    :x0,
+    :p0,
+    :q,
+    :r,
+    :baseline,
+    :return
+  ]
+
+  @mcmc_ci_opts [
+    :num_samples,
+    :burn_in,
+    :thin,
+    :seed,
+    :key,
+    :initial_state,
+    :initial_cov,
+    :process_var,
+    :obs_var
+  ]
 
   @doc """
   Analyzes the causal effect of an intervention on a time series.
@@ -105,8 +148,8 @@ defmodule BstsNx.InterventionAnalysis do
     * `:num_samples` - number of posterior MCMC samples (default: 200)
     * `:burn_in` - burn-in iterations (default: num_samples / 2)
     * `:seed` - integer PRNG seed for reproducibility
-    * `:mode` - `:operational` (default, fast filter path) or `:bayesian`
-      (Elixir MCMC path)
+    * `:mode` - `:bayesian` (default, Elixir MCMC path) or `:operational`
+      (fast filter path)
     * `:method` - compatibility alias: `:filter` maps to `mode: :operational`,
       `:mcmc` maps to `mode: :bayesian` when `:mode` is omitted
     * `:fallback` - pass `:mcmc` to explicitly allow a slow MCMC fallback when
@@ -138,37 +181,18 @@ defmodule BstsNx.InterventionAnalysis do
       raise ArgumentError, "observations must be non-empty"
     end
 
+    validate_known_options!(opts)
+
     %{pre_period: pre_period, post_period: post_period} = config
 
     alpha = Keyword.get(opts, :alpha, 0.05)
-
-    if not is_number(alpha) or alpha <= 0.0 or alpha >= 1.0 do
-      raise ArgumentError, "alpha must be between 0 and 1 (exclusive), got: #{inspect(alpha)}"
-    end
+    Validation.validate_alpha!(alpha, "alpha must be between 0 and 1 (exclusive)")
 
     {pre_start, pre_end} = pre_period
     {post_start, post_end} = post_period
     obs_count = length(observations)
 
-    if pre_start < 1 or pre_end < pre_start do
-      raise ArgumentError,
-            "pre_period must satisfy 1 <= start <= end, got: {#{pre_start}, #{pre_end}}"
-    end
-
-    if pre_end > obs_count do
-      raise ArgumentError,
-            "pre_period end (#{pre_end}) extends beyond observations (#{obs_count})"
-    end
-
-    if post_start <= pre_end or post_end < post_start do
-      raise ArgumentError,
-            "post_period must satisfy pre_end < start <= end, got: {#{post_start}, #{post_end}}"
-    end
-
-    if post_end > obs_count do
-      raise ArgumentError,
-            "post_period end (#{post_end}) extends beyond observations (#{obs_count})"
-    end
+    Validation.validate_study_periods!(obs_count, pre_start, pre_end, post_start, post_end)
 
     seasonality = Keyword.get(opts, :seasonality)
     has_model_spec = match?(%BstsNx.ModelSpec{}, Keyword.get(opts, :model_spec))
@@ -179,7 +203,7 @@ defmodule BstsNx.InterventionAnalysis do
             "seasonality must be an integer >= 2, got: #{inspect(seasonality)}"
     end
 
-    mode = Execution.resolve_mode!(opts, :operational)
+    mode = Execution.resolve_mode!(opts, :bayesian)
 
     # If control_series is provided, delegate to ModelBuilder for regression composition
     controls = Keyword.get(opts, :control_series)
@@ -298,9 +322,7 @@ defmodule BstsNx.InterventionAnalysis do
       Execution.measure(fn ->
         model_spec = resolve_model_spec(observations, pre_period, opts)
 
-        ci_opts =
-          opts
-          |> Keyword.drop([:model_spec, :seasonality, :alpha, :method, :mode, :control_series])
+        ci_opts = Keyword.take(opts, @mcmc_ci_opts)
 
         impact =
           if model_spec do
@@ -341,6 +363,28 @@ defmodule BstsNx.InterventionAnalysis do
          alpha,
          opts
        ) do
+    try do
+      analyze_filter!(observations, pre_period, post_period, alpha, opts)
+    rescue
+      e ->
+        stacktrace = __STACKTRACE__
+
+        cond do
+          Execution.backend_lu_missing?(e) and Execution.explicit_mcmc_fallback?(opts) ->
+            observations
+            |> analyze_mcmc(pre_period, post_period, alpha, Keyword.put(opts, :mode, :bayesian))
+            |> mark_fallback(Exception.message(e))
+
+          Execution.backend_lu_missing?(e) ->
+            Execution.raise_structured_filter_unsupported!(e)
+
+          true ->
+            reraise e, stacktrace
+        end
+    end
+  end
+
+  defp analyze_filter!(observations, pre_period, post_period, alpha, opts) do
     model_spec = resolve_model_spec(observations, pre_period, opts)
 
     spec =
@@ -373,6 +417,30 @@ defmodule BstsNx.InterventionAnalysis do
       model_spec: model_spec,
       execution: forecast.execution
     }
+  end
+
+  defp validate_known_options!(opts) do
+    unknown =
+      opts
+      |> Keyword.keys()
+      |> Enum.reject(&(&1 in @known_analysis_opts))
+
+    case unknown do
+      [] ->
+        :ok
+
+      [one] ->
+        raise ArgumentError, "unknown option #{inspect(one)}"
+
+      many ->
+        raise ArgumentError, "unknown options #{inspect(many)}"
+    end
+  end
+
+  defp mark_fallback(result, reason) do
+    Map.update!(result, :execution, fn execution ->
+      %{execution | fallback?: true, fallback_reason: reason}
+    end)
   end
 
   defp resolve_model_spec(observations, pre_period, opts) do

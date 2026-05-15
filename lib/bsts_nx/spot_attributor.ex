@@ -34,6 +34,7 @@ defmodule BstsNx.SpotAttributor do
   """
 
   alias BstsNx.ShapleyAllocator
+  alias BstsNx.Validation
 
   @typedoc "A spot with an ID and half-open time window [window_start, window_end)."
   @type spot :: %{id: String.t(), window_start: non_neg_integer(), window_end: non_neg_integer()}
@@ -103,7 +104,7 @@ defmodule BstsNx.SpotAttributor do
     validate_inputs!(observations, spots, counterfactual, t)
 
     alpha = Keyword.get(opts, :alpha, 0.05)
-    validate_alpha!(alpha)
+    Validation.validate_alpha!(alpha, "alpha must be a number in (0, 1)")
     z = BstsNx.Utils.z_score(alpha)
 
     prefixes = build_prefixes(observations, counterfactual)
@@ -159,7 +160,7 @@ defmodule BstsNx.SpotAttributor do
 
   def attribute_posterior(observations, spots, counterfactual_draws, obs_variance, opts) do
     alpha = Keyword.get(opts, :alpha, 0.05)
-    validate_alpha!(alpha)
+    Validation.validate_alpha!(alpha, "alpha must be a number in (0, 1)")
     t = length(observations)
     n_draws = length(counterfactual_draws)
 
@@ -492,13 +493,6 @@ defmodule BstsNx.SpotAttributor do
   # Private helpers
   # -------------------------------------------------------------------
 
-  defp validate_alpha!(alpha) do
-    if not is_number(alpha) or alpha <= 0 or alpha >= 1 do
-      raise ArgumentError,
-            "alpha must be a number in (0, 1), got: #{inspect(alpha)}"
-    end
-  end
-
   defp validate_inputs!(observations, spots, counterfactual, t) do
     if length(counterfactual.mean) != t do
       raise ArgumentError,
@@ -523,17 +517,7 @@ defmodule BstsNx.SpotAttributor do
             "duplicate spot IDs: #{inspect(Enum.uniq(dupes))}"
     end
 
-    Enum.each(spots, fn spot ->
-      if spot.window_start < 0 or spot.window_end > t do
-        raise ArgumentError,
-              "spot #{spot.id} window [#{spot.window_start}, #{spot.window_end}) is out of bounds for series of length #{t}"
-      end
-
-      if spot.window_start > spot.window_end do
-        raise ArgumentError,
-              "spot #{spot.id} has window_start (#{spot.window_start}) > window_end (#{spot.window_end})"
-      end
-    end)
+    Validation.validate_spot_windows!(spots, t, context: :series)
 
     observations
   end

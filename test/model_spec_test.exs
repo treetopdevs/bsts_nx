@@ -36,4 +36,20 @@ defmodule BstsNx.ModelSpecTest do
 
     assert ModelSpec.validate!(spec) == spec
   end
+
+  test "validate!/1 rejects non-finite prior values instead of coercing them" do
+    spec = %ModelSpec{
+      f: Nx.eye(1),
+      h: Nx.tensor([[1.0]]),
+      x0: Nx.tensor([0.0]),
+      p0: Nx.eye(1),
+      obs_var: 1.0,
+      q_specs: [%{dim_index: 0, initial: 0.1, prior_shape: 2.0, prior_scale: 1.0}],
+      obs_prior_shape: :nan
+    }
+
+    assert_raise ArgumentError, ~r/obs_prior_shape must be > 0/, fn ->
+      ModelSpec.validate!(spec)
+    end
+  end
 end

@@ -182,14 +182,20 @@ defmodule BstsNx.ModelSpec do
   end
 
   defp validate_positive_number!(value, field) do
-    if not is_number(value) or value <= 0 do
+    if not finite_number?(value) or value <= 0 do
       raise ArgumentError, "#{field} must be > 0, got: #{inspect(value)}"
     end
   end
 
   defp validate_non_negative_number!(value, field) do
-    if not is_number(value) or value < 0 do
+    if not finite_number?(value) or value < 0 do
       raise ArgumentError, "#{field} must be >= 0, got: #{inspect(value)}"
     end
   end
+
+  defp finite_number?(value) when is_number(value) do
+    value == value and abs(value) < 1.0e300
+  end
+
+  defp finite_number?(_value), do: false
 end

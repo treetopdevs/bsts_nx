@@ -3,6 +3,7 @@ defmodule BstsNx.DistributionsStateSpaceAdditionalTest do
 
   alias BstsNx.Distributions
   alias BstsNx.StateSpace
+  alias BstsNx.Utils
 
   describe "Distributions" do
     test "inv_gamma_sample raises on shape mismatch" do
@@ -134,7 +135,7 @@ defmodule BstsNx.DistributionsStateSpaceAdditionalTest do
     test "inv_gamma_sample_with_key aligns with split-key behavior and returns next key" do
       base_key = Nx.Random.key(44)
       split = Nx.Random.split(base_key, parts: 2)
-      expected_next_key = split_key_at(split, 1)
+      expected_next_key = Utils.split_key_at(split, 1)
 
       expected =
         Distributions.inv_gamma_sample(3.0, 2.0, key: base_key)
@@ -193,11 +194,6 @@ defmodule BstsNx.DistributionsStateSpaceAdditionalTest do
         StateSpace.compose(c1, c2)
       end
     end
-  end
-
-  defp split_key_at(keys, idx) do
-    Nx.slice_along_axis(keys, idx, 1, axis: 0)
-    |> Nx.squeeze(axes: [0])
   end
 
   defp variance(samples, mean) do

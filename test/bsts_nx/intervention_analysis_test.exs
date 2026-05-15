@@ -23,13 +23,9 @@ defmodule BstsNx.InterventionAnalysisTest do
       assert is_map(result.summary)
       assert is_boolean(result.significant?)
       assert result.alpha == 0.05
-      assert result.execution.mode == :operational
-      assert result.execution.baseline == :forecast
-
-      assert result.execution.method_used in [
-               :scalar_forecast_filter,
-               :structured_forecast_filter
-             ]
+      assert result.impact != nil
+      assert result.execution.mode == :bayesian
+      assert result.execution.method_used == :elixir_mcmc
 
       # The cumulative effect should be positive (around 5 * 10 = 50)
       assert result.summary.cumulative_effect.mean > 0
@@ -341,6 +337,19 @@ defmodule BstsNx.InterventionAnalysisTest do
       assert result.model_spec != nil
       assert is_map(result.summary)
       assert result.execution.fallback? == false
+    end
+
+    test "rejects unknown analysis options before they can be silently dropped" do
+      assert_raise ArgumentError, ~r/unknown option.*:surprise/, fn ->
+        InterventionAnalysis.analyze(
+          [1.0, 2.0, 3.0, 4.0],
+          %{pre_period: {1, 2}, post_period: {3, 4}},
+          num_samples: 1,
+          burn_in: 0,
+          seed: 42,
+          surprise: true
+        )
+      end
     end
   end
 end

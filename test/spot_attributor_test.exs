@@ -383,15 +383,15 @@ defmodule BstsNx.SpotAttributorTest do
       assert result.overlap_groups == []
     end
 
-    test "zero-length windows" do
+    test "rejects zero-length windows" do
       obs = [100.0, 200.0, 100.0]
       cf = flat_counterfactual(100.0, 1.0, 0.5, 3)
 
       spots = [make_spot("a", 1, 1)]
-      result = SpotAttributor.attribute(obs, spots, cf)
 
-      [attr] = result.attributions
-      assert_in_delta attr.lift, 0.0, 1.0e-10
+      assert_raise ArgumentError, ~r/empty window/, fn ->
+        SpotAttributor.attribute(obs, spots, cf)
+      end
     end
 
     test "all-zero observations with non-zero baseline" do

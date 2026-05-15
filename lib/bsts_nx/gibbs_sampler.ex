@@ -26,7 +26,10 @@ defmodule BstsNx.GibbsSampler do
   alias BstsNx.Distributions
   alias BstsNx.KalmanFilter
   alias BstsNx.ModelSpec
-  import BstsNx.Utils, only: [to_tensor: 1, missing_observation?: 1, compat_dot: 2]
+
+  import BstsNx.Utils,
+    only: [to_tensor: 1, missing_observation?: 1, compat_dot: 2, split_key_at: 2]
+
   require Logger
 
   @type sample_result :: %{
@@ -151,76 +154,23 @@ defmodule BstsNx.GibbsSampler do
       ) do
     validate_positive!(:num_chains, num_chains)
 
-    # Determine base seed from options or default
-    base_seed = Keyword.get(opts, :seed, System.os_time())
-    seeds = Keyword.get(opts, :seeds)
-    key_opt = Keyword.get(opts, :key)
-    timeout = Keyword.get(opts, :timeout, 300_000)
-
-    chain_opts_list =
-      cond do
-        is_list(seeds) and length(seeds) == num_chains ->
-          # Explicit per-chain seeds; remove :key to avoid overriding
-          opts_clean = opts |> Keyword.delete(:key) |> Keyword.delete(:seeds)
-          seeds_t = List.to_tuple(seeds)
-
-          Enum.map(0..(num_chains - 1), fn idx ->
-            Keyword.put(opts_clean, :seed, elem(seeds_t, idx))
-          end)
-
-        key_opt != nil ->
-          # Split the PRNG key into independent per-chain subkeys
-          keys = Nx.Random.split(key_opt, parts: num_chains)
-
-          opts_clean =
-            opts |> Keyword.delete(:key) |> Keyword.delete(:seed) |> Keyword.delete(:seeds)
-
-          Enum.map(0..(num_chains - 1), fn idx ->
-            Keyword.put(opts_clean, :key, split_key_at(keys, idx))
-          end)
-
-        true ->
-          opts_clean = opts |> Keyword.delete(:seeds)
-
-          Enum.map(0..(num_chains - 1), fn idx ->
-            Keyword.put(opts_clean, :seed, base_seed + idx)
-          end)
+    run_chains(
+      num_chains,
+      opts,
+      "Gibbs sampler",
+      "Gibbs sampler",
+      fn chain_opts ->
+        sample(
+          observations,
+          num_samples,
+          initial_state,
+          initial_cov,
+          process_var,
+          obs_var,
+          chain_opts
+        )
       end
-
-    results =
-      chain_opts_list
-      |> Task.async_stream(
-        fn chain_opts ->
-          sample(
-            observations,
-            num_samples,
-            initial_state,
-            initial_cov,
-            process_var,
-            obs_var,
-            chain_opts
-          )
-        end,
-        max_concurrency: System.schedulers_online(),
-        timeout: timeout,
-        on_timeout: :kill_task
-      )
-      |> Enum.with_index()
-      |> Enum.reduce([], fn
-        {{:ok, res}, _idx}, acc ->
-          [res | acc]
-
-        {{:exit, reason}, idx}, acc ->
-          Logger.warning("Gibbs sampler chain #{idx} failed: #{inspect(reason)}")
-          acc
-      end)
-      |> Enum.reverse()
-
-    if results == [] do
-      raise RuntimeError, "all #{num_chains} Gibbs sampler chains failed"
-    end
-
-    results
+    )
   end
 
   @doc """
@@ -302,7 +252,7 @@ defmodule BstsNx.GibbsSampler do
     h_tensor = Nx.tensor(h_vals, type: {:f, 32})
     obs_present_mask = Nx.equal(obs_tensor, obs_tensor)
     t_steps = obs_present_mask |> Nx.sum() |> Nx.to_number() |> round()
-    num_diffs = observed_transition_count(observations)
+    num_diffs = latent_transition_count(observations)
 
     {_, _, samples_acc, _key_acc} =
       Enum.reduce(1..total_iters, {process_var_t, obs_var_t, [], key}, fn iter,
@@ -421,7 +371,6 @@ defmodule BstsNx.GibbsSampler do
     t = length(observations)
 
     state_dim = Nx.axis_size(spec.f, 0)
-    validate_q_specs!(spec.q_specs, state_dim)
 
     # Build initial Q matrix from q_specs
     q_matrix = build_initial_q(spec.q_specs, state_dim)
@@ -502,45 +451,24 @@ defmodule BstsNx.GibbsSampler do
       ) do
     validate_positive!(:num_chains, num_chains)
 
-    base_seed = Keyword.get(opts, :seed, System.os_time())
-    seeds = Keyword.get(opts, :seeds)
-    key_opt = Keyword.get(opts, :key)
+    run_chains(
+      num_chains,
+      opts,
+      "Structured Gibbs sampler",
+      "structured Gibbs sampler",
+      fn chain_opts ->
+        sample_structured(observations, spec, num_samples, chain_opts)
+      end
+    )
+  end
+
+  defp run_chains(num_chains, opts, warning_label, error_label, fun) do
     timeout = Keyword.get(opts, :timeout, 300_000)
 
-    chain_opts_list =
-      cond do
-        is_list(seeds) and length(seeds) == num_chains ->
-          opts_clean = opts |> Keyword.delete(:key) |> Keyword.delete(:seeds)
-          seeds_t = List.to_tuple(seeds)
-
-          Enum.map(0..(num_chains - 1), fn idx ->
-            Keyword.put(opts_clean, :seed, elem(seeds_t, idx))
-          end)
-
-        key_opt != nil ->
-          keys = Nx.Random.split(key_opt, parts: num_chains)
-
-          opts_clean =
-            opts |> Keyword.delete(:key) |> Keyword.delete(:seed) |> Keyword.delete(:seeds)
-
-          Enum.map(0..(num_chains - 1), fn idx ->
-            Keyword.put(opts_clean, :key, split_key_at(keys, idx))
-          end)
-
-        true ->
-          opts_clean = opts |> Keyword.delete(:seeds)
-
-          Enum.map(0..(num_chains - 1), fn idx ->
-            Keyword.put(opts_clean, :seed, base_seed + idx)
-          end)
-      end
-
     results =
-      chain_opts_list
-      |> Task.async_stream(
-        fn chain_opts ->
-          sample_structured(observations, spec, num_samples, chain_opts)
-        end,
+      num_chains
+      |> chain_opts_list(opts)
+      |> Task.async_stream(fun,
         max_concurrency: System.schedulers_online(),
         timeout: timeout,
         on_timeout: :kill_task
@@ -551,16 +479,49 @@ defmodule BstsNx.GibbsSampler do
           [res | acc]
 
         {{:exit, reason}, idx}, acc ->
-          Logger.warning("Structured Gibbs sampler chain #{idx} failed: #{inspect(reason)}")
+          Logger.warning("#{warning_label} chain #{idx} failed: #{inspect(reason)}")
           acc
       end)
       |> Enum.reverse()
 
     if results == [] do
-      raise RuntimeError, "all #{num_chains} structured Gibbs sampler chains failed"
+      raise RuntimeError, "all #{num_chains} #{error_label} chains failed"
     end
 
     results
+  end
+
+  defp chain_opts_list(num_chains, opts) do
+    base_seed = Keyword.get(opts, :seed, System.os_time())
+    seeds = Keyword.get(opts, :seeds)
+    key_opt = Keyword.get(opts, :key)
+
+    cond do
+      is_list(seeds) and length(seeds) == num_chains ->
+        opts_clean = opts |> Keyword.delete(:key) |> Keyword.delete(:seeds)
+        seeds_t = List.to_tuple(seeds)
+
+        Enum.map(0..(num_chains - 1), fn idx ->
+          Keyword.put(opts_clean, :seed, elem(seeds_t, idx))
+        end)
+
+      key_opt != nil ->
+        keys = Nx.Random.split(key_opt, parts: num_chains)
+
+        opts_clean =
+          opts |> Keyword.delete(:key) |> Keyword.delete(:seed) |> Keyword.delete(:seeds)
+
+        Enum.map(0..(num_chains - 1), fn idx ->
+          Keyword.put(opts_clean, :key, split_key_at(keys, idx))
+        end)
+
+      true ->
+        opts_clean = opts |> Keyword.delete(:seeds)
+
+        Enum.map(0..(num_chains - 1), fn idx ->
+          Keyword.put(opts_clean, :seed, base_seed + idx)
+        end)
+    end
   end
 
   # -- Structured sampler helpers ----------------------------------------------
@@ -585,7 +546,7 @@ defmodule BstsNx.GibbsSampler do
     h_rows_tensor =
       h_list |> Enum.map(&structured_h_row/1) |> Enum.map(&Nx.flatten/1) |> Nx.stack()
 
-    num_diffs = observed_transition_count(observations)
+    num_diffs = latent_transition_count(observations)
 
     {_, _, samples_acc, _key_acc} =
       Enum.reduce(1..total_iters, {q_matrix, r_var, [], key}, fn iter, {q_prev, r_prev, acc, k} ->
@@ -671,7 +632,7 @@ defmodule BstsNx.GibbsSampler do
          total_iters
        ) do
     t = length(observations)
-    num_diffs = observed_transition_count(observations)
+    num_diffs = latent_transition_count(observations)
 
     ctx = prepare_spike_slab_context(spec, regression, h_list)
     q_struct0 = submatrix(q_matrix, ctx.struct_full_indices, ctx.struct_full_indices)
@@ -1083,7 +1044,7 @@ defmodule BstsNx.GibbsSampler do
       List.duplicate(0, p)
     else
       expected = max(round(prior_inclusion * p), 1)
-      x_cols = transpose_rows(x_obs_rows)
+      x_cols = BstsNx.Utils.transpose_rows(x_obs_rows)
 
       active =
         x_cols
@@ -1192,14 +1153,6 @@ defmodule BstsNx.GibbsSampler do
     Enum.map(indices, &elem(row, &1))
   end
 
-  defp transpose_rows([]), do: []
-
-  defp transpose_rows(rows) do
-    rows_t = Enum.map(rows, &List.to_tuple/1)
-    p = rows_t |> hd() |> tuple_size()
-    Enum.map(0..(p - 1), fn j -> Enum.map(rows_t, &elem(&1, j)) end)
-  end
-
   defp active_indices(gamma) do
     gamma
     |> Enum.with_index()
@@ -1283,14 +1236,7 @@ defmodule BstsNx.GibbsSampler do
 
   # Builds the initial diagonal Q matrix from q_specs.
   defp build_initial_q(q_specs, n) do
-    diag = List.duplicate(0.0, n)
-
-    diag =
-      Enum.reduce(q_specs, diag, fn qs, d ->
-        List.replace_at(d, qs.dim_index, qs.initial)
-      end)
-
-    Nx.tensor(diag) |> Nx.make_diagonal()
+    BstsNx.Validation.fixed_q_matrix(q_specs, n)
   end
 
   # Computes per-dimension sum of squares for process residuals.
@@ -1400,35 +1346,17 @@ defmodule BstsNx.GibbsSampler do
   end
 
   defp safe_to_number(%Nx.Tensor{} = t), do: Nx.to_number(t) |> safe_to_number()
-  defp safe_to_number(val) when is_number(val), do: val
-  defp safe_to_number(:nan), do: warn_and_coerce(:nan, 0.0)
-  defp safe_to_number(:inf), do: warn_and_coerce(:inf, 1.0e10)
-  defp safe_to_number(:neg_inf), do: warn_and_coerce(:neg_inf, -1.0e10)
 
-  # Defensive fallback for backend-specific sentinels so structured sampling
-  # remains robust instead of crashing on non-numeric values.
-  defp safe_to_number(other) do
-    Logger.warning(
-      "GibbsSampler.safe_to_number/1 received unsupported value #{inspect(other)}; coercing to 0.0"
-    )
-
-    0.0
+  defp safe_to_number(val) when is_number(val) do
+    if val == val and abs(val) < 1.0e300 do
+      val * 1.0
+    else
+      raise ArgumentError, "expected a finite numeric posterior parameter, got: #{inspect(val)}"
+    end
   end
 
-  defp warn_and_coerce(source, value) do
-    warn_key = {__MODULE__, :safe_to_number_warned}
-    warned = :persistent_term.get(warn_key, MapSet.new())
-
-    unless MapSet.member?(warned, source) do
-      Logger.warning(
-        "GibbsSampler.safe_to_number/1 coerced #{inspect(source)} to #{value}; " <>
-          "upstream numeric instability may be present"
-      )
-
-      :persistent_term.put(warn_key, MapSet.put(warned, source))
-    end
-
-    value
+  defp safe_to_number(other) do
+    raise ArgumentError, "expected a finite numeric posterior parameter, got: #{inspect(other)}"
   end
 
   # Updates the diagonal entries of Q matrix after resampling.
@@ -1487,24 +1415,6 @@ defmodule BstsNx.GibbsSampler do
     end
   end
 
-  defp validate_q_specs!(q_specs, state_dim) do
-    dim_indices =
-      Enum.map(q_specs, fn qs ->
-        dim_index = Map.get(qs, :dim_index)
-
-        if not is_integer(dim_index) or dim_index < 0 or dim_index >= state_dim do
-          raise ArgumentError,
-                "q_specs dim_index must be in [0, #{state_dim - 1}], got: #{inspect(dim_index)}"
-        end
-
-        dim_index
-      end)
-
-    if length(dim_indices) != MapSet.size(MapSet.new(dim_indices)) do
-      raise ArgumentError, "q_specs dim_index values must be unique, got: #{inspect(dim_indices)}"
-    end
-  end
-
   # Converts a per-step H tensor into a row vector for scalar-observation residuals.
   defp structured_h_row(%Nx.Tensor{} = h_t) do
     case Nx.rank(h_t) do
@@ -1533,11 +1443,6 @@ defmodule BstsNx.GibbsSampler do
     end
   end
 
-  defp split_key_at(keys, idx) do
-    Nx.slice_along_axis(keys, idx, 1, axis: 0)
-    |> Nx.squeeze(axes: [0])
-  end
-
   defp observations_to_filter_tensor(observations) do
     nan = Nx.Constants.nan() |> Nx.to_number()
 
@@ -1560,7 +1465,7 @@ defmodule BstsNx.GibbsSampler do
     |> Enum.map(&Nx.squeeze(&1, axes: [0]))
   end
 
-  defp observed_transition_count(observations) do
+  defp latent_transition_count(observations) do
     # Structured samplers impute the full latent trajectory via simulation smoother.
     # Therefore process residuals use all adjacent transitions, not only observed pairs.
     max(length(observations) - 1, 0)

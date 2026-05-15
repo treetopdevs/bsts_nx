@@ -67,7 +67,7 @@ Screenshot: 01_authenticated.png
 
 ```
 Step: Open notebook file
-Action: page.goto('http://localhost:8080/open/file?path=/Users/nicholas/develop/bsts_nx/livebooks/bsts_nx_guide.livemd')
+Action: page.goto(`${LIVEBOOK_URL}/open/file?path=${encodeURIComponent(NOTEBOOK_PATH)}`)
 Expect: page.waitForURL('**/sessions/**', { timeout: 10000 })
 Expect: Page title contains 'From Noisy Data to Causal Claims'
 Screenshot: 02_notebook_opened.png
@@ -285,13 +285,16 @@ Screenshot: 12_re_evaluation.png
 ```javascript
 // test_bsts_guide.spec.js
 const { test, expect } = require('@playwright/test');
+const path = require('path');
 
 const LIVEBOOK_URL = process.env.LIVEBOOK_URL || 'http://localhost:8080';
 const LIVEBOOK_PASSWORD = process.env.LIVEBOOK_PASSWORD;
 if (!LIVEBOOK_PASSWORD) {
   throw new Error('LIVEBOOK_PASSWORD must be set for Playwright Livebook auth');
 }
-const NOTEBOOK_PATH = '/Users/nicholas/develop/bsts_nx/livebooks/bsts_nx_guide.livemd';
+const PROJECT_ROOT = process.env.BSTS_NX_PROJECT_ROOT || path.resolve(__dirname, '..');
+const NOTEBOOK_PATH =
+  process.env.NOTEBOOK_PATH || path.join(PROJECT_ROOT, 'livebooks', 'bsts_nx_guide.livemd');
 
 test.describe('BSTS Guide Livebook', () => {
   test.setTimeout(900_000); // 15 min total

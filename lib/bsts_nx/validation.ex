@@ -18,6 +18,277 @@ defmodule BstsNx.Validation do
   depending on those implementations.
   """
 
+  @relative_effect_epsilon 1.0e-10
+
+  @typedoc "Source used when constructing a fixed process-variance matrix from q_specs."
+  @type fixed_variance_source :: :initial_or_prior | :prior_mean
+
+  # -------------------------------------------------------------------
+  # Shared helpers
+  # -------------------------------------------------------------------
+
+  @doc """
+  Validates that `alpha` is in the open interval `(0, 1)`.
+
+  Returns `:ok` when valid. Raises `ArgumentError` with the supplied message
+  prefix when invalid, allowing callers to preserve existing public wording.
+  """
+  @spec validate_alpha!(any(), String.t()) :: :ok
+  def validate_alpha!(alpha, message \\ "alpha must be in (0, 1)") do
+    if not finite_number?(alpha) or alpha <= 0 or alpha >= 1 do
+      raise ArgumentError, "#{message}, got: #{inspect(alpha)}"
+    end
+
+    :ok
+  end
+
+  @doc """
+  Validates 1-based inclusive pre/post periods against an observation count.
+  """
+  @spec validate_study_periods!(
+          non_neg_integer(),
+          pos_integer(),
+          pos_integer(),
+          pos_integer(),
+          pos_integer()
+        ) :: :ok
+  def validate_study_periods!(obs_count, pre_start, pre_end, post_start, post_end) do
+    if pre_start < 1 or pre_end < pre_start do
+      raise ArgumentError, "invalid pre_period: must satisfy 1 <= start <= end"
+    end
+
+    if pre_end > obs_count do
+      raise ArgumentError,
+            "pre_period end (#{pre_end}) extends beyond observations (#{obs_count})"
+    end
+
+    if post_end > obs_count do
+      raise ArgumentError,
+            "post_period end (#{post_end}) extends beyond observations (#{obs_count})"
+    end
+
+    if post_start <= pre_end or post_end < post_start do
+      raise ArgumentError, "post_period must satisfy pre_end < start <= end"
+    end
+
+    :ok
+  end
+
+  @doc """
+  Shapes attribution options shared by operational and pipeline callers.
+
+  `:shapley_samples` is a compatibility alias for `:n_samples`; an explicit
+  `:n_samples` wins when both are present.
+  """
+  @spec attribution_options(keyword()) :: keyword()
+  def attribution_options(opts) do
+    opts
+    |> Keyword.take([:alpha, :shapley_samples, :n_samples, :decay, :key, :value_fn_mode])
+    |> map_shapley_samples()
+  end
+
+  @doc """
+  Computes `cumulative_effect / baseline_sum` using the project-wide
+  zero-baseline convention.
+
+  When the baseline sum is near zero, returns `0.0`.
+  """
+  @spec relative_effect(number(), number()) :: float()
+  def relative_effect(cumulative_effect, baseline_sum) do
+    if abs(baseline_sum) > @relative_effect_epsilon do
+      cumulative_effect / baseline_sum
+    else
+      0.0
+    end
+  end
+
+  @doc """
+  Computes relative effects for paired cumulative effects and baselines.
+  """
+  @spec relative_effects([number()], [number()]) :: [float()]
+  def relative_effects(cumulative_effects, baseline_sums)
+      when is_list(cumulative_effects) and is_list(baseline_sums) do
+    cumulative_effects
+    |> Enum.zip(baseline_sums)
+    |> Enum.map(fn {cumulative_effect, baseline_sum} ->
+      relative_effect(cumulative_effect, baseline_sum)
+    end)
+  end
+
+  @doc """
+  Builds a relative-effect summary map from cumulative effect statistics.
+  """
+  @spec relative_effect_summary(number(), number(), number(), number()) :: map()
+  def relative_effect_summary(cumulative_mean, cumulative_sd, baseline_sum, z) do
+    rel_mean = relative_effect(cumulative_mean, baseline_sum)
+
+    rel_sd =
+      if abs(baseline_sum) > @relative_effect_epsilon do
+        cumulative_sd / abs(baseline_sum)
+      else
+        0.0
+      end
+
+    %{
+      mean: rel_mean,
+      sd: rel_sd,
+      lower: rel_mean - z * rel_sd,
+      upper: rel_mean + z * rel_sd
+    }
+  end
+
+  @doc """
+  Computes a fixed variance from inverse-gamma prior parameters.
+  """
+  @spec fixed_variance_from_prior(number() | Nx.t(), number() | Nx.t()) :: float()
+  def fixed_variance_from_prior(prior_shape, prior_scale) do
+    shape = numeric_value(prior_shape)
+    scale = numeric_value(prior_scale)
+    scale / max(shape - 1.0, 0.5)
+  end
+
+  @doc """
+  Computes a fixed process variance from a q_spec.
+
+  With `:initial_or_prior`, the explicit `:initial` value is used when it is
+  numeric; otherwise this falls back to the prior-derived fixed variance.
+  With `:prior_mean`, the prior-derived fixed variance is always used.
+  """
+  @spec fixed_variance_from_q_spec(map(), fixed_variance_source()) :: float()
+  def fixed_variance_from_q_spec(q_spec, source \\ :initial_or_prior)
+
+  def fixed_variance_from_q_spec(%{initial: initial}, :initial_or_prior)
+      when is_number(initial) do
+    initial * 1.0
+  end
+
+  def fixed_variance_from_q_spec(%{initial: %Nx.Tensor{} = initial}, :initial_or_prior) do
+    numeric_value(initial)
+  end
+
+  def fixed_variance_from_q_spec(q_spec, :initial_or_prior) when is_map(q_spec) do
+    fixed_variance_from_q_spec(q_spec, :prior_mean)
+  end
+
+  def fixed_variance_from_q_spec(
+        %{prior_shape: prior_shape, prior_scale: prior_scale},
+        :prior_mean
+      ) do
+    fixed_variance_from_prior(prior_shape, prior_scale)
+  end
+
+  def fixed_variance_from_q_spec(_q_spec, source) do
+    raise ArgumentError,
+          "fixed variance source must be :initial_or_prior or :prior_mean, got: #{inspect(source)}"
+  end
+
+  @doc """
+  Builds a diagonal fixed Q matrix from q_specs.
+
+  Dimensions without a q_spec receive variance `0.0`.
+  """
+  @spec fixed_q_matrix([map()], pos_integer(), keyword()) :: Nx.t()
+  def fixed_q_matrix(q_specs, state_dim, opts \\ [])
+
+  def fixed_q_matrix(q_specs, state_dim, opts)
+      when is_list(q_specs) and is_integer(state_dim) and state_dim > 0 do
+    source = Keyword.get(opts, :source, :initial_or_prior)
+
+    q_diag_map =
+      q_specs
+      |> validate_fixed_q_specs!(state_dim)
+      |> Enum.map(fn q_spec ->
+        {Map.fetch!(q_spec, :dim_index), fixed_variance_from_q_spec(q_spec, source)}
+      end)
+      |> Map.new()
+
+    0..(state_dim - 1)
+    |> Enum.map(fn dim -> Map.get(q_diag_map, dim, 0.0) end)
+    |> Nx.tensor(type: {:f, 64})
+    |> Nx.make_diagonal()
+  end
+
+  def fixed_q_matrix(_q_specs, state_dim, _opts) do
+    raise ArgumentError, "state_dim must be a positive integer, got: #{inspect(state_dim)}"
+  end
+
+  @doc """
+  Validates half-open spot windows against a post-period or series length.
+
+  Empty windows (`window_start == window_end`) are rejected because they encode
+  no observable exposure window.
+  """
+  @spec validate_spot_windows!([map()], non_neg_integer(), keyword()) :: :ok
+  def validate_spot_windows!(spots, limit, opts \\ []) when is_list(spots) do
+    context = Keyword.get(opts, :context, :post_period)
+
+    Enum.each(spots, fn spot ->
+      if spot.window_start < 0 or spot.window_end > limit do
+        raise ArgumentError, spot_window_bounds_message(spot, limit, context)
+      end
+
+      if spot.window_start > spot.window_end do
+        raise ArgumentError,
+              "spot #{spot.id} has window_start (#{spot.window_start}) > " <>
+                "window_end (#{spot.window_end})"
+      end
+
+      if spot.window_start == spot.window_end do
+        raise ArgumentError,
+              "spot #{spot.id} has empty window [#{spot.window_start}, #{spot.window_end}); " <>
+                "window_start must be less than window_end"
+      end
+    end)
+
+    :ok
+  end
+
+  defp validate_fixed_q_specs!(q_specs, state_dim) do
+    dim_indices =
+      Enum.map(q_specs, fn q_spec ->
+        dim_index = Map.fetch!(q_spec, :dim_index)
+
+        if not is_integer(dim_index) or dim_index < 0 or dim_index >= state_dim do
+          raise ArgumentError,
+                "q_specs dim_index must be in [0, #{state_dim - 1}], got: #{inspect(dim_index)}"
+        end
+
+        dim_index
+      end)
+
+    if length(Enum.uniq(dim_indices)) != length(dim_indices) do
+      raise ArgumentError, "q_specs dim_index values must be unique, got: #{inspect(dim_indices)}"
+    end
+
+    q_specs
+  end
+
+  defp spot_window_bounds_message(spot, limit, :series) do
+    "spot #{spot.id} window [#{spot.window_start}, #{spot.window_end}) " <>
+      "is out of bounds for series of length #{limit}"
+  end
+
+  defp spot_window_bounds_message(spot, limit, _context) do
+    "spot #{spot.id} window [#{spot.window_start}, #{spot.window_end}) " <>
+      "is outside the post period (0..#{limit})"
+  end
+
+  defp numeric_value(%Nx.Tensor{} = tensor), do: Nx.to_number(tensor)
+  defp numeric_value(value) when is_number(value), do: value * 1.0
+
+  defp finite_number?(value) when is_number(value) do
+    value == value and abs(value) < 1.0e300
+  end
+
+  defp finite_number?(_value), do: false
+
+  defp map_shapley_samples(opts) do
+    case Keyword.pop(opts, :shapley_samples) do
+      {nil, rest} -> rest
+      {value, rest} -> Keyword.put_new(rest, :n_samples, value)
+    end
+  end
+
   # -------------------------------------------------------------------
   # 1. Prediction Error
   # -------------------------------------------------------------------

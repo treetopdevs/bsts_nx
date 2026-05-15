@@ -61,6 +61,7 @@ defmodule BstsNx.MixProject do
       files: [
         "lib",
         "docs",
+        "CHANGELOG.md",
         "mix.exs",
         "README.md",
         "LICENSE"
@@ -85,6 +86,7 @@ defmodule BstsNx.MixProject do
       main: "readme",
       extras: [
         "README.md",
+        "CHANGELOG.md",
         "docs/overview.md",
         "docs/hex-publishing-checklist.md",
         "docs/release-readiness-plan.md",
@@ -95,10 +97,16 @@ defmodule BstsNx.MixProject do
         "docs/synthetic-data-and-validation.md",
         "docs/module-reference.md",
         "docs/components.md",
-        "docs/causal-impact.md"
+        "docs/causal-impact.md",
+        "docs/reviews/bsts_nx_bayesian_review.md",
+        "docs/reviews/CODE_REVIEW.md",
+        "docs/reviews/cdx_code_review_2026-03-02.md",
+        "docs/reviews/cld_code_review.md",
+        "docs/reviews/cldd_code_review_2026-03-03.md"
       ],
       groups_for_extras: [
         Guides: [
+          "CHANGELOG.md",
           "docs/overview.md",
           "docs/hex-publishing-checklist.md",
           "docs/release-readiness-plan.md",
@@ -110,6 +118,13 @@ defmodule BstsNx.MixProject do
           "docs/module-reference.md",
           "docs/components.md",
           "docs/causal-impact.md"
+        ],
+        Reviews: [
+          "docs/reviews/bsts_nx_bayesian_review.md",
+          "docs/reviews/CODE_REVIEW.md",
+          "docs/reviews/cdx_code_review_2026-03-02.md",
+          "docs/reviews/cld_code_review.md",
+          "docs/reviews/cldd_code_review_2026-03-03.md"
         ]
       ],
       groups_for_modules: [

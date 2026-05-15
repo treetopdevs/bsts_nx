@@ -29,6 +29,7 @@ defmodule BstsNx.ShapleyAllocator do
   alias BstsNx.Utils
 
   @exact_threshold 12
+  @tie_relative_tolerance 1.0e-12
 
   @typedoc "A spot with an ID and time window."
   @type spot :: %{id: String.t(), window_start: number(), window_end: number()}
@@ -295,7 +296,7 @@ defmodule BstsNx.ShapleyAllocator do
               [{_id0, lift0} | _] ->
                 {_id, lift} = pair
 
-                if abs(abs(lift) - abs(lift0)) <= 1.0e-12 do
+                if same_lift_magnitude?(lift, lift0) do
                   {groups_acc, [pair | group_acc]}
                 else
                   {[Enum.reverse(group_acc) | groups_acc], [pair]}
@@ -348,7 +349,9 @@ defmodule BstsNx.ShapleyAllocator do
 
       Σ lift_i × exp(-λ × (t_max - t_i))
 
-  where λ = ln(2) / half_life and t_max is the most recent time in the coalition.
+  where λ = ln(2) / half_life and t_max is the most recent time in the
+  provided attribution universe. Anchoring to the full universe keeps every
+  coalition on the same time scale during Shapley enumeration.
 
   ## Options
 
@@ -383,6 +386,8 @@ defmodule BstsNx.ShapleyAllocator do
 
     lambda = :math.log(2) / half_life
 
+    # Anchor recency weights to the full attribution window so every coalition
+    # is scored on the same time scale during Shapley enumeration.
     global_t_max =
       if map_size(spot_times) == 0 do
         0
@@ -514,6 +519,18 @@ defmodule BstsNx.ShapleyAllocator do
 
     shuffled = tagged |> Enum.sort_by(&elem(&1, 0)) |> Enum.map(&elem(&1, 1))
     {shuffled, final_state}
+  end
+
+  defp same_lift_magnitude?(left, right) do
+    left_abs = abs(left)
+    right_abs = abs(right)
+    scale = max(left_abs, right_abs)
+
+    if scale == 0.0 do
+      true
+    else
+      abs(left_abs - right_abs) <= @tie_relative_tolerance * scale
+    end
   end
 
   defp popcount(mask), do: popcount(mask, 0)

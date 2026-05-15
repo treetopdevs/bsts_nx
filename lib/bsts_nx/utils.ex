@@ -318,6 +318,30 @@ defmodule BstsNx.Utils do
   end
 
   @doc """
+  Extracts one PRNG key from a tensor returned by `Nx.Random.split/2`.
+
+  `Nx.Random.split(key, parts: n)` returns a `{n, 2}` tensor. This helper
+  returns the `{2}` key at the requested zero-based index.
+  """
+  @spec split_key_at(Nx.t(), non_neg_integer()) :: Nx.t()
+  def split_key_at(keys, idx) do
+    Nx.slice_along_axis(keys, idx, 1, axis: 0)
+    |> Nx.squeeze(axes: [0])
+  end
+
+  @doc """
+  Transposes a list of equally sized rows into column lists.
+  """
+  @spec transpose_rows([list()]) :: [list()]
+  def transpose_rows([]), do: []
+
+  def transpose_rows(rows) do
+    rows
+    |> Enum.zip()
+    |> Enum.map(&Tuple.to_list/1)
+  end
+
+  @doc """
   Computes a two-tailed credible/confidence interval from a pre-sorted list
   using the nearest-rank percentile method.
 

@@ -14,6 +14,8 @@ defmodule BstsNx.BCT.ARForecaster do
 
   alias BstsNx.Distributions
   alias BstsNx.ModelBuilder
+  alias BstsNx.Utils
+  alias BstsNx.Validation
 
   @type fit_result :: %{
           backend: :bct_ar,
@@ -133,10 +135,7 @@ defmodule BstsNx.BCT.ARForecaster do
     validate_positive_integer!(:horizon, horizon)
 
     alpha = Keyword.get(opts, :alpha, 0.05)
-
-    if not is_number(alpha) or alpha <= 0.0 or alpha >= 1.0 do
-      raise ArgumentError, "alpha must be between 0 and 1 (exclusive), got: #{inspect(alpha)}"
-    end
+    Validation.validate_alpha!(alpha, "alpha must be between 0 and 1 (exclusive)")
 
     num_samples = Keyword.get(opts, :num_samples, fit_result.num_samples)
     validate_positive_integer!(:num_samples, num_samples)
@@ -229,16 +228,27 @@ defmodule BstsNx.BCT.ARForecaster do
   defp derive_predict_prng_opts(opts) do
     case Keyword.get(opts, :key) do
       %Nx.Tensor{} = key ->
-        split_keys = Nx.Random.split(key, parts: 2)
-        predict_key = Nx.slice_along_axis(split_keys, 1, 1, axis: 0) |> Nx.squeeze(axes: [0])
-        opts |> Keyword.put(:key, predict_key) |> Keyword.delete(:seed)
+        opts
+        |> Keyword.put(:key, split_prng_key(key, 1))
+        |> Keyword.delete(:seed)
 
       _ ->
         case Keyword.get(opts, :seed) do
-          seed when is_integer(seed) -> Keyword.put(opts, :seed, seed + 1)
-          _ -> opts
+          seed when is_integer(seed) ->
+            opts
+            |> Keyword.put(:key, split_prng_key(Nx.Random.key(seed), 1))
+            |> Keyword.delete(:seed)
+
+          _ ->
+            opts
         end
     end
+  end
+
+  defp split_prng_key(key, index) do
+    key
+    |> Nx.Random.split(parts: index + 1)
+    |> Utils.split_key_at(index)
   end
 
   defp finite_number?(x) when is_number(x) do

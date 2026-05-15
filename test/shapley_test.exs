@@ -363,9 +363,43 @@ defmodule BstsNx.ShapleyAllocatorTest do
       assert_in_delta vf.(["a", "b"]), 180.0, 1.0e-10
     end
 
+    test "near-equal large lifts share tie weights by relative tolerance" do
+      vf =
+        ShapleyAllocator.default_value_function(
+          %{"a" => 1.0e15, "b" => 1.0e15 + 500.0},
+          decay: 0.0
+        )
+
+      assert_in_delta vf.(["a", "b"]), 1.0e15 + 250.0, 1.0
+    end
+
+    test "tiny lifts only tie when they are relatively close" do
+      vf =
+        ShapleyAllocator.default_value_function(
+          %{"a" => 1.0e-15, "b" => 1.0e-13},
+          decay: 0.0
+        )
+
+      assert_in_delta vf.(["a", "b"]), 1.0e-13, 1.0e-20
+    end
+
     test "unknown ID contributes zero lift" do
       vf = ShapleyAllocator.default_value_function(%{"a" => 100.0})
       assert_in_delta vf.(["a", "unknown"]), 100.0 + 0.0 * 0.7, 1.0e-10
+    end
+  end
+
+  describe "time_weighted_value_function/3" do
+    test "anchors coalition weights to the full attribution window" do
+      vf =
+        ShapleyAllocator.time_weighted_value_function(
+          %{"old" => 100.0, "new" => 100.0},
+          %{"old" => 0, "new" => 10},
+          half_life: 10.0
+        )
+
+      assert_in_delta vf.(["old"]), 50.0, 1.0e-10
+      assert_in_delta vf.(["new"]), 100.0, 1.0e-10
     end
   end
 
