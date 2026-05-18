@@ -116,98 +116,55 @@ defmodule BstsNx.Smoother do
     {sxs_out, sps_out}
   end
 
-  Nx.Defn.defn rts_defn_matrix_impl(xs, ps, f, q) do
-    t = Nx.axis_size(xs, 0)
-    n = Nx.axis_size(xs, 1)
+  for {name, gain_fun} <- [
+        rts_defn_matrix_impl: :matrix_gain_solve,
+        rts_defn_matrix_impl_pinv: :matrix_gain_pinv
+      ] do
+    Nx.Defn.defn unquote(name)(xs, ps, f, q) do
+      t = Nx.axis_size(xs, 0)
+      n = Nx.axis_size(xs, 1)
 
-    sxs = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(xs)), {t, n})
-    sps = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(ps)), {t, n, n})
-    i_n = Nx.eye(n, type: Nx.type(ps))
-    eps = Nx.tensor(@cholesky_jitter, type: Nx.type(ps))
+      sxs = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(xs)), {t, n})
+      sps = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(ps)), {t, n, n})
+      i_n = Nx.eye(n, type: Nx.type(ps))
+      eps = Nx.tensor(@cholesky_jitter, type: Nx.type(ps))
 
-    last_idx = t - 1
-    sxs = Nx.put_slice(sxs, [last_idx, 0], Nx.new_axis(take_vector_at(xs, last_idx), 0))
-    sps = Nx.put_slice(sps, [last_idx, 0, 0], Nx.new_axis(take_matrix_at(ps, last_idx), 0))
+      last_idx = t - 1
+      sxs = Nx.put_slice(sxs, [last_idx, 0], Nx.new_axis(take_vector_at(xs, last_idx), 0))
+      sps = Nx.put_slice(sps, [last_idx, 0, 0], Nx.new_axis(take_matrix_at(ps, last_idx), 0))
 
-    num_steps = t - 1
+      num_steps = t - 1
 
-    {_, sxs_out, sps_out, _, _, _, _, _, _} =
-      while {k = Nx.tensor(0), sxs_acc = sxs, sps_acc = sps, xs_in = xs, ps_in = ps, f_in = f,
-             q_in = q, i_eye = i_n, eps_in = eps},
-            k < num_steps do
-        i = last_idx - 1 - k
+      {_, sxs_out, sps_out, _, _, _, _, _, _} =
+        while {k = Nx.tensor(0), sxs_acc = sxs, sps_acc = sps, xs_in = xs, ps_in = ps, f_in = f,
+               q_in = q, i_eye = i_n, eps_in = eps},
+              k < num_steps do
+          i = last_idx - 1 - k
 
-        x_filt = take_vector_at(xs_in, i)
-        p_filt = take_matrix_at(ps_in, i)
+          x_filt = take_vector_at(xs_in, i)
+          p_filt = take_matrix_at(ps_in, i)
 
-        x_pred_next = Nx.dot(f_in, x_filt)
-        p_pred_next = Nx.add(Nx.dot(Nx.dot(f_in, p_filt), Nx.transpose(f_in)), q_in)
+          x_pred_next = Nx.dot(f_in, x_filt)
+          p_pred_next = Nx.add(Nx.dot(Nx.dot(f_in, p_filt), Nx.transpose(f_in)), q_in)
 
-        p_pred_next_reg = Nx.add(p_pred_next, Nx.multiply(i_eye, eps_in))
-        rhs = Nx.dot(f_in, p_filt)
-        c = matrix_gain_solve(p_pred_next_reg, rhs)
+          p_pred_next_reg = Nx.add(p_pred_next, Nx.multiply(i_eye, eps_in))
+          rhs = Nx.dot(f_in, p_filt)
+          c = unquote(gain_fun)(p_pred_next_reg, rhs)
 
-        x_smooth_next = take_vector_at(sxs_acc, i + 1)
-        p_smooth_next = take_matrix_at(sps_acc, i + 1)
+          x_smooth_next = take_vector_at(sxs_acc, i + 1)
+          p_smooth_next = take_matrix_at(sps_acc, i + 1)
 
-        x_smooth = Nx.add(x_filt, Nx.dot(c, Nx.subtract(x_smooth_next, x_pred_next)))
+          x_smooth = Nx.add(x_filt, Nx.dot(c, Nx.subtract(x_smooth_next, x_pred_next)))
+          p_smooth = matrix_rts_covariance(p_filt, c, p_smooth_next, p_pred_next)
 
-        p_smooth = matrix_rts_covariance(p_filt, c, p_smooth_next, p_pred_next)
+          sxs_new = Nx.put_slice(sxs_acc, [i, 0], Nx.new_axis(x_smooth, 0))
+          sps_new = Nx.put_slice(sps_acc, [i, 0, 0], Nx.new_axis(p_smooth, 0))
 
-        sxs_new = Nx.put_slice(sxs_acc, [i, 0], Nx.new_axis(x_smooth, 0))
-        sps_new = Nx.put_slice(sps_acc, [i, 0, 0], Nx.new_axis(p_smooth, 0))
+          {k + 1, sxs_new, sps_new, xs_in, ps_in, f_in, q_in, i_eye, eps_in}
+        end
 
-        {k + 1, sxs_new, sps_new, xs_in, ps_in, f_in, q_in, i_eye, eps_in}
-      end
-
-    {sxs_out, sps_out}
-  end
-
-  Nx.Defn.defn rts_defn_matrix_impl_pinv(xs, ps, f, q) do
-    t = Nx.axis_size(xs, 0)
-    n = Nx.axis_size(xs, 1)
-
-    sxs = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(xs)), {t, n})
-    sps = Nx.broadcast(Nx.tensor(0.0, type: Nx.type(ps)), {t, n, n})
-    i_n = Nx.eye(n, type: Nx.type(ps))
-    eps = Nx.tensor(@cholesky_jitter, type: Nx.type(ps))
-
-    last_idx = t - 1
-    sxs = Nx.put_slice(sxs, [last_idx, 0], Nx.new_axis(take_vector_at(xs, last_idx), 0))
-    sps = Nx.put_slice(sps, [last_idx, 0, 0], Nx.new_axis(take_matrix_at(ps, last_idx), 0))
-
-    num_steps = t - 1
-
-    {_, sxs_out, sps_out, _, _, _, _, _, _} =
-      while {k = Nx.tensor(0), sxs_acc = sxs, sps_acc = sps, xs_in = xs, ps_in = ps, f_in = f,
-             q_in = q, i_eye = i_n, eps_in = eps},
-            k < num_steps do
-        i = last_idx - 1 - k
-
-        x_filt = take_vector_at(xs_in, i)
-        p_filt = take_matrix_at(ps_in, i)
-
-        x_pred_next = Nx.dot(f_in, x_filt)
-        p_pred_next = Nx.add(Nx.dot(Nx.dot(f_in, p_filt), Nx.transpose(f_in)), q_in)
-
-        p_pred_next_reg = Nx.add(p_pred_next, Nx.multiply(i_eye, eps_in))
-        rhs = Nx.dot(f_in, p_filt)
-        c = matrix_gain_pinv(p_pred_next_reg, rhs)
-
-        x_smooth_next = take_vector_at(sxs_acc, i + 1)
-        p_smooth_next = take_matrix_at(sps_acc, i + 1)
-
-        x_smooth = Nx.add(x_filt, Nx.dot(c, Nx.subtract(x_smooth_next, x_pred_next)))
-
-        p_smooth = matrix_rts_covariance(p_filt, c, p_smooth_next, p_pred_next)
-
-        sxs_new = Nx.put_slice(sxs_acc, [i, 0], Nx.new_axis(x_smooth, 0))
-        sps_new = Nx.put_slice(sps_acc, [i, 0, 0], Nx.new_axis(p_smooth, 0))
-
-        {k + 1, sxs_new, sps_new, xs_in, ps_in, f_in, q_in, i_eye, eps_in}
-      end
-
-    {sxs_out, sps_out}
+      {sxs_out, sps_out}
+    end
   end
 
   @doc """
@@ -455,118 +412,64 @@ defmodule BstsNx.Smoother do
     {states_out, key_out}
   end
 
-  Nx.Defn.defn simulate_from_filtered_defn_matrix_impl_solve(filtered_xs, filtered_ps, f, q, key) do
-    t = Nx.axis_size(filtered_xs, 0)
-    n = Nx.axis_size(filtered_xs, 1)
+  for {name, gain_fun} <- [
+        simulate_from_filtered_defn_matrix_impl_solve: :matrix_gain_solve,
+        simulate_from_filtered_defn_matrix_impl_pinv: :matrix_gain_pinv
+      ] do
+    Nx.Defn.defn unquote(name)(filtered_xs, filtered_ps, f, q, key) do
+      t = Nx.axis_size(filtered_xs, 0)
+      n = Nx.axis_size(filtered_xs, 1)
 
-    # Draw standard normal perturbations for all time steps
-    {eps_tensor, key_out} = Nx.Random.normal(key, 0.0, 1.0, shape: {t, n})
+      {eps_tensor, key_out} = Nx.Random.normal(key, 0.0, 1.0, shape: {t, n})
 
-    states = Nx.broadcast(0.0, {t, n})
-    i_n = Nx.eye(n, type: Nx.type(filtered_ps))
-    eps_reg = Nx.tensor(@cholesky_jitter, type: Nx.type(filtered_ps))
+      states = Nx.broadcast(0.0, {t, n})
+      i_n = Nx.eye(n, type: Nx.type(filtered_ps))
+      eps_reg = Nx.tensor(@cholesky_jitter, type: Nx.type(filtered_ps))
 
-    last_idx = t - 1
+      last_idx = t - 1
 
-    x_T_mean = take_vector_at(filtered_xs, last_idx)
-    p_T_cov = take_matrix_at(filtered_ps, last_idx) |> symmetrize()
-    chol_T = safe_cholesky_or_zero_defn(p_T_cov, i_n, eps_reg)
+      x_T_mean = take_vector_at(filtered_xs, last_idx)
+      p_T_cov = take_matrix_at(filtered_ps, last_idx) |> symmetrize()
+      chol_T = safe_cholesky_or_zero_defn(p_T_cov, i_n, eps_reg)
 
-    eps_T = take_vector_at(eps_tensor, last_idx)
-    x_T = Nx.add(x_T_mean, Nx.dot(chol_T, eps_T))
+      eps_T = take_vector_at(eps_tensor, last_idx)
+      x_T = Nx.add(x_T_mean, Nx.dot(chol_T, eps_T))
 
-    states = Nx.put_slice(states, [last_idx, 0], Nx.new_axis(x_T, 0))
+      states = Nx.put_slice(states, [last_idx, 0], Nx.new_axis(x_T, 0))
 
-    num_steps = t - 1
+      num_steps = t - 1
 
-    {_, states_out, _, _, _, _, _, _, _} =
-      while {k = Nx.tensor(0), states_acc = states, eps_in = eps_tensor, fxs = filtered_xs,
-             fps = filtered_ps, f_in = f, q_in = q, i_eye = i_n, c_eps = eps_reg},
-            k < num_steps do
-        i = last_idx - 1 - k
+      {_, states_out, _, _, _, _, _, _, _} =
+        while {k = Nx.tensor(0), states_acc = states, eps_in = eps_tensor, fxs = filtered_xs,
+               fps = filtered_ps, f_in = f, q_in = q, i_eye = i_n, c_eps = eps_reg},
+              k < num_steps do
+          i = last_idx - 1 - k
 
-        x_filt = take_vector_at(fxs, i)
-        p_filt = take_matrix_at(fps, i)
+          x_filt = take_vector_at(fxs, i)
+          p_filt = take_matrix_at(fps, i)
 
-        x_pred_next = Nx.dot(f_in, x_filt)
-        p_pred_next = Nx.add(Nx.dot(Nx.dot(f_in, p_filt), Nx.transpose(f_in)), q_in)
+          x_pred_next = Nx.dot(f_in, x_filt)
+          p_pred_next = Nx.add(Nx.dot(Nx.dot(f_in, p_filt), Nx.transpose(f_in)), q_in)
 
-        # compute J gain using the same regularized solve approach as RTS.
-        p_pred_next_reg = Nx.add(p_pred_next, Nx.multiply(i_eye, c_eps))
-        rhs = Nx.dot(f_in, p_filt)
-        j = matrix_gain_solve(p_pred_next_reg, rhs)
+          p_pred_next_reg = Nx.add(p_pred_next, Nx.multiply(i_eye, c_eps))
+          rhs = Nx.dot(f_in, p_filt)
+          j = unquote(gain_fun)(p_pred_next_reg, rhs)
 
-        x_next = take_vector_at(states_acc, i + 1)
-        mean = Nx.add(x_filt, Nx.dot(j, Nx.subtract(x_next, x_pred_next)))
+          x_next = take_vector_at(states_acc, i + 1)
+          mean = Nx.add(x_filt, Nx.dot(j, Nx.subtract(x_next, x_pred_next)))
+          cov = matrix_conditional_covariance(p_filt, j, p_pred_next)
+          chol_i = safe_cholesky_or_zero_defn(cov, i_eye, c_eps)
 
-        cov = matrix_conditional_covariance(p_filt, j, p_pred_next)
+          eps_i = take_vector_at(eps_in, i)
+          x_i = Nx.add(mean, Nx.dot(chol_i, eps_i))
 
-        chol_i = safe_cholesky_or_zero_defn(cov, i_eye, c_eps)
+          states_new = Nx.put_slice(states_acc, [i, 0], Nx.new_axis(x_i, 0))
 
-        eps_i = take_vector_at(eps_in, i)
-        x_i = Nx.add(mean, Nx.dot(chol_i, eps_i))
+          {k + 1, states_new, eps_in, fxs, fps, f_in, q_in, i_eye, c_eps}
+        end
 
-        states_new = Nx.put_slice(states_acc, [i, 0], Nx.new_axis(x_i, 0))
-
-        {k + 1, states_new, eps_in, fxs, fps, f_in, q_in, i_eye, c_eps}
-      end
-
-    {states_out, key_out}
-  end
-
-  Nx.Defn.defn simulate_from_filtered_defn_matrix_impl_pinv(filtered_xs, filtered_ps, f, q, key) do
-    t = Nx.axis_size(filtered_xs, 0)
-    n = Nx.axis_size(filtered_xs, 1)
-
-    {eps_tensor, key_out} = Nx.Random.normal(key, 0.0, 1.0, shape: {t, n})
-
-    states = Nx.broadcast(0.0, {t, n})
-    i_n = Nx.eye(n, type: Nx.type(filtered_ps))
-    eps_reg = Nx.tensor(@cholesky_jitter, type: Nx.type(filtered_ps))
-
-    last_idx = t - 1
-
-    x_T_mean = take_vector_at(filtered_xs, last_idx)
-    p_T_cov = take_matrix_at(filtered_ps, last_idx) |> symmetrize()
-    chol_T = safe_cholesky_or_zero_defn(p_T_cov, i_n, eps_reg)
-
-    eps_T = take_vector_at(eps_tensor, last_idx)
-    x_T = Nx.add(x_T_mean, Nx.dot(chol_T, eps_T))
-    states = Nx.put_slice(states, [last_idx, 0], Nx.new_axis(x_T, 0))
-
-    num_steps = t - 1
-
-    {_, states_out, _, _, _, _, _, _, _} =
-      while {k = Nx.tensor(0), states_acc = states, eps_in = eps_tensor, fxs = filtered_xs,
-             fps = filtered_ps, f_in = f, q_in = q, i_eye = i_n, c_eps = eps_reg},
-            k < num_steps do
-        i = last_idx - 1 - k
-
-        x_filt = take_vector_at(fxs, i)
-        p_filt = take_matrix_at(fps, i)
-
-        x_pred_next = Nx.dot(f_in, x_filt)
-        p_pred_next = Nx.add(Nx.dot(Nx.dot(f_in, p_filt), Nx.transpose(f_in)), q_in)
-
-        # Fallback for backends that don't support LU-based solve in defn.
-        p_pred_next_reg = Nx.add(p_pred_next, Nx.multiply(i_eye, c_eps))
-        rhs = Nx.dot(f_in, p_filt)
-        j = matrix_gain_pinv(p_pred_next_reg, rhs)
-
-        x_next = take_vector_at(states_acc, i + 1)
-        mean = Nx.add(x_filt, Nx.dot(j, Nx.subtract(x_next, x_pred_next)))
-        cov = matrix_conditional_covariance(p_filt, j, p_pred_next)
-
-        chol_i = safe_cholesky_or_zero_defn(cov, i_eye, c_eps)
-
-        eps_i = take_vector_at(eps_in, i)
-        x_i = Nx.add(mean, Nx.dot(chol_i, eps_i))
-        states_new = Nx.put_slice(states_acc, [i, 0], Nx.new_axis(x_i, 0))
-
-        {k + 1, states_new, eps_in, fxs, fps, f_in, q_in, i_eye, c_eps}
-      end
-
-    {states_out, key_out}
+      {states_out, key_out}
+    end
   end
 
   defp backend_supports_lu? do

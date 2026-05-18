@@ -57,6 +57,7 @@ defmodule BstsNx.Applications.DemandForecaster do
 
   alias BstsNx.Components
   alias BstsNx.Forecaster
+  alias BstsNx.Forward
   alias BstsNx.GibbsSampler
   alias BstsNx.ModelBuilder
   alias BstsNx.Validation
@@ -245,15 +246,8 @@ defmodule BstsNx.Applications.DemandForecaster do
 
     samples = GibbsSampler.sample_structured(obs_list, spec, num_samples, sampler_opts)
 
-    # Forward simulation with future regressors
-    sample_keys = Nx.Random.split(forecast_key, parts: length(samples))
-
-    trajectories =
-      Enum.with_index(samples)
-      |> Enum.map(fn {sample, idx} ->
-        sample_key = split_key_at(sample_keys, idx)
-        forward_simulate_demand(sample, spec, future_h, horizon, sample_key)
-      end)
+    h_steps = resolve_future_h(spec, future_h, horizon, Nx.axis_size(spec.f, 0))
+    trajectories = Forward.posterior_structured_trajectories(samples, spec, h_steps, forecast_key)
 
     result = aggregate(trajectories, horizon, alpha)
 
@@ -324,49 +318,6 @@ defmodule BstsNx.Applications.DemandForecaster do
 
         {combined, future_h}
     end
-  end
-
-  defp forward_simulate_demand(sample, spec, future_h, horizon, key) do
-    n_state = Nx.axis_size(spec.f, 0)
-    final_state = List.last(sample.states)
-    q_matrix = sample.q_matrix
-    obs_var = Nx.to_number(sample.obs_var)
-    obs_sd = :math.sqrt(max(obs_var, 0.0))
-
-    q_diag = Nx.take_diagonal(q_matrix)
-    q_sds = Nx.sqrt(Nx.max(q_diag, Nx.tensor(0.0)))
-
-    step_keys = Nx.Random.split(key, parts: horizon)
-
-    state_obs_rows =
-      Enum.map(0..(horizon - 1)//1, fn idx ->
-        step_key = split_key_at(step_keys, idx)
-        split_keys = Nx.Random.split(step_key, parts: 2)
-        {split_key_at(split_keys, 0), split_key_at(split_keys, 1)}
-      end)
-
-    # Resolve H for each future step
-    h_list = resolve_future_h(spec, future_h, horizon, n_state)
-
-    # Iterate h_list directly to avoid O(n²) Enum.at access
-    {_, trajectory} =
-      Enum.zip(h_list, state_obs_rows)
-      |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_t, {key_state, key_obs}},
-                                                       {state, acc} ->
-        {z_state, _} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {n_state})
-        noise = Nx.multiply(z_state, q_sds)
-        next_state = Nx.add(Nx.dot(spec.f, state), noise)
-
-        h_row = if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
-        y_mean = Nx.to_number(Nx.dot(h_row, next_state))
-
-        {z_obs, _} = Nx.Random.normal(key_obs, 0.0, 1.0)
-        y = y_mean + Nx.to_number(z_obs) * obs_sd
-
-        {next_state, [y | acc]}
-      end)
-
-    Enum.reverse(trajectory)
   end
 
   defp resolve_future_h(_spec, future_h, _horizon, _n_state) when is_list(future_h), do: future_h

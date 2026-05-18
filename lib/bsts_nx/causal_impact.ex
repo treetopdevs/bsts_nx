@@ -23,10 +23,10 @@ defmodule BstsNx.CausalImpact do
       RTS smoother for fast estimation on long time series.
   """
 
+  alias BstsNx.Forward
   alias BstsNx.GibbsSampler
   alias BstsNx.Validation
   import BstsNx.Utils, only: [split_key_at: 2]
-  import Nx.Defn
 
   @default_alpha 0.05
   @near_zero_denominator 1.0e-15
@@ -102,13 +102,14 @@ defmodule BstsNx.CausalImpact do
     # Collect point effects and counterfactual predictions per sample by forward simulation
     {baselines, point_effects_list} =
       simulate_effects(pre_samples, period.post_data, cf_base_key, fn sample, key ->
-        # final state of pre-period
-        final_state = List.last(sample.states)
-        init_val = Nx.to_number(final_state)
-        q = Nx.to_number(sample.process_var)
-        r = Nx.to_number(sample.obs_var)
-        # generate counterfactual by forward simulation (random walk with observation noise)
-        generate_counterfactual(init_val, q, r, period.n_post, key, period.gap_count)
+        Forward.scalar_trajectory(
+          List.last(sample.states),
+          sample.process_var,
+          sample.obs_var,
+          period.n_post,
+          key,
+          gap_steps: period.gap_count
+        )
       end)
 
     build_impact_result(
@@ -174,19 +175,14 @@ defmodule BstsNx.CausalImpact do
 
     {baselines, point_effects_list} =
       simulate_effects(pre_samples, period.post_data, cf_base_key, fn sample, key ->
-        final_state = List.last(sample.states)
-        q_mat = sample.q_matrix
-        r = Nx.to_number(sample.obs_var)
-
-        # Forward-simulate the state-space model for counterfactual
-        generate_structured_counterfactual(
-          final_state,
+        Forward.structured_trajectory(
+          List.last(sample.states),
           spec.f,
           post_h,
-          q_mat,
-          r,
+          sample.q_matrix,
+          sample.obs_var,
           key,
-          period.gap_count
+          gap_steps: period.gap_count
         )
       end)
 
@@ -946,149 +942,6 @@ defmodule BstsNx.CausalImpact do
     Enum.reduce((j - 1)..i//-1, BstsNx.Utils.take_time_slice_at(sps, j), fn idx, cov ->
       gains |> Map.fetch!(idx) |> Nx.dot(cov)
     end)
-  end
-
-  # Generates a counterfactual trajectory by forward simulation of a random walk
-  # with observation noise, using Nx.Random for PRNG consistency with the rest
-  # of the library.
-  #
-  # Given an `initial_state` (number), process variance `process_var`,
-  # observation variance `obs_var`, and the number of steps `n_steps`, this
-  # helper produces a list of counterfactual predicted observations by
-  # iteratively adding Gaussian process noise and then observation noise.
-  # An Nx.Random `key` controls reproducibility.  The returned list has
-  # length `n_steps`.
-  defp generate_counterfactual(initial_state, process_var, obs_var, n_steps, key, gap_steps) do
-    sd_process = :math.sqrt(max(process_var, 0.0))
-    sd_obs = :math.sqrt(max(obs_var, 0.0))
-    total_steps = gap_steps + n_steps
-
-    # Split into 2 independent sub-keys: one for process noise, one for
-    # observation noise. Sharing no common ancestor from a single split
-    # ensures mathematical safety against PRNG collision.
-    keys = Nx.Random.split(key, parts: 2)
-    key_process = split_key_at(keys, 0)
-    key_obs = split_key_at(keys, 1)
-
-    {z_process, _} = Nx.Random.normal(key_process, 0.0, 1.0, shape: {total_steps})
-    {z_obs, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {n_steps})
-
-    # Vectorized state simulation: x_t = x_0 + sum_{i=1}^t w_i
-    process_noise = Nx.multiply(z_process, sd_process)
-    states = Nx.add(initial_state, Nx.cumulative_sum(process_noise))
-    post_states = Nx.slice_along_axis(states, gap_steps, n_steps, axis: 0)
-
-    # Vectorized observation simulation: y_t = x_t + v_t
-    obs_noise = Nx.multiply(z_obs, sd_obs)
-    cf_obs = Nx.add(post_states, obs_noise)
-
-    Nx.to_flat_list(cf_obs)
-  end
-
-  defp generate_structured_counterfactual(
-         final_state,
-         f,
-         post_h,
-         q_matrix,
-         obs_var,
-         key,
-         gap_steps
-       ) do
-    # Convert list of post-period H tensors into a single stacked tensor {n_steps, state_dim}
-    # This enables running the entire simulation gracefully inside a compiled Nx.Defn.while loop
-    post_h_tensor =
-      post_h
-      |> Enum.map(fn h_t ->
-        if Nx.rank(h_t) == 2, do: Nx.squeeze(h_t, axes: [0]), else: Nx.flatten(h_t)
-      end)
-      |> Nx.stack()
-
-    state_dim = Nx.axis_size(f, 0)
-    total_steps = gap_steps + Nx.axis_size(post_h_tensor, 0)
-    keys = Nx.Random.split(key, parts: 2)
-    key_state = split_key_at(keys, 0)
-    key_obs = split_key_at(keys, 1)
-
-    {z_state, _} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {total_steps, state_dim})
-    {z_obs, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {Nx.axis_size(post_h_tensor, 0)})
-
-    cf_obs_t =
-      generate_structured_counterfactual_defn(
-        Nx.flatten(final_state),
-        f,
-        post_h_tensor,
-        q_matrix,
-        obs_var,
-        z_state,
-        z_obs,
-        gap_steps
-      )
-
-    Nx.to_flat_list(cf_obs_t)
-  end
-
-  defnp take_time_slice_defn(tensor, idx) do
-    Nx.slice_along_axis(tensor, idx, 1, axis: 0) |> Nx.squeeze(axes: [0])
-  end
-
-  defn generate_structured_counterfactual_defn(
-         final_state,
-         f_mat,
-         post_h_tensor,
-         q_matrix,
-         obs_var,
-         z_state_raw,
-         z_obs_raw,
-         gap_steps
-       ) do
-    type = Nx.type(final_state)
-    f_t = Nx.as_type(f_mat, type)
-    h_t = Nx.as_type(post_h_tensor, type)
-    q_t = Nx.as_type(q_matrix, type)
-    obs_var_t = Nx.as_type(obs_var, type)
-    {n_steps, _} = Nx.shape(h_t)
-    z_state = Nx.as_type(z_state_raw, type)
-    z_obs = Nx.as_type(z_obs_raw, type)
-
-    q_diag = Nx.take_diagonal(q_t)
-    q_sds = Nx.sqrt(Nx.max(q_diag, Nx.tensor(0.0, type: type)))
-    obs_sd = Nx.sqrt(Nx.max(obs_var_t, Nx.tensor(0.0, type: type)))
-
-    {_, gap_state, _, _, _, _} =
-      while {i = 0, prev_state = final_state, z_s = z_state, f = f_t, q_s = q_sds,
-             gap = gap_steps},
-            i < gap do
-        z_s_i = take_time_slice_defn(z_s, i)
-        process_noise = Nx.multiply(z_s_i, q_s)
-        next_state = Nx.add(Nx.dot(f, prev_state), process_noise)
-        {i + 1, next_state, z_s, f, q_s, gap}
-      end
-
-    cf_obs = Nx.broadcast(Nx.tensor(0.0, type: type), {n_steps})
-
-    {_, _, final_obs, _, _, _, _, _, _, _} =
-      while {i = 0, prev_state = gap_state, obs_acc = cf_obs, z_s = z_state, z_o = z_obs,
-             h_tensor = h_t, f = f_t, q_s = q_sds, o_s = obs_sd, gap = gap_steps},
-            i < n_steps do
-        z_s_i = take_time_slice_defn(z_s, i + gap)
-        process_noise = Nx.multiply(z_s_i, q_s)
-
-        # State transition: x_{t+1} = F * x_t + w_t
-        next_state = Nx.add(Nx.dot(f, prev_state), process_noise)
-
-        # Observation: y_t = H_t * x_t + v_t
-        h_row = take_time_slice_defn(h_tensor, i)
-        predicted_y = Nx.dot(h_row, next_state)
-
-        z_o_i = take_time_slice_defn(z_o, i)
-        cf_obs_i = Nx.add(predicted_y, Nx.multiply(z_o_i, o_s))
-
-        new_obs_acc = Nx.put_slice(obs_acc, [i], Nx.new_axis(Nx.squeeze(cf_obs_i), 0))
-
-        {i + 1, next_state, new_obs_acc, z_s, z_o, h_tensor, f, q_s, o_s, gap}
-      end
-
-    final_obs
   end
 
   # Returns a copy of spec with H sliced for the pre-period.

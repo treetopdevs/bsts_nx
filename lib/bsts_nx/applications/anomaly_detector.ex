@@ -49,6 +49,7 @@ defmodule BstsNx.Applications.AnomalyDetector do
       {score, updated_detector} = AnomalyDetector.score_one(detector, 150.0)
   """
 
+  alias BstsNx.Forward
   alias BstsNx.GibbsSampler
   alias BstsNx.KalmanFilter
   alias BstsNx.ModelBuilder
@@ -467,87 +468,11 @@ defmodule BstsNx.Applications.AnomalyDetector do
 
   defp forward_structured_predictions(samples, spec, horizon, opts, regressor_columns) do
     h_rows = future_h_rows(spec, horizon, opts, regressor_columns)
-    n_samples = max(length(samples), 1)
-
-    per_sample =
-      Enum.map(samples, fn sample ->
-        f = Nx.as_type(spec.f, {:f, 64})
-        q = Nx.as_type(sample.q_matrix, {:f, 64})
-        obs_var = max(Nx.to_number(sample.obs_var), 0.0)
-        init_state = sample.states |> List.last() |> Nx.flatten() |> Nx.as_type({:f, 64})
-        state_dim = Nx.axis_size(init_state, 0)
-        zero_cov = Nx.broadcast(0.0, {state_dim, state_dim})
-
-        {final_state, _final_cov, means_rev, vars_rev} =
-          Enum.reduce(h_rows, {init_state, zero_cov, [], []}, fn h_row,
-                                                                 {state, cov, means_acc, vars_acc} ->
-            next_state = Nx.dot(f, state)
-            next_cov = f |> Nx.dot(cov) |> Nx.dot(Nx.transpose(f)) |> Nx.add(q)
-            h_row_t = Nx.as_type(h_row, {:f, 64})
-            y_mean = Nx.dot(h_row_t, next_state) |> Nx.to_number()
-            h_mat = Nx.new_axis(h_row_t, 0)
-
-            proc_var =
-              h_mat
-              |> Nx.dot(next_cov)
-              |> Nx.dot(Nx.transpose(h_mat))
-              |> Nx.squeeze()
-              |> Nx.to_number()
-
-            y_var = max(proc_var + obs_var, 1.0e-12)
-            {next_state, next_cov, [y_mean | means_acc], [y_var | vars_acc]}
-          end)
-
-        _ = final_state
-        %{means: Enum.reverse(means_rev), vars: Enum.reverse(vars_rev)}
-      end)
-
-    aggregate_prediction_moments(per_sample, n_samples)
+    Forward.structured_moments_from_samples(samples, spec, h_rows)
   end
 
   defp forward_scalar_predictions(samples, horizon) do
-    n_samples = max(length(samples), 1)
-
-    per_sample =
-      Enum.map(samples, fn sample ->
-        level = sample.states |> List.last() |> Nx.to_number()
-        q = max(Nx.to_number(sample.process_var), 0.0)
-        r = max(Nx.to_number(sample.obs_var), 0.0)
-
-        vars =
-          Enum.map(1..horizon, fn step ->
-            max(step * q + r, 1.0e-12)
-          end)
-
-        %{means: List.duplicate(level, horizon), vars: vars}
-      end)
-
-    aggregate_prediction_moments(per_sample, n_samples)
-  end
-
-  defp aggregate_prediction_moments(per_sample, n_samples) do
-    mean_columns =
-      per_sample
-      |> Enum.map(& &1.means)
-      |> BstsNx.Utils.transpose_rows()
-
-    var_columns =
-      per_sample
-      |> Enum.map(& &1.vars)
-      |> BstsNx.Utils.transpose_rows()
-
-    means = Enum.map(mean_columns, &(Enum.sum(&1) / n_samples))
-
-    sds =
-      mean_columns
-      |> Enum.zip(var_columns)
-      |> Enum.map(fn {step_means, step_noise_vars} ->
-        between = sample_variance(step_means)
-        avg_noise = Enum.sum(step_noise_vars) / n_samples
-        :math.sqrt(max(between + avg_noise, 1.0e-12))
-      end)
-
-    {means, sds}
+    Forward.scalar_moments_from_samples(samples, horizon)
   end
 
   defp future_h_rows(spec, horizon, opts, regressor_columns) when regressor_columns > 0 do
@@ -667,17 +592,6 @@ defmodule BstsNx.Applications.AnomalyDetector do
     case tuple_size(tuple) do
       0 -> default
       size -> elem(tuple, size - 1)
-    end
-  end
-
-  defp sample_variance(values) do
-    n = length(values)
-
-    if n < 2 do
-      0.0
-    else
-      mean = Enum.sum(values) / n
-      Enum.reduce(values, 0.0, fn x, acc -> acc + :math.pow(x - mean, 2) end) / (n - 1)
     end
   end
 

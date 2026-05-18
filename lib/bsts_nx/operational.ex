@@ -8,10 +8,9 @@ defmodule BstsNx.Operational do
   attributes observed lift to spot windows.
   """
 
-  import Nx.Defn
-
   alias BstsNx.CausalImpact
   alias BstsNx.Execution
+  alias BstsNx.Forward
   alias BstsNx.KalmanFilter
   alias BstsNx.ModelSpec
   alias BstsNx.SpotAttributor
@@ -271,12 +270,11 @@ defmodule BstsNx.Operational do
       |> Nx.squeeze(axes: [0])
 
     {baseline, baseline_variance, cumulative_baseline_variance} =
-      forecast_multi_defn(
+      Forward.forecast_moments_defn(
         final_x,
         final_p,
         prepared.f,
         prepared.q,
-        prepared.r,
         prepared.post_h,
         Nx.tensor(prepared.gap_count, type: {:s, 64})
       )
@@ -294,58 +292,6 @@ defmodule BstsNx.Operational do
 
     {summary,
      if(prepared.scalar?, do: :scalar_forecast_filter, else: :structured_forecast_filter)}
-  end
-
-  defn forecast_multi_defn(x0, p0, f, q, _r, h_post, gap_count) do
-    post_count = Nx.axis_size(h_post, 0)
-    state_dim = Nx.axis_size(x0, 0)
-
-    zero = Nx.tensor(0.0, type: Nx.type(x0))
-    means = Nx.broadcast(zero, {post_count})
-    variances = Nx.broadcast(zero, {post_count})
-
-    {_, x_after_gap, p_after_gap, _, _, _} =
-      while {i = Nx.tensor(0), x = x0, p = p0, f_in = f, q_in = q, gap_limit = gap_count},
-            i < gap_limit do
-        x_pred = Nx.dot(f_in, x)
-        p_pred = Nx.add(Nx.dot(Nx.dot(f_in, p), Nx.transpose(f_in)), q_in)
-        {i + 1, x_pred, p_pred, f_in, q_in, gap_limit}
-      end
-
-    state_sum_cov0 = Nx.broadcast(zero, {state_dim})
-    cumulative_variance0 = zero
-
-    {_, means_out, variances_out, _, _, cumulative_variance_out, _, _, _, _, _} =
-      while {i = Nx.tensor(0), means_acc = means, vars_acc = variances, x = x_after_gap,
-             p = p_after_gap, cumulative_var = cumulative_variance0,
-             state_sum_cov = state_sum_cov0, f_in = f, q_in = q, h_in = h_post, zero_in = zero},
-            i < post_count do
-        x_pred = Nx.dot(f_in, x)
-        p_pred = Nx.add(Nx.dot(Nx.dot(f_in, p), Nx.transpose(f_in)), q_in)
-        state_sum_cov_pred = Nx.dot(f_in, state_sum_cov)
-        h_i = Nx.take(h_in, Nx.reshape(i, {1}), axis: 0) |> Nx.reshape({state_dim})
-        mean = Nx.dot(h_i, x_pred)
-        ph = Nx.dot(p_pred, h_i)
-        raw_variance = Nx.dot(h_i, ph)
-        variance = Nx.select(Nx.less(raw_variance, 0.0), zero_in, raw_variance)
-        cross_with_previous_sum = Nx.dot(h_i, state_sum_cov_pred)
-
-        cumulative_variance_new =
-          cumulative_var
-          |> Nx.add(variance)
-          |> Nx.add(Nx.multiply(2.0, cross_with_previous_sum))
-          |> Nx.max(zero_in)
-
-        state_sum_cov_new = Nx.add(state_sum_cov_pred, ph)
-
-        means_new = Nx.put_slice(means_acc, [i], Nx.reshape(mean, {1}))
-        vars_new = Nx.put_slice(vars_acc, [i], Nx.reshape(variance, {1}))
-
-        {i + 1, means_new, vars_new, x_pred, p_pred, cumulative_variance_new, state_sum_cov_new,
-         f_in, q_in, h_in, zero_in}
-      end
-
-    {means_out, variances_out, cumulative_variance_out}
   end
 
   defp build_summary(

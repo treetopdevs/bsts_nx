@@ -41,6 +41,7 @@ defmodule BstsNx.Forecaster do
       )
   """
 
+  alias BstsNx.Forward
   alias BstsNx.GibbsSampler
   alias BstsNx.ModelBuilder
   alias BstsNx.ModelSpec
@@ -282,9 +283,6 @@ defmodule BstsNx.Forecaster do
          base_key,
          future_regressors
        ) do
-    sample_keys = Nx.Random.split(base_key, parts: length(samples))
-    n_state = Nx.axis_size(spec.f, 0)
-
     # Build per-step H: if future_regressors provided, use build_future_h;
     # otherwise use the last training H for all steps
     h_list =
@@ -302,44 +300,7 @@ defmodule BstsNx.Forecaster do
           List.duplicate(static_h, horizon)
       end
 
-    h_rows = Enum.map(h_list, &BstsNx.Utils.h_to_row_tensor/1)
-
-    Enum.with_index(samples)
-    |> Enum.map(fn {sample, idx} ->
-      final_state = List.last(sample.states)
-      q_matrix = sample.q_matrix
-      obs_var = Nx.to_number(sample.obs_var)
-      obs_sd = :math.sqrt(max(obs_var, 0.0))
-
-      q_diag = Nx.take_diagonal(q_matrix)
-      q_sds = Nx.sqrt(Nx.max(q_diag, Nx.tensor(0.0)))
-      sample_key = BstsNx.Utils.split_key_at(sample_keys, idx)
-      split_keys = Nx.Random.split(sample_key, parts: 2)
-      key_state = BstsNx.Utils.split_key_at(split_keys, 0)
-      key_obs = BstsNx.Utils.split_key_at(split_keys, 1)
-      {proc_noise, _} = Nx.Random.normal(key_state, 0.0, 1.0, shape: {horizon, n_state})
-      {obs_noise, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {horizon})
-      proc_rows = proc_noise |> Nx.multiply(q_sds) |> Nx.to_list()
-      obs_vals = Nx.to_flat_list(obs_noise)
-
-      # Iterate h_list directly to avoid O(n²) Enum.at access
-      {_, trajectory} =
-        Enum.zip(h_rows, Enum.zip(proc_rows, obs_vals))
-        |> Enum.reduce({Nx.flatten(final_state), []}, fn {h_row, {proc_row, z_obs}},
-                                                         {state, acc} ->
-          next_state =
-            Nx.add(
-              BstsNx.Utils.compat_dot(spec.f, state),
-              Nx.tensor(proc_row, type: Nx.type(state))
-            )
-
-          y_mean = Nx.to_number(BstsNx.Utils.compat_dot(h_row, next_state))
-          y = y_mean + z_obs * obs_sd
-          {next_state, [y | acc]}
-        end)
-
-      Enum.reverse(trajectory)
-    end)
+    Forward.posterior_structured_trajectories(samples, spec, h_list, base_key)
   end
 
   defp split_fit_predict_prng_opts(opts) do
@@ -375,36 +336,7 @@ defmodule BstsNx.Forecaster do
   end
 
   defp predict_scalar(%{posterior_samples: samples}, horizon, base_key) do
-    sample_keys = Nx.Random.split(base_key, parts: length(samples))
-
-    Enum.with_index(samples)
-    |> Enum.map(fn {sample, idx} ->
-      final_state = Nx.to_number(List.last(sample.states))
-      q = Nx.to_number(sample.process_var)
-      r = Nx.to_number(sample.obs_var)
-      sd_q = :math.sqrt(max(q, 0.0))
-      sd_r = :math.sqrt(max(r, 0.0))
-
-      sample_key = BstsNx.Utils.split_key_at(sample_keys, idx)
-      split_keys = Nx.Random.split(sample_key, parts: 2)
-      key_process = BstsNx.Utils.split_key_at(split_keys, 0)
-      key_obs = BstsNx.Utils.split_key_at(split_keys, 1)
-      {proc_noise, _} = Nx.Random.normal(key_process, 0.0, 1.0, shape: {horizon})
-      {obs_noise, _} = Nx.Random.normal(key_obs, 0.0, 1.0, shape: {horizon})
-
-      proc_list = Nx.to_flat_list(proc_noise)
-      obs_list = Nx.to_flat_list(obs_noise)
-
-      {_, trajectory} =
-        Enum.zip(proc_list, obs_list)
-        |> Enum.reduce({final_state, []}, fn {pn, on}, {state, acc} ->
-          next = state + pn * sd_q
-          y = next + on * sd_r
-          {next, [y | acc]}
-        end)
-
-      Enum.reverse(trajectory)
-    end)
+    Forward.posterior_scalar_trajectories(samples, horizon, base_key)
   end
 
   defp aggregate_trajectories(trajectories, horizon, alpha) do

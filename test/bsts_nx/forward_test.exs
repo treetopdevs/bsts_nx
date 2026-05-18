@@ -7,9 +7,13 @@ defmodule BstsNx.ForwardTest do
     test "returns the same deterministic subkeys as the shared utility helper" do
       key = Nx.Random.key(42)
       split = Nx.Random.split(key, parts: 2)
+      {process_key, obs_key} = Forward.split_noise_keys(key)
 
-      assert Forward.split_noise_keys(key) ==
-               {BstsNx.Utils.split_key_at(split, 0), BstsNx.Utils.split_key_at(split, 1)}
+      assert Nx.to_flat_list(process_key) ==
+               Nx.to_flat_list(BstsNx.Utils.split_key_at(split, 0))
+
+      assert Nx.to_flat_list(obs_key) ==
+               Nx.to_flat_list(BstsNx.Utils.split_key_at(split, 1))
     end
   end
 
@@ -57,8 +61,16 @@ defmodule BstsNx.ForwardTest do
   describe "posterior trajectory helpers" do
     test "generates scalar trajectories for every posterior sample" do
       samples = [
-        %{states: [Nx.tensor(1.0), Nx.tensor(2.0)], process_var: Nx.tensor(0.0), obs_var: Nx.tensor(0.0)},
-        %{states: [Nx.tensor(3.0), Nx.tensor(4.0)], process_var: Nx.tensor(0.0), obs_var: Nx.tensor(0.0)}
+        %{
+          states: [Nx.tensor(1.0), Nx.tensor(2.0)],
+          process_var: Nx.tensor(0.0),
+          obs_var: Nx.tensor(0.0)
+        },
+        %{
+          states: [Nx.tensor(3.0), Nx.tensor(4.0)],
+          process_var: Nx.tensor(0.0),
+          obs_var: Nx.tensor(0.0)
+        }
       ]
 
       assert Forward.posterior_scalar_trajectories(samples, 2, Nx.Random.key(9)) ==
