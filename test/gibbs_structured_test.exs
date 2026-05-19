@@ -304,6 +304,51 @@ defmodule BstsNx.GibbsStructuredTest do
       end)
     end
 
+    test "in-loop spike-and-slab rank-1 sweep handles sparse p > 10 regression" do
+      :rand.seed(:exsss, {530, 531, 532})
+      n = 36
+      p = 11
+      true_betas = %{2 => 4.5, 8 => -4.0}
+
+      x_rows =
+        Enum.map(1..n, fn _ ->
+          Enum.map(1..p, fn _ -> :rand.normal() end)
+        end)
+
+      obs =
+        Enum.map(x_rows, fn row ->
+          signal =
+            Enum.reduce(true_betas, 0.0, fn {idx, beta}, acc ->
+              acc + beta * Enum.at(row, idx)
+            end)
+
+          signal + :rand.normal() * 0.2
+        end)
+
+      spec =
+        x_rows
+        |> Nx.tensor()
+        |> Components.regression_spec(
+          mode: :spike_and_slab,
+          prior_inclusion: 0.2,
+          g: n,
+          obs_var: 0.25
+        )
+
+      samples =
+        GibbsSampler.sample_structured(obs, spec, 4, burn_in: 4, seed: 535_353)
+
+      assert length(samples) == 4
+
+      Enum.each(samples, fn sample ->
+        assert length(sample.regression_gamma) == p
+        refute BstsNx.Utils.has_non_finite?(sample.regression_beta)
+      end)
+
+      assert Enum.any?(samples, fn sample -> Enum.at(sample.regression_gamma, 2) == 1 end)
+      assert Enum.any?(samples, fn sample -> Enum.at(sample.regression_gamma, 8) == 1 end)
+    end
+
     if @compiled_backend? do
       @tag skip:
              "high-dimensional spike-and-slab external recovery is too slow on compiled backends; run on native backend for this parity check"

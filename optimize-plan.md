@@ -21,7 +21,7 @@ This section is the tracker of record for completion status.
 - [~] PR 5: Tier 5A compiled multi-dimensional filter
 - [~] PR 6: Tier 5B compiled multi-dimensional RTS smoother
 - [x] PR 7: Tier 5C pure-Nx gamma / inv-gamma defn path
-- [ ] PR 8: Tier 5D spike-and-slab rank-1 updates + closeout
+- [x] PR 8: Tier 5D spike-and-slab rank-1 updates + closeout
 
 ### Tier Snapshot
 
@@ -29,7 +29,7 @@ This section is the tracker of record for completion status.
 - [~] Tier 2: Partial
 - [~] Tier 3: Mostly complete
 - [~] Tier 4: Mostly complete
-- [~] Tier 5: Partial; PR 5/6/7 paths are wired, PR 8 remains deferred
+- [~] Tier 5: Partial; PR 5/6/7/8 paths are wired; full end-to-end MCMC-loop fusion remains deferred
 
 Legend: `[x]` done, `[~]` partial, `[ ]` pending.
 
@@ -351,11 +351,14 @@ These changes target code that runs `iterations × T` times (thousands to millio
 
 ### 5D. [NEW] Spike-and-slab XtX rank-1 updates
 
-**File:** `lib/bsts_nx/gibbs_sampler.ex` (lines 955-968)
-- `resample_gamma_g_prior`: `log_marginal_g_prior` called twice per variable per iteration with near-identical XtX (only column j differs)
-- Pre-compute `XtX` and `Xty` for the full active set, then apply Woodbury rank-1 updates for each variable toggle
-- For p > 10 this would be a significant speedup; for small p the overhead is justified
-- This is algorithmically complex but pays off for high-dimensional regression
+**Status:** Complete in PR 8.
+
+**File:** `lib/bsts_nx/gibbs_sampler.ex`
+- [x] `resample_gamma_g_prior` now builds full-design `XtX`/`Xty` once per gamma sweep instead of reconstructing active design matrices twice per variable
+- [x] Maintains the current active-set inverse and applies block inverse add/remove updates for each variable toggle, with `safe_solve` fallback for near-singular pivots
+- [x] Added a p > 10 spike-and-slab regression slice to cover correctness through the public sampler
+- [x] Added `spike_slab_gibbs` to `bench/optimize_plan.exs` so the high-dimensional gamma sweep has a benchmark surface
+- [ ] Deferred: `sample_beta_g_prior` still performs its own active-set solve per retained beta draw; full MCMC-loop fusion remains out of scope
 
 ---
 
@@ -411,4 +414,4 @@ Items marked [NEW] were discovered by the parallel code review agents and were n
 - **3E** (AR forecaster Nx rewrite): Replaces O(n×p³) Elixir with single BLAS call
 - **3F** (diagonal extraction caching): Eliminates D×S×4 redundant Nx calls
 - **3G** (spike-and-slab covariance rebuild): Fixes O(T×n²) per retained sample
-- **5D** (XtX rank-1 updates): Algorithmic improvement for high-dim spike-and-slab
+- **5D** (XtX rank-1 updates): Implemented rank add/remove gamma sweeps for high-dim spike-and-slab

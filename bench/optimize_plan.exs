@@ -10,6 +10,7 @@ defmodule BstsNx.Bench.OptimizePlan do
     scalar_obs = scalar_observations(200)
     structured_obs = structured_observations(96)
     structured_spec = structured_spec(structured_obs)
+    {spike_slab_obs, spike_slab_spec} = spike_slab_dataset(72, 24)
     operational_obs = operational_observations()
 
     scalar_operational_spec =
@@ -64,6 +65,11 @@ defmodule BstsNx.Bench.OptimizePlan do
     scalar = benchmark(fn -> run_scalar(scalar_obs, seed) end)
     structured = benchmark(fn -> run_structured(structured_obs, structured_spec, seed) end)
 
+    spike_slab =
+      benchmark(fn ->
+        run_spike_slab(spike_slab_obs, spike_slab_spec, seed)
+      end)
+
     results = %{
       generated_at: DateTime.utc_now() |> DateTime.to_iso8601(),
       git_sha: git_sha(),
@@ -80,7 +86,8 @@ defmodule BstsNx.Bench.OptimizePlan do
         guide_operational_pipeline: guide_pipeline,
         batch_operational_pipeline: batch_pipeline,
         scalar_gibbs: scalar,
-        structured_gibbs: structured
+        structured_gibbs: structured,
+        spike_slab_gibbs: spike_slab
       }
     }
 
@@ -106,6 +113,11 @@ defmodule BstsNx.Bench.OptimizePlan do
     %{num_samples: length(samples)}
   end
 
+  defp run_spike_slab(observations, spec, seed) do
+    samples = GibbsSampler.sample_structured(observations, spec, 20, burn_in: 20, seed: seed)
+    %{num_samples: length(samples)}
+  end
+
   defp structured_spec(observations) do
     Components.local_linear_trend_spec(
       initial_level: hd(observations),
@@ -127,6 +139,40 @@ defmodule BstsNx.Bench.OptimizePlan do
     Enum.map(0..(n - 1), fn t ->
       100.0 + 0.2 * t + 2.0 * :math.sin(2.0 * :math.pi() * t / 12.0)
     end)
+  end
+
+  defp spike_slab_dataset(n, p) do
+    x_rows =
+      Enum.map(0..(n - 1), fn t ->
+        Enum.map(0..(p - 1), fn j ->
+          phase = (j + 1) * 0.37
+          :math.sin((t + 1) * phase) + 0.5 * :math.cos((t + j + 1) * 0.19)
+        end)
+      end)
+
+    active_betas = %{3 => 3.5, 11 => -2.75, 19 => 2.25}
+
+    observations =
+      Enum.map(Enum.with_index(x_rows), fn {row, t} ->
+        signal =
+          Enum.reduce(active_betas, 0.0, fn {idx, beta}, acc ->
+            acc + beta * Enum.at(row, idx)
+          end)
+
+        signal + 0.2 * :math.sin(t * 0.73)
+      end)
+
+    spec =
+      x_rows
+      |> Nx.tensor()
+      |> Components.regression_spec(
+        mode: :spike_and_slab,
+        prior_inclusion: 0.12,
+        g: n,
+        obs_var: 0.25
+      )
+
+    {observations, spec}
   end
 
   defp operational_observations do
