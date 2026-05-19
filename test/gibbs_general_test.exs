@@ -3,6 +3,7 @@ defmodule BstsNx.GibbsGeneralTest do
   import ExUnit.CaptureLog
 
   alias BstsNx.GibbsSampler
+  alias BstsNx.KalmanFilter
 
   test "sample_general with constant h=1 matches basic sampler" do
     # Simple local level model: should produce similar results to sample/7
@@ -30,6 +31,53 @@ defmodule BstsNx.GibbsGeneralTest do
       # Variances should be positive
       assert Nx.to_number(s.process_var) > 0.0
       assert Nx.to_number(s.obs_var) > 0.0
+    end)
+  end
+
+  test "sample_general remains aligned with f64 scalar and structured filter paths" do
+    Nx.with_default_backend(Nx.BinaryBackend, fn ->
+      high_precision = 16_777_217.0
+      observations = List.duplicate(high_precision, 4)
+      obs_tensor = Nx.tensor(observations, type: {:f, 64})
+      zero = Nx.tensor(0.0, type: {:f, 64})
+      one = Nx.tensor(1.0, type: {:f, 64})
+      initial_state = Nx.tensor(high_precision, type: {:f, 64})
+
+      [sample] =
+        GibbsSampler.sample_general(observations, one, one, 1,
+          initial_state: initial_state,
+          initial_cov: zero,
+          process_var: zero,
+          obs_var: zero,
+          prior_shape: 100.0,
+          prior_scale: 1.0,
+          seed: 123
+        )
+
+      {filter_xs, _filter_ps} =
+        KalmanFilter.filter_defn(obs_tensor, one, one, zero, zero, initial_state, zero)
+
+      {structured_xs, _structured_ps} =
+        KalmanFilter.filter_defn_multi(
+          obs_tensor,
+          Nx.tensor([[1.0]], type: {:f, 64}),
+          Nx.tensor([[1.0]], type: {:f, 64}),
+          Nx.tensor([[0.0]], type: {:f, 64}),
+          zero,
+          Nx.tensor([high_precision], type: {:f, 64}),
+          Nx.tensor([[0.0]], type: {:f, 64})
+        )
+
+      scalar_states = Enum.map(sample.states, &Nx.to_number/1)
+
+      assert_all_close(scalar_states, observations, 1.0e-5)
+      assert_all_close(scalar_states, Nx.to_flat_list(filter_xs), 1.0e-5)
+
+      assert_all_close(
+        scalar_states,
+        structured_xs |> Nx.reshape({length(observations)}) |> Nx.to_flat_list(),
+        1.0e-5
+      )
     end)
   end
 
@@ -174,5 +222,14 @@ defmodule BstsNx.GibbsGeneralTest do
       end
 
     {result, log}
+  end
+
+  defp assert_all_close(left, right, delta) do
+    assert length(left) == length(right)
+
+    Enum.zip(left, right)
+    |> Enum.each(fn {left_value, right_value} ->
+      assert_in_delta left_value, right_value, delta
+    end)
   end
 end

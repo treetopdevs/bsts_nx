@@ -251,7 +251,7 @@ defmodule BstsNx.GibbsSampler do
     end
 
     obs_tensor = observations_to_filter_tensor(observations)
-    h_tensor = Nx.tensor(h_vals, type: {:f, 32})
+    h_tensor = Nx.tensor(h_vals, type: {:f, 64})
     obs_present_mask = Nx.equal(obs_tensor, obs_tensor)
     t_steps = obs_present_mask |> Nx.sum() |> Nx.to_number() |> round()
     num_diffs = latent_transition_count(observations)
@@ -1696,8 +1696,8 @@ defmodule BstsNx.GibbsSampler do
 
   defp scalar_tensor_list(tensor) do
     tensor
-    |> Nx.to_flat_list()
-    |> Enum.map(&Nx.tensor/1)
+    |> Nx.to_batched(1)
+    |> Enum.map(&Nx.squeeze(&1, axes: [0]))
   end
 
   defp tensor_time_slices(tensor) do
