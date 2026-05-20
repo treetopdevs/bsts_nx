@@ -75,9 +75,11 @@ defmodule BstsNx.Smoother do
 
   Nx.Defn.defn rts_defn_impl(xs, ps, f, q) do
     t = Nx.axis_size(xs, 0)
+    x_type = Nx.type(xs)
+    p_type = Nx.type(ps)
     # Initialize output accumulators
-    sxs = Nx.broadcast(Nx.tensor(0.0), {t})
-    sps = Nx.broadcast(Nx.tensor(0.0), {t})
+    sxs = Nx.broadcast(Nx.tensor(0.0, type: x_type), {t})
+    sps = Nx.broadcast(Nx.tensor(0.0, type: p_type), {t})
     # Set the last element to the filtered value (smoother boundary condition)
     last_idx = t - 1
     sxs = Nx.put_slice(sxs, [last_idx], Nx.reshape(take_scalar_at(xs, last_idx), {1}))

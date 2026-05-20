@@ -13,12 +13,12 @@ works, why it works, and how to apply it across five completely different domain
 
 **What you'll be able to do after this notebook:**
 
-- Decompose any time series into trend, seasonality, and noise
-- Estimate causal effects of interventions with honest uncertainty
-- Forecast future values with calibrated prediction intervals
-- Detect anomalies using statistical process control
-- Split credit fairly across overlapping campaigns
-- Validate your results before trusting them
+* Decompose any time series into trend, seasonality, and noise
+* Estimate causal effects of interventions with honest uncertainty
+* Forecast future values with calibrated prediction intervals
+* Detect anomalies using statistical process control
+* Split credit fairly across overlapping campaigns
+* Validate your results before trusting them
 
 **Who this is for:** Technically curious people — engineers, data scientists, product managers,
 researchers — who want to *understand* the algorithm, not just call an API. We assume comfort
@@ -33,7 +33,8 @@ project_root =
 
 Mix.install(
   [
-    {:nx, "~> 0.11.0"},
+    {:nx, "~> 0.12.0"},
+    {:emlx, "~> 0.3.0"},
     {:bsts_nx, path: project_root},
     {:kino_vega_lite, "~> 0.1.13"},
     {:kino, "~> 0.14"}
@@ -492,40 +493,154 @@ defmodule Guide do
 
   # ── Backend Setup ───────────────────────────────────────────────
 
+  @emlx_gpu_backend {EMLX.Backend, device: :gpu}
+  @emlx_cpu_backend {EMLX.Backend, device: :cpu}
+  @guide_gpu_type {:f, 32}
+
   def setup_backend! do
     result =
       cond do
         Code.ensure_loaded?(EMLX.Backend) ->
           try do
-            Nx.global_default_backend(EMLX.Backend)
-            Nx.Defn.global_default_options(compiler: Nx.Defn.Evaluator)
-            _ = Nx.backend_transfer(Nx.tensor([0.0]), EMLX.Backend)
-            %{backend: :emlx}
+            Nx.global_default_backend(@emlx_gpu_backend)
+            Nx.Defn.global_default_options(compiler: EMLX)
+            _ = Nx.backend_transfer(Nx.tensor([0.0], type: @guide_gpu_type), @emlx_gpu_backend)
+            smoke_structured_defn!(@guide_gpu_type)
+
+            backend_status(:emlx_gpu, :emlx, @guide_gpu_type)
           rescue
-            _ ->
-              Nx.global_default_backend(Nx.BinaryBackend)
-              %{backend: :binary}
+            emlx_error ->
+              try_emlx_cpu_or_exla_or_binary(Exception.message(emlx_error))
+              |> maybe_put_error(:emlx_error, Exception.message(emlx_error))
           end
 
         Code.ensure_loaded?(EXLA.Backend) ->
-          try do
-            Nx.global_default_backend(Nx.BinaryBackend)
-            Nx.Defn.global_default_options(compiler: EXLA)
-            _ = Nx.backend_transfer(Nx.tensor([0.0]), EXLA.Backend)
-            %{backend: :exla}
-          rescue
-            _ ->
-              Nx.global_default_backend(Nx.BinaryBackend)
-              %{backend: :binary}
-          end
+          try_exla_or_binary(nil)
 
         true ->
-          Nx.global_default_backend(Nx.BinaryBackend)
-          %{backend: :binary}
+          use_binary(nil)
       end
 
-    IO.puts("Backend: #{result.backend} | Nx: #{Application.spec(:nx, :vsn)}")
+    IO.puts("Backend: #{result.backend} | Compiler: #{result.compiler} | dtype: #{inspect(result.dtype)}")
+    IO.puts("Nx: #{Application.spec(:nx, :vsn)} | EMLX GPU probe: #{result.emlx_gpu?}")
+    IO.puts("Probe tensor: #{result.probe_backend}")
+    if Map.has_key?(result, :emlx_error), do: IO.puts("EMLX GPU unavailable for structured path: #{result.emlx_error}")
+    if Map.has_key?(result, :emlx_cpu_error), do: IO.puts("EMLX CPU fallback unavailable: #{result.emlx_cpu_error}")
+    if Map.has_key?(result, :backend_error), do: IO.puts("Backend fallback: #{result.backend_error}")
     result
+  end
+
+  def float_type do
+    if emlx_gpu_backend?(), do: @guide_gpu_type, else: {:f, 32}
+  end
+
+  def tensor(data, opts \\ []) do
+    Nx.tensor(data, type: Keyword.get(opts, :type, float_type()))
+  end
+
+  def cast_spec(%BstsNx.ModelSpec{} = spec, type \\ float_type()) do
+    %{
+      spec
+      | f: Nx.as_type(spec.f, type),
+        h: cast_h(spec.h, type),
+        x0: Nx.as_type(spec.x0, type),
+        p0: Nx.as_type(spec.p0, type)
+    }
+  end
+
+  defp try_exla_or_binary(emlx_error) do
+    if Code.ensure_loaded?(EXLA.Backend) do
+      try do
+        Nx.global_default_backend(Nx.BinaryBackend)
+        Nx.Defn.global_default_options(compiler: EXLA)
+        _ = Nx.backend_transfer(Nx.tensor([0.0], type: @guide_gpu_type), EXLA.Backend)
+        smoke_structured_defn!(@guide_gpu_type)
+
+        :exla
+        |> backend_status(:exla, @guide_gpu_type)
+        |> maybe_put_error(:emlx_error, emlx_error)
+      rescue
+        exla_error ->
+          use_binary(Exception.message(exla_error))
+          |> maybe_put_error(:emlx_error, emlx_error)
+      end
+    else
+      use_binary(nil)
+      |> maybe_put_error(:emlx_error, emlx_error)
+    end
+  end
+
+  defp try_emlx_cpu_or_exla_or_binary(emlx_gpu_error) do
+    try do
+      Nx.global_default_backend(@emlx_cpu_backend)
+      Nx.Defn.global_default_options(compiler: EMLX)
+      _ = Nx.backend_transfer(Nx.tensor([0.0], type: @guide_gpu_type), @emlx_cpu_backend)
+      smoke_structured_defn!(@guide_gpu_type)
+
+      :emlx_cpu
+      |> backend_status(:emlx, @guide_gpu_type)
+      |> maybe_put_error(:emlx_error, emlx_gpu_error)
+    rescue
+      emlx_cpu_error ->
+        try_exla_or_binary(emlx_gpu_error)
+        |> maybe_put_error(:emlx_cpu_error, Exception.message(emlx_cpu_error))
+    end
+  end
+
+  defp use_binary(error) do
+    Nx.global_default_backend(Nx.BinaryBackend)
+    Nx.Defn.global_default_options(compiler: Nx.Defn.Evaluator)
+
+    :binary
+    |> backend_status(:evaluator, {:f, 32})
+    |> maybe_put_error(:backend_error, error)
+  end
+
+  defp backend_status(backend, compiler, dtype) do
+    probe = Nx.tensor([0.0], type: dtype)
+    probe_backend = inspect(probe)
+
+    %{
+      backend: backend,
+      compiler: compiler,
+      dtype: dtype,
+      default_backend: Nx.default_backend(),
+      probe_backend: probe_backend,
+      emlx_gpu?: String.contains?(probe_backend, "EMLX.Backend<gpu")
+    }
+  end
+
+  defp maybe_put_error(map, _key, nil), do: map
+  defp maybe_put_error(map, key, error), do: Map.put(map, key, error)
+
+  defp emlx_gpu_backend? do
+    case Nx.default_backend() do
+      {EMLX.Backend, opts} -> Keyword.get(opts, :device) == :gpu
+      _ -> false
+    end
+  end
+
+  defp cast_h(h, type) when is_list(h), do: Enum.map(h, &Nx.as_type(&1, type))
+  defp cast_h(%Nx.Tensor{} = h, type), do: Nx.as_type(h, type)
+
+  defp smoke_structured_defn!(type) do
+    obs = Nx.tensor([1.0, 1.2, 1.4], type: type)
+    f = Nx.tensor([[1.0]], type: type)
+    h = Nx.tensor([[1.0], [1.0], [1.0]], type: type)
+    q = Nx.tensor([[0.1]], type: type)
+    r = Nx.tensor(0.2, type: type)
+    x0 = Nx.tensor([1.0], type: type)
+    p0 = Nx.tensor([[1.0]], type: type)
+    key = Nx.Random.key(123)
+
+    {filtered_xs, filtered_ps} =
+      BstsNx.KalmanFilter.filter_defn_multi(obs, f, h, q, r, x0, p0)
+
+    {sampled_states, _key} =
+      BstsNx.Smoother.simulate_from_filtered_defn_matrix(filtered_xs, filtered_ps, f, q, key)
+
+    _ = sampled_states |> Nx.sum() |> Nx.to_number()
+    :ok
   end
 end
 
@@ -544,7 +659,7 @@ Guide.seed!(2026)
 Guide.setup_backend!()
 ```
 
-## Operational first: a bounded-latency answer
+### Operational first: a bounded-latency answer
 
 ```elixir
 ops_obs =
@@ -627,9 +742,9 @@ marker is the gap the attribution layer turns into incremental lift.
 
 ---
 
-# Part I: The Problem
+## Part I: The Problem
 
-## 1. Why raw data lies to you
+### 1. Why raw data lies to you
 
 Every time series is a mixture of signal and noise. Your eyes are pattern-matching machines —
 they see trends and spikes even in pure random data. Before we can do anything useful, we need
@@ -667,7 +782,7 @@ much noise is left over. If the model can explain the data well using simple str
 remaining variation is probably noise. If a sudden change *can't* be explained by the model's
 baseline, it's probably a real effect.
 
-## 2. The core idea: decompose, project, compare
+### 2. The core idea: decompose, project, compare
 
 BSTS solves problems by following three steps, regardless of the domain:
 
@@ -685,17 +800,18 @@ that warrants investigation.
 
 The entire library is variations on this theme. Let's build the machinery.
 
-## 3. A world where we know the truth
+### 3. A world where we know the truth
 
 In real life, you never know the true causal effect — that's why you need the model. But how
 do you know the model works? You test it on **synthetic data** where you control every parameter.
 If the model can't recover a known answer, you can't trust it on real data.
 
 We'll build a synthetic world that mimics 6 days of hourly web traffic with:
-- A **baseline** with an intercept (~80 sessions/hour), slight upward trend, and daily seasonality
-- **TV spots** that air during hours 97-144 (the last 2 days)
-- **Control series** — correlated but unaffected time series (like organic search)
-- **Gaussian noise** with known standard deviation
+
+* A **baseline** with an intercept (~80 sessions/hour), slight upward trend, and daily seasonality
+* **TV spots** that air during hours 97-144 (the last 2 days)
+* **Control series** — correlated but unaffected time series (like organic search)
+* **Gaussian noise** with known standard deviation
 
 We split into a **pre-period** (hours 1-96, no TV) and a **post-period** (hours 97-144, campaign running).
 
@@ -787,13 +903,13 @@ Notice spots A & B overlap (hours 2-5), and spots C & D overlap (hours 28-31). T
 is what makes attribution hard — we can't naively assign the lift during overlapping hours to
 just one spot.
 
-## 4. How marketing effects propagate: adstock and saturation
+### 4. How marketing effects propagate: adstock and saturation
 
 Before diving into the statistical engine, we need to understand two nonlinear transformations
 that make marketing measurement realistic. If you're not working in marketing, these concepts
 still matter — they're examples of how domain knowledge gets encoded into the model.
 
-### Adstock: the carry-over effect
+#### Adstock: the carry-over effect
 
 When a TV spot airs at 8:00 PM, people don't all visit your site at 8:00 PM. Some come
 immediately, some an hour later, some the next morning. **Adstock** spreads a single impulse
@@ -804,7 +920,7 @@ $$\text{adstock}(t) = \text{impulse}(t) + \lambda \cdot \text{adstock}(t-1)$$
 The parameter $\lambda$ (0 to 1) controls how quickly the effect fades. Higher $\lambda$ means
 longer memory.
 
-### Hill saturation: diminishing returns
+#### Hill saturation: diminishing returns
 
 The first ad exposure drives a visit. The fifth exposure drives less. The twentieth, barely
 anything. The **Hill function** compresses the response:
@@ -835,18 +951,19 @@ into our synthetic data generator.
 
 ---
 
-# Part II: The Statistical Engine
+## Part II: The Statistical Engine
 
 We now build the BSTS engine layer by layer. Each section introduces one problem, shows why
 the previous tool can't solve it, and reveals the next tool that can.
 
-## 5. The Kalman filter: tracking a signal through noise
+### 5. The Kalman filter: tracking a signal through noise
 
 **The problem:** You have a noisy time series. You believe there's a slowly-changing underlying
 level, but each observation is corrupted by measurement noise. How do you estimate the true
 level at each time step?
 
 **The intuition:** Think of GPS navigation. Your phone has two sources of information:
+
 1. A **motion model** — based on your speed and direction, it predicts where you should be now
 2. A **satellite reading** — a noisy measurement of where you actually are
 
@@ -863,7 +980,7 @@ The balance between model and data is controlled by the **Kalman gain**, which d
 ratio of process noise ($Q$ — how much the true state can drift) to observation noise
 ($R$ — how noisy your measurements are).
 
-### The state-space equations
+#### The state-space equations
 
 For a simple **local level** model:
 
@@ -919,7 +1036,7 @@ That's the Kalman gain at work.
 """)
 ```
 
-### Compiled version
+#### Compiled version
 
 BstsNx also provides a compiled (`Nx.Defn`) version that JIT-compiles to native code via
 EXLA or EMLX. It produces identical results but runs faster on large datasets:
@@ -935,7 +1052,7 @@ defn_mean = Nx.to_flat_list(xs_defn)
 }
 ```
 
-## 6. The smoother: the power of hindsight
+### 6. The smoother: the power of hindsight
 
 **The problem:** The Kalman filter at hour 50 only knows about hours 1-50. But hours 51-72
 carry information about what the state was at hour 50. Can we use it?
@@ -949,8 +1066,8 @@ If someone asks "who did you suspect at the halfway mark?", your *retrospective*
 pass, it walks *backward* through time, refining each estimate using information from the
 future. The result:
 
-- **Filtered estimate at time $t$**: $p(x_t \mid y_1, \ldots, y_t)$ — uses past + present
-- **Smoothed estimate at time $t$**: $p(x_t \mid y_1, \ldots, y_T)$ — uses *everything*
+* **Filtered estimate at time $t$**: $p(x_t \mid y_1, \ldots, y_t)$ — uses past + present
+* **Smoothed estimate at time $t$**: $p(x_t \mid y_1, \ldots, y_T)$ — uses *everything*
 
 Smoothed estimates always have equal or lower uncertainty. The improvement is greatest in
 the middle of the series.
@@ -992,7 +1109,7 @@ Kino.Markdown.new("""
 """)
 ```
 
-## 7. The Gibbs sampler: honest about what we don't know
+### 7. The Gibbs sampler: honest about what we don't know
 
 **The problem:** The Kalman filter and smoother give us the posterior over *states* — but only
 if we know the true variance parameters $Q$ and $R$. In practice, we don't. We want the **joint
@@ -1015,7 +1132,7 @@ accuracy. You know neither.
 The first $N$ iterations (**burn-in**) are discarded because the chain may start far from the
 high-probability region.
 
-### 7.1 Running the scalar sampler
+#### 7.1 Running the scalar sampler
 
 ```elixir
 pre_obs = Enum.take(obs, 96)
@@ -1041,13 +1158,13 @@ Guide.series_plot(
 oscillating around a stable mean, not drifting or getting stuck. If a chain trends upward or
 stays flat for long stretches, the sampler hasn't converged.
 
-### 7.2 Multiple chains and convergence diagnostics
+#### 7.2 Multiple chains and convergence diagnostics
 
 A single chain can get stuck in a local mode. Running **multiple chains** from different
 starting points lets you check:
 
-- **R-hat**: Compares within-chain to between-chain variance. Should be < 1.05.
-- **ESS (Effective Sample Size)**: MCMC samples are autocorrelated, so 100 draws ≠ 100
+* **R-hat**: Compares within-chain to between-chain variance. Should be < 1.05.
+* **ESS (Effective Sample Size)**: MCMC samples are autocorrelated, so 100 draws ≠ 100
   independent samples. ESS estimates how many independent samples you effectively have.
 
 ```elixir
@@ -1086,7 +1203,7 @@ Kino.Markdown.new("""
 """)
 ```
 
-### 7.3 Structured models: trend + seasonality + controls
+#### 7.3 Structured models: trend + seasonality + controls
 
 The scalar model treats the baseline as a single drifting level. Real data has *structure*:
 daily cycles, weekly patterns, correlations with external signals. A **structured state-space
@@ -1094,7 +1211,7 @@ model** decomposes the baseline into interpretable components that you snap toge
 building blocks.
 
 ```elixir
-regressors = controls |> Nx.tensor() |> Nx.transpose()
+regressors = controls |> Guide.tensor() |> Nx.transpose()
 
 # Build each component as a self-contained state-space model
 trend_spec =
@@ -1113,6 +1230,7 @@ structured_spec =
   trend_spec
   |> Components.compose_specs(seasonal_spec)
   |> Components.compose_specs(regression_spec)
+  |> Guide.cast_spec()
 
 %{
   total_state_dimension: Nx.axis_size(structured_spec.f, 0),
@@ -1124,8 +1242,8 @@ structured_spec =
 ```elixir
 # Run the structured Gibbs sampler (lighter settings for interactivity)
 structured_samples =
-  GibbsSampler.sample_structured(obs, structured_spec, 6,
-    burn_in: 3, seed: 77
+  GibbsSampler.sample_structured(obs, structured_spec, 2,
+    burn_in: 0, seed: 77
   )
 
 Kino.Markdown.new("""
@@ -1139,9 +1257,9 @@ trend, seasonality, *and* the relationship with control series.
 
 ---
 
-# Part III: Answering Causal Questions
+## Part III: Answering Causal Questions
 
-## 8. The counterfactual: what would have happened?
+### 8. The counterfactual: what would have happened?
 
 This is the heart of BSTS. The algorithm for causal inference:
 
@@ -1153,7 +1271,7 @@ This is the heart of BSTS. The algorithm for causal inference:
 Because the counterfactual comes from posterior draws (many possible trajectories), the effect
 is automatically a *distribution* with uncertainty bounds.
 
-### 8.1 Simple causal impact (local-level model)
+#### 8.1 Simple causal impact (local-level model)
 
 The simplest version uses the scalar sampler with no trend, no seasonality, no controls.
 Surprisingly decent as a starting point, but it can't distinguish intervention effects from
@@ -1187,7 +1305,7 @@ The blue band is the counterfactual — the model's estimate of what would have 
 TV. Where the red line (actual) rises above the band, the model attributes the difference to
 the intervention. The width of the band is the model's uncertainty.
 
-### 8.2 Structured causal impact with controls
+#### 8.2 Structured causal impact with controls
 
 Now we use the full structured model. The controls are critical: if organic search also rose
 during the post-period for unrelated reasons, the regression component absorbs that, preventing
@@ -1197,7 +1315,7 @@ it from being misattributed to TV.
 impact_structured =
   CausalImpact.estimate_structured(
     obs, pre_period, post_period, structured_spec,
-    num_samples: 10, burn_in: 5, seed: 202
+    num_samples: 2, burn_in: 0, seed: 202
   )
 
 summary_structured = CausalImpact.summary(impact_structured)
@@ -1207,7 +1325,7 @@ Guide.spaghetti_plot(
   impact_structured.counterfactual,
   title: "Each line is one possible 'what would have happened' — the posterior is a distribution",
   actual: post_actual,
-  max_draws: 10
+  max_draws: 2
 )
 ```
 
@@ -1216,7 +1334,7 @@ The spaghetti plot shows the *actual draws* — each thin line is one possible c
 reality. This makes it viscerally clear that we're not computing a single answer but reasoning
 over many possible worlds.
 
-### 8.3 How close did we get to the truth?
+#### 8.3 How close did we get to the truth?
 
 ```elixir
 Kino.Markdown.new("""
@@ -1234,7 +1352,7 @@ for seasonal and trend patterns that the scalar model would conflate with the ef
 """)
 ```
 
-### 8.4 Fast filter-based estimate (no MCMC)
+#### 8.4 Fast filter-based estimate (no MCMC)
 
 For real-time dashboards where speed matters more than full Bayesian uncertainty:
 
@@ -1256,7 +1374,7 @@ Fast enough for monitoring; use MCMC for final reports.
 """)
 ```
 
-## 9. The one-call API: when you just need an answer
+### 9. The one-call API: when you just need an answer
 
 Leadership doesn't want trace plots. They want: "Did it work? By how much? Are we sure?"
 
@@ -1269,7 +1387,7 @@ analysis =
     %{pre_period: pre_period, post_period: post_period},
     seasonality: 24,
     method: :filter,
-    f: 1.0, h: 1.0, q: 0.8, r: 4.0,
+    q: 0.8, r: 4.0,
     x0: List.first(obs), p0: 10.0,
     seed: 42
   )
@@ -1288,7 +1406,7 @@ Kino.Markdown.new("""
 InterventionAnalysis.report(analysis)
 ```
 
-## 10. Attribution: splitting credit fairly
+### 10. Attribution: splitting credit fairly
 
 **The problem:** Four TV spots aired. The total lift is known. But which spots deserve credit?
 Spots A & B overlap, and spots C & D overlap. Naive heuristics (first-touch, last-touch,
@@ -1299,11 +1417,12 @@ spot is its average marginal contribution across *all possible orderings* of spo
 coalition. It satisfies fairness axioms: if a spot contributes nothing, it gets nothing; if two
 spots are interchangeable, they get equal shares; and the shares sum exactly to the total.
 
-### Why Shapley works: a 2-player example
+#### Why Shapley works: a 2-player example
 
 Imagine just spots A and B. There are two orderings:
-- A joins first, then B: A's contribution = value({A}). B's contribution = value({A,B}) - value({A}).
-- B joins first, then A: B's contribution = value({B}). A's contribution = value({A,B}) - value({B}).
+
+* A joins first, then B: A's contribution = value({A}). B's contribution = value({A,B}) - value({A}).
+* B joins first, then A: B's contribution = value({B}). A's contribution = value({A,B}) - value({B}).
 
 Shapley(A) = average of A's marginal contributions = ½[value({A}) + value({A,B}) - value({B})]
 
@@ -1359,7 +1478,7 @@ A near-zero gap confirms the Shapley values sum to the total — no credit is cr
 Kino.DataTable.new(attr_posterior.attributions)
 ```
 
-## 11. The full pipeline: one call to rule them all
+### 11. The full pipeline: one call to rule them all
 
 `Pipeline.run/6` chains structured causal impact + Shapley attribution in a single call.
 This is the production entrypoint.
@@ -1385,13 +1504,13 @@ Kino.Markdown.new("""
 
 ---
 
-# Part IV: Five Domains, One Engine
+## Part IV: Five Domains, One Engine
 
 The same decompose-project-compare pattern applies across completely different fields. Each
 case study below is self-contained — it generates its own data, runs the analysis, and shows
 the result. The underlying engine is identical; only the *framing* changes.
 
-## 12. Case Study: Did our email campaign drive conversions?
+### 12. Case Study: Did our email campaign drive conversions?
 
 **Context:** You run a 2-week email campaign for an e-commerce site. Daily conversion counts
 are available for 30 days before and 14 days during the campaign. Did the campaign actually
@@ -1464,7 +1583,7 @@ The true effect was #{true_campaign_effect} conversions/day × #{n_post_days} da
 """)
 ```
 
-## 13. Case Study: How much ice cream should we stock?
+### 13. Case Study: How much ice cream should we stock?
 
 **Context:** You manage inventory for an ice cream distributor. You have 120 days of historical
 demand data and need to forecast the next 14 days to decide how much to order. Getting the
@@ -1542,7 +1661,7 @@ uncertainty is built into the decision, not bolted on as an afterthought.
 """)
 ```
 
-## 14. Case Study: Is this server spike an anomaly?
+### 14. Case Study: Is this server spike an anomaly?
 
 **Context:** You monitor a web service. You have 96 hours of normal baseline traffic, then
 a new 24-hour monitoring window opens. Two genuine anomalies occur — a traffic spike at
@@ -1616,7 +1735,7 @@ anomalies should stand out clearly.
 Kino.DataTable.new(flagged_indices)
 ```
 
-## 15. Case Study: Did the new speed limit reduce accidents?
+### 15. Case Study: Did the new speed limit reduce accidents?
 
 **Context:** A city lowered speed limits on major roads starting in month 37. You have monthly
 accident counts for 60 months total (36 before, 24 after). This is a classic **interrupted time
@@ -1693,7 +1812,7 @@ accidents per month × #{n_post_months} months = #{abs(true_policy_effect * n_po
 """)
 ```
 
-## 16. Case Study: Which TV spots earned their airtime?
+### 16. Case Study: Which TV spots earned their airtime?
 
 **Context:** This brings together everything from Parts II-III in a single production-ready
 call. Four TV spots aired during a championship game. Leadership wants to know: what was the
@@ -1741,9 +1860,9 @@ ensuring fair attribution even when air windows overlap.
 
 ---
 
-# Part V: Trust But Verify
+## Part V: Trust But Verify
 
-## 17. Covariate selection: choosing the right controls
+### 17. Covariate selection: choosing the right controls
 
 Including irrelevant controls adds noise; including too many leads to overfitting. Covariate
 selection screens candidates by their correlation with the target during the pre-period.
@@ -1770,7 +1889,7 @@ corr_rows =
 Kino.DataTable.new(corr_rows)
 ```
 
-## 18. Breaking your own results: five diagnostic checks
+### 18. Breaking your own results: five diagnostic checks
 
 Before publishing any causal estimate, try to break it. These five checks catch the most
 common failure modes:
@@ -1855,7 +1974,7 @@ Kino.Markdown.new("""
 """)
 ```
 
-### Calibration: can we recover a known lift?
+#### Calibration: can we recover a known lift?
 
 The ultimate sanity check. Generate completely fresh data with a known lift, run the full
 estimator, and check whether the credible interval covers the truth.
@@ -1889,9 +2008,9 @@ A well-calibrated method should cover the true value ~95% of the time when using
 
 ---
 
-# Part VI: Forecasting Beyond Causal Inference
+## Part VI: Forecasting Beyond Causal Inference
 
-## 19. Bayesian forecasting with credible intervals
+### 19. Bayesian forecasting with credible intervals
 
 Causal impact asks "what *would have* happened?" Forecasting asks "what *will* happen?" Same
 engine, different direction. The posterior draws from the MCMC sampler each produce a different
@@ -1940,7 +2059,7 @@ Well-calibrated 95% intervals should contain ~95% of actual values.
 """)
 ```
 
-### AR baseline comparison
+#### AR baseline comparison
 
 For context, here's a simpler autoregressive (AR) model. AR(p) predicts the next value as a
 weighted combination of the p most recent values. No structural decomposition, no seasonality
@@ -1972,9 +2091,9 @@ is the dominant signal.
 
 ---
 
-# Epilogue
+## Epilogue
 
-## 20. When to use what: a decision guide
+### 20. When to use what: a decision guide
 
 ```elixir
 Kino.Markdown.new("""
@@ -1996,9 +2115,14 @@ Kino.Markdown.new("""
 ### How complexity flows
 
 ```
+
 Components ──► ModelSpec ──► GibbsSampler ──► CausalImpact ──► Pipeline
-    │              │              │               │               │
-    └──► compose   └──► specs     └──► posterior   └──► effect     └──► attribution
+
+```
+│              │              │               │               │
+└──► compose   └──► specs     └──► posterior   └──► effect     └──► attribution
+```
+
 ```
 
 Every high-level API ultimately calls the same statistical engine. Understanding
@@ -2007,7 +2131,7 @@ domain application (Part IV).
 """)
 ```
 
-## 21. API reference
+### 21. API reference
 
 ```elixir
 modules = [
@@ -2032,7 +2156,7 @@ rows =
 Kino.DataTable.new(rows)
 ```
 
-## 22. Exercises for the curious
+### 22. Exercises for the curious
 
 1. **Sensitivity analysis**: Change `config.effect.coefficient` from 12.0 to 5.0. How does
    the causal impact estimate and its uncertainty change? At what effect size does the signal
@@ -2055,24 +2179,24 @@ Kino.DataTable.new(rows)
 6. **Calibration sweep**: Run `known_lift_injection` with true lifts of 10, 20, 40, 80, 160.
    Plot coverage vs. true lift. Is the method better calibrated for large or small effects?
 
-## 23. What you've learned
+### 23. What you've learned
 
-| Section | Concept | Key insight |
-|---------|---------|-------------|
-| 1-2 | The problem | Raw data is signal + noise; your eyes can't tell them apart |
-| 3 | Synthetic data | Test on known truth before trusting on real data |
-| 4 | Adstock + saturation | Marketing effects carry over and diminish — domain knowledge matters |
-| 5 | Kalman filter | Optimal online blending of model prediction and noisy observation |
-| 6 | RTS smoother | Hindsight (backward pass) always improves estimates |
-| 7 | Gibbs sampler | When you don't know the parameters, alternate: sample states, then sample parameters |
-| 8-9 | Causal impact | Fit pre-period → project counterfactual → subtract from actual |
-| 10-11 | Shapley attribution | Fair credit allocation across overlapping interventions |
-| 12 | Marketing lift | Same engine, marketing framing |
-| 13 | Demand forecasting | Posterior intervals → safety stock that accounts for uncertainty |
-| 14 | Anomaly detection | Kalman prediction errors as calibrated anomaly scores |
-| 15 | Policy evaluation | Interrupted time series = causal impact for policy |
-| 16 | TV attribution | Full pipeline: model → counterfactual → Shapley → per-spot credit |
-| 17-18 | Validation | Placebo tests, coverage checks, calibration — break your results before publishing |
+| Section | Concept              | Key insight                                                                          |
+| ------- | -------------------- | ------------------------------------------------------------------------------------ |
+| 1-2     | The problem          | Raw data is signal + noise; your eyes can't tell them apart                          |
+| 3       | Synthetic data       | Test on known truth before trusting on real data                                     |
+| 4       | Adstock + saturation | Marketing effects carry over and diminish — domain knowledge matters               |
+| 5       | Kalman filter        | Optimal online blending of model prediction and noisy observation                    |
+| 6       | RTS smoother         | Hindsight (backward pass) always improves estimates                                  |
+| 7       | Gibbs sampler        | When you don't know the parameters, alternate: sample states, then sample parameters |
+| 8-9     | Causal impact        | Fit pre-period → project counterfactual → subtract from actual                   |
+| 10-11   | Shapley attribution  | Fair credit allocation across overlapping interventions                              |
+| 12      | Marketing lift       | Same engine, marketing framing                                                       |
+| 13      | Demand forecasting   | Posterior intervals → safety stock that accounts for uncertainty                   |
+| 14      | Anomaly detection    | Kalman prediction errors as calibrated anomaly scores                                |
+| 15      | Policy evaluation    | Interrupted time series = causal impact for policy                                   |
+| 16      | TV attribution       | Full pipeline: model → counterfactual → Shapley → per-spot credit              |
+| 17-18   | Validation           | Placebo tests, coverage checks, calibration — break your results before publishing |
 
 The unifying idea: **decompose** the series into structure + noise, **project** the structure
 forward to build a counterfactual or forecast, and **compare** the projection against reality

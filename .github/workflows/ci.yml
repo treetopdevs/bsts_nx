@@ -23,12 +23,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - elixir: "1.14"
-            otp: "25"
-          - elixir: "1.16"
-            otp: "26"
-          - elixir: "1.18"
-            otp: "27"
           - elixir: "1.19"
             otp: "28"
 
@@ -108,7 +102,7 @@ jobs:
         run: mix test test/structured_performance_smoke_test.exs test/utils_safe_solve_test.exs
 
   quality:
-    name: Quality (format + docs)
+    name: Quality (Elixir 1.19 / OTP 28)
     runs-on: ubuntu-latest
 
     env:
@@ -121,16 +115,16 @@ jobs:
       - name: Setup Elixir + OTP
         uses: erlef/setup-beam@v1
         with:
-          elixir-version: "1.18"
-          otp-version: "27"
+          elixir-version: "1.19"
+          otp-version: "28"
 
       - name: Cache deps
         uses: actions/cache@v4
         with:
           path: deps
-          key: ${{ runner.os }}-mix-quality-${{ hashFiles('**/mix.lock') }}
+          key: ${{ runner.os }}-mix-quality-1.19-28-${{ hashFiles('**/mix.lock') }}
           restore-keys: |
-            ${{ runner.os }}-mix-quality-
+            ${{ runner.os }}-mix-quality-1.19-28-
 
       - name: Install Hex/Rebar
         run: |

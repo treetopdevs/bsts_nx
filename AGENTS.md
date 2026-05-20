@@ -3,7 +3,7 @@
 ## Project Structure & Module Organization
 - `lib/` holds the library source, with the main namespace in `lib/bsts_nx.ex` and feature modules under `lib/bsts_nx/` (e.g., `kalman_filter.ex`, `gibbs_sampler.ex`, `causal_impact.ex`).
 - `test/` contains ExUnit tests, plus `test/test_helper.exs` for test bootstrapping.
-- `mix.exs` defines the application, version, and dependencies (Nx with optional EXLA).
+- `mix.exs` defines the application, version, and dependencies (Nx with optional EMLX/EXLA backends).
 
 ## Build, Test, and Development Commands
 - `mix deps.get`: fetch dependencies.
@@ -13,6 +13,7 @@
 - `mix test --exclude external`: skip tests tagged `@moduletag :external`.
 - `mix test --only external`: run only the external tests.
 - `mix format`: apply standard Elixir formatting (no custom formatter config is present).
+- `mix bench.structured_backends`: compare structured sampler behavior across BinaryBackend, EXLA, and EMLX where available.
 
 ## Coding Style & Naming Conventions
 - Use idiomatic Elixir style and rely on `mix format` for consistent 2-space indentation.
@@ -34,4 +35,5 @@
   ```elixir
   config :nx, :default_backend, EXLA.Backend
   ```
+- EMLX is also optional. Structured EMLX GPU workflows are currently limited by missing linalg primitive support, so use EMLX CPU, EXLA, or BinaryBackend as practical fallback paths.
 - This repository does not include a `config/` directory; application-level config lives in the host app.

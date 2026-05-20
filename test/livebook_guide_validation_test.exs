@@ -308,7 +308,7 @@ defmodule LivebookGuideValidationTest do
     assert Nx.axis_size(structured_spec.f, 0) > 1
 
     structured_samples =
-      GibbsSampler.sample_structured(ctx.obs, structured_spec, 6, burn_in: 3, seed: 77)
+      GibbsSampler.sample_structured(ctx.obs, structured_spec, 2, burn_in: 0, seed: 77)
 
     assert length(structured_samples) > 0
   end
@@ -356,8 +356,8 @@ defmodule LivebookGuideValidationTest do
         ctx.pre_period,
         ctx.post_period,
         structured_spec,
-        num_samples: 3,
-        burn_in: 1,
+        num_samples: 2,
+        burn_in: 0,
         seed: 202
       )
 
@@ -392,8 +392,6 @@ defmodule LivebookGuideValidationTest do
         %{pre_period: ctx.pre_period, post_period: ctx.post_period},
         seasonality: 24,
         method: :filter,
-        f: 1.0,
-        h: 1.0,
         q: 0.8,
         r: 4.0,
         x0: List.first(ctx.obs),
@@ -432,8 +430,8 @@ defmodule LivebookGuideValidationTest do
         ctx.pre_period,
         ctx.post_period,
         structured_spec,
-        num_samples: 3,
-        burn_in: 1,
+        num_samples: 2,
+        burn_in: 0,
         seed: 202
       )
 

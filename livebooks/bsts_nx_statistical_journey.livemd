@@ -36,9 +36,9 @@ project_root =
 
 Mix.install(
   [
-    {:nx, "~> 0.11.0"},
-    {:emlx, "~> 0.2.0"},
-    {:exla, "~> 0.11.0"},
+    {:nx, "~> 0.12.0"},
+    {:emlx, "~> 0.3.0"},
+    {:exla, "~> 0.12.0"},
     {:xla, "~> 0.10.0"},
     {:bsts_nx, path: project_root},
     {:kino_vega_lite, "~> 0.1.13"}
@@ -50,8 +50,9 @@ Nx.global_default_backend(Nx.BinaryBackend)
 
 IO.puts("Loaded bsts_nx from: #{inspect(project_root || :github)}")
 IO.puts("Nx default backend: #{inspect(Nx.default_backend())}")
-IO.puts("EMLX is preferred for this notebook; EXLA is the fallback compiled path.")
-IO.puts("Notebook revision: 2026-03-01 (EMLX-first, safe_to_number guard)")
+IO.puts("EMLX CPU, EXLA, and BinaryBackend are practical fallback paths for structured sections.")
+IO.puts("EMLX GPU structured paths may fall back when required linalg primitives are unavailable.")
+IO.puts("Notebook revision: 2026-05-20 (Nx 0.12 backend fallback guidance)")
 IO.puts("GibbsSampler source: #{BstsNx.GibbsSampler.module_info(:compile)[:source]}")
 
 alias BstsNx.{
@@ -157,7 +158,7 @@ defmodule NotebookHelpers do
       base_lines = [
         "Current Nx backend: #{inspect(result.default_backend)}",
         "EMLX status: #{inspect(result.emlx_status)}",
-        "Structured sections (7.2/9.2) may be slower without a compiled backend."
+        "Structured sections (7.2/9.2) may be slower without a supported compiled backend."
       ]
 
       lines =
@@ -229,7 +230,7 @@ defmodule NotebookHelpers do
       base_lines = [
         "Current Nx backend: #{inspect(result.default_backend)}",
         "Process usage: #{result.process_count}/#{result.process_limit} (headroom #{result.headroom})",
-        "Structured sections (7.2/9.2) will be much slower without EXLA."
+        "Structured sections (7.2/9.2) may be much slower without EXLA or another supported compiled backend."
       ]
 
       lines =
@@ -336,7 +337,7 @@ defmodule NotebookHelpers do
       2) Reopen this notebook from disk:
          #{Path.join([project_root, "livebooks", "bsts_nx_statistical_journey.livemd"])}
       3) Run setup cell again and confirm:
-         Notebook revision: 2026-03-01 (EMLX-first, safe_to_number guard)
+         Notebook revision: 2026-05-20 (Nx 0.12 backend fallback guidance)
       """
     end
 
@@ -989,7 +990,7 @@ This composability is the engineering power of BSTS: you snap together component
 
 The structured sampler extends the scalar Gibbs sampler to handle the multi-dimensional state. Instead of sampling a single Q, it resamples each diagonal entry of Q independently (each component's noise variance). The `q_specs` in the model spec tell the sampler which state dimensions map to which variance parameter and what prior to use.
 
-For interactive Livebook runs on `Nx.BinaryBackend`, we intentionally keep this section lighter (fewer samples). For larger structured models, prefer EMLX (with EXLA fallback) for meaningful speedups.
+For interactive Livebook runs on `Nx.BinaryBackend`, we intentionally keep this section lighter (fewer samples). For larger structured models, prefer a supported compiled path such as EMLX CPU or EXLA. EMLX GPU structured runs are currently limited by missing linalg primitive coverage, so use `mix bench.structured_backends` in the repo to compare the available backend behavior on your machine.
 
 ```elixir
 regressors = controls_hourly |> Nx.tensor() |> Nx.transpose()

@@ -18,6 +18,7 @@ mix test --only external            # Run tests tagged @moduletag :external
 mix test --include slow             # Include slow tests
 mix format            # Format all code
 mix format --check-formatted        # Check formatting without modifying
+mix bench.structured_backends       # Compare structured sampler backend behavior
 ```
 
 ## Architecture
@@ -76,7 +77,13 @@ mix format --check-formatted        # Check formatting without modifying
 
 ## Dependencies
 
-- `nx ~> 0.11` — Core numerical computing
-- `exla ~> 0.6` (optional) — JIT compilation and hardware acceleration
+- Elixir `~> 1.19`
+- `nx ~> 0.12.0` — Core numerical computing
+- `emlx ~> 0.3.0` (optional) — MLX-backed CPU/GPU execution
+- `exla ~> 0.12.0` (optional) — JIT compilation and hardware acceleration
 - `stream_data ~> 1.0` (test/dev) — Property-based testing
 - `ex_doc ~> 0.34` (dev) — Documentation generation
+
+Structured EMLX GPU runs are currently limited by missing linalg primitive
+coverage. Treat EMLX CPU, EXLA, and BinaryBackend as the practical fallback
+paths until those GPU primitives are available.

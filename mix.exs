@@ -37,9 +37,9 @@ defmodule BstsNx.MixProject do
   defp deps do
     [
       # Nx provides numerical computing primitives used throughout the library.
-      {:nx, "~> 0.11.0"},
-      {:emlx, "~> 0.2.0", optional: true},
-      {:exla, "~> 0.11.0", optional: true},
+      {:nx, "~> 0.12.0"},
+      {:emlx, "~> 0.3.0", optional: true},
+      {:exla, "~> 0.12.0", optional: true},
       {:xla, "~> 0.10.0", optional: true},
       {:ex_doc, "~> 0.34", only: :dev, runtime: false},
       {:stream_data, "~> 1.0", only: [:test, :dev]}
@@ -182,7 +182,8 @@ defmodule BstsNx.MixProject do
 
   defp aliases do
     [
-      "bench.optimize": ["run bench/optimize_plan.exs"]
+      "bench.optimize": ["run bench/optimize_plan.exs"],
+      "bench.structured_backends": ["run bench/structured_backend_benchmark.exs"]
     ]
   end
 end

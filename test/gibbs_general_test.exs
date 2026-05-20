@@ -4,6 +4,8 @@ defmodule BstsNx.GibbsGeneralTest do
 
   alias BstsNx.GibbsSampler
   alias BstsNx.KalmanFilter
+  alias BstsNx.Distributions
+  alias BstsNx.Smoother
 
   test "sample_general with constant h=1 matches basic sampler" do
     # Simple local level model: should produce similar results to sample/7
@@ -78,6 +80,33 @@ defmodule BstsNx.GibbsGeneralTest do
         structured_xs |> Nx.reshape({length(observations)}) |> Nx.to_flat_list(),
         1.0e-5
       )
+    end)
+  end
+
+  test "sample_general matches the compiled scalar filter plus smoother defn iteration" do
+    Nx.with_default_backend(Nx.BinaryBackend, fn ->
+      observations = [1.25, 1.55, 1.35, 1.9, 2.2, 2.05]
+      h_values = [1.0, 1.15, 0.95, 1.05, 1.2, 0.9]
+
+      opts = [
+        initial_state: 0.5,
+        initial_cov: 1.25,
+        process_var: 0.2,
+        obs_var: 0.7,
+        prior_shape: 2.0,
+        prior_scale: 1.5,
+        burn_in: 1,
+        thin: 2,
+        key: Nx.Random.key(2026)
+      ]
+
+      expected =
+        sample_general_via_compiled_smoother(observations, 0.92, h_values, 3, opts)
+
+      actual =
+        GibbsSampler.sample_general(observations, 0.92, h_values, 3, opts)
+
+      assert_samples_close(actual, expected, 1.0e-7)
     end)
   end
 
@@ -232,4 +261,155 @@ defmodule BstsNx.GibbsGeneralTest do
       assert_in_delta left_value, right_value, delta
     end)
   end
+
+  defp sample_general_via_compiled_smoother(observations, f, h_values, num_samples, opts) do
+    burn_in = Keyword.get(opts, :burn_in, 0)
+    thin = Keyword.get(opts, :thin, 1)
+    total_iters = burn_in + num_samples * thin
+    prior_shape = Keyword.get(opts, :prior_shape, 1.0)
+    prior_scale = Keyword.get(opts, :prior_scale, 1.0)
+
+    f_t = f64_tensor(f)
+    x0 = f64_tensor(Keyword.get(opts, :initial_state, 0.0))
+    p0 = f64_tensor(Keyword.get(opts, :initial_cov, 1.0))
+    q0 = f64_tensor(Keyword.get(opts, :process_var, 1.0))
+    r0 = f64_tensor(Keyword.get(opts, :obs_var, 1.0))
+    key = Keyword.fetch!(opts, :key)
+
+    obs_tensor = Nx.tensor(observations, type: {:f, 64})
+    h_tensor = Nx.tensor(h_values, type: {:f, 64})
+    obs_present_mask = Nx.equal(obs_tensor, obs_tensor)
+    t_steps = obs_present_mask |> Nx.sum() |> Nx.to_number() |> round()
+    num_diffs = max(length(observations) - 1, 0)
+
+    {_, _, samples_acc, _key_acc} =
+      Enum.reduce(1..total_iters, {q0, r0, [], key}, fn iter, {q_prev, r_prev, acc, key_prev} ->
+        {filtered_xs, filtered_ps} =
+          KalmanFilter.filter_defn(obs_tensor, f_t, h_tensor, q_prev, r_prev, x0, p0)
+
+        {_smoothed_xs, _smoothed_ps, sampled_xs, key_after_smooth} =
+          Smoother.rts_and_simulate_defn(filtered_xs, filtered_ps, f_t, q_prev, key_prev)
+
+        process_ss = process_sum_of_squares(sampled_xs, f_t)
+        obs_ss = obs_sum_of_squares(obs_tensor, sampled_xs, h_tensor, obs_present_mask)
+
+        {q_sample, r_sample, next_key} =
+          resample_variances(
+            key_after_smooth,
+            prior_shape,
+            prior_scale,
+            {process_ss, num_diffs},
+            {obs_ss, t_steps}
+          )
+
+        acc =
+          if iter > burn_in and rem(iter - burn_in, thin) == 0 do
+            [
+              %{
+                states: scalar_tensor_list(sampled_xs),
+                state_covs: scalar_tensor_list(filtered_ps),
+                process_var: q_sample,
+                obs_var: r_sample
+              }
+              | acc
+            ]
+          else
+            acc
+          end
+
+        {q_sample, r_sample, acc, next_key}
+      end)
+
+    Enum.reverse(samples_acc)
+  end
+
+  defp f64_tensor(%Nx.Tensor{} = tensor), do: Nx.as_type(tensor, {:f, 64})
+  defp f64_tensor(value), do: Nx.tensor(value, type: {:f, 64})
+
+  defp process_sum_of_squares(xs, f_t) do
+    t = Nx.axis_size(xs, 0)
+
+    if t < 2 do
+      0.0
+    else
+      prev = Nx.slice(xs, [0], [t - 1])
+      curr = Nx.slice(xs, [1], [t - 1])
+      diffs = Nx.subtract(curr, Nx.multiply(f_t, prev))
+
+      diffs
+      |> Nx.multiply(diffs)
+      |> Nx.sum()
+      |> Nx.to_number()
+    end
+  end
+
+  defp obs_sum_of_squares(obs_tensor, xs, h_tensor, obs_present_mask) do
+    diffs = Nx.subtract(obs_tensor, Nx.multiply(h_tensor, xs))
+    squared = Nx.multiply(diffs, diffs)
+
+    obs_present_mask
+    |> Nx.select(squared, 0.0)
+    |> Nx.sum()
+    |> Nx.to_number()
+  end
+
+  defp resample_variances(
+         key,
+         prior_shape,
+         prior_scale,
+         {process_ss, num_diffs},
+         {obs_ss, t_steps}
+       ) do
+    shape_q = prior_shape + num_diffs / 2
+    scale_q = prior_scale + process_ss / 2
+    shape_r = prior_shape + t_steps / 2
+    scale_r = prior_scale + obs_ss / 2
+
+    {samples, next_key} =
+      Distributions.inv_gamma_sample_defn(
+        Nx.tensor([shape_q, shape_r], type: {:f, 64}),
+        Nx.tensor([scale_q, scale_r], type: {:f, 64}),
+        key
+      )
+
+    q_sample = samples |> Nx.slice([0], [1]) |> Nx.squeeze(axes: [0])
+    r_sample = samples |> Nx.slice([1], [1]) |> Nx.squeeze(axes: [0])
+
+    {q_sample, r_sample, next_key}
+  end
+
+  defp scalar_tensor_list(tensor) do
+    tensor
+    |> Nx.to_batched(1)
+    |> Enum.map(&Nx.squeeze(&1, axes: [0]))
+  end
+
+  defp assert_samples_close(actual, expected, delta) do
+    assert length(actual) == length(expected)
+
+    Enum.zip(actual, expected)
+    |> Enum.each(fn {actual_sample, expected_sample} ->
+      assert_all_close(
+        tensor_numbers(actual_sample.states),
+        tensor_numbers(expected_sample.states),
+        delta
+      )
+
+      assert_all_close(
+        tensor_numbers(actual_sample.state_covs),
+        tensor_numbers(expected_sample.state_covs),
+        delta
+      )
+
+      assert_in_delta Nx.to_number(actual_sample.process_var),
+                      Nx.to_number(expected_sample.process_var),
+                      delta
+
+      assert_in_delta Nx.to_number(actual_sample.obs_var),
+                      Nx.to_number(expected_sample.obs_var),
+                      delta
+    end)
+  end
+
+  defp tensor_numbers(tensors), do: Enum.map(tensors, &Nx.to_number/1)
 end

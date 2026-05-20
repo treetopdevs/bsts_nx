@@ -25,7 +25,7 @@ This section is the tracker of record for completion status.
 
 ### Tier Snapshot
 
-- [~] Tier 1: Mostly complete
+- [~] Tier 1: Mostly complete; 1A-1D, 1F, and 1G are complete, while 1E remains partial
 - [~] Tier 2: Partial
 - [~] Tier 3: Mostly complete
 - [~] Tier 4: Mostly complete
@@ -42,15 +42,15 @@ These changes target code that runs `iterations × T` times (thousands to millio
 ### 1A. Vectorize sum-of-squares in GibbsSampler scalar path
 
 **File:** `lib/bsts_nx/gibbs_sampler.ex` (lines 312-315, 1491-1522)
-- Replace `Nx.to_flat_list(sampled_xs)` + Elixir list arithmetic in `process_sum_of_squares` and `obs_sum_of_squares` with defn tensor operations
-- `process_ss_defn`: `diffs = x[1..] - f * x[0..-2]`, then `Nx.sum(diffs * diffs)`
-- `obs_ss_defn`: `diffs = obs - h * states`, then `Nx.sum(diffs * diffs)` (skip NaN entries via mask)
-- Pre-compute missing observation bitmask once before MCMC loop
+- **Status:** Complete. Scalar process and observation sums of squares now use vectorized Nx tensor operations and the missing-observation mask is precomputed before the MCMC loop.
+- `process_sum_of_squares`: `diffs = x[1..] - f * x[0..-2]`, then `Nx.sum(diffs * diffs)`
+- `obs_sum_of_squares`: `diffs = obs - h * states`, then `Nx.sum(diffs * diffs)` with the NaN-derived observation mask
 
 ### 1B. Vectorize structured residual computation
 
 **File:** `lib/bsts_nx/gibbs_sampler.ex` (lines 1271-1303, 1307-1322)
-- `process_residuals_structured`: Replace per-timestep `Nx.to_flat_list(residual)` + `compat_dot(f_t, prev_state)` with:
+- **Status:** Complete. Structured process and observation residuals now operate on stacked state/H tensors with batched Nx operations.
+- `process_residuals_structured` uses:
   ```
   states = Nx.stack(sampled_states)           # {T, state_dim}
   predicted = Nx.dot(states[0:T-1], Nx.transpose(f_t))
@@ -58,7 +58,7 @@ These changes target code that runs `iterations × T` times (thousands to millio
   ss_vec = Nx.sum(residuals², axes: [0])      # {state_dim}
   ```
   Replaces T matrix-vector mults per iteration with 3 tensor ops.
-- `obs_residuals_structured`: Replace per-timestep `Nx.to_number(compat_dot(h_row, x_t))` with batched element-wise multiply + row-sum:
+- `obs_residuals_structured` uses batched element-wise multiply + row-sum:
   ```
   states_t = Nx.stack(sampled_states)         # {T, state_dim}
   h_t = Nx.stack(h_rows)                      # {T, state_dim}
@@ -68,17 +68,17 @@ These changes target code that runs `iterations × T` times (thousands to millio
 ### 1C. Eliminate Nx.to_number(s) in eager Kalman filter
 
 **File:** `lib/bsts_nx/kalman_filter.ex` (line 151)
-- Replace `if abs(Nx.to_number(s)) < 1.0e-15` with `Nx.select(Nx.less(Nx.abs(s), 1.0e-15), ...)` pattern (already used in `filter_defn_vec`)
+- **Status:** Complete. The eager scalar innovation branch now uses `Nx.less`/`Nx.select` instead of host materialization for near-zero checks.
 
 ### 1D. Eliminate Nx.to_number in eager Smoother backward loops
 
 **File:** `lib/bsts_nx/smoother.ex` (lines 517-521, 476-488)
-- In `smoother_gain`: replace `Nx.to_number(p_pred_next)` threshold check with `Nx.select`
-- In `simulate_with_key`: replace `Nx.to_number(cov)` negative check with `Nx.max(cov, 1.0e-12)`
+- **Status:** Complete. `smoother_gain` uses tensor near-zero checks and `simulate_with_key` clamps scalar variances/covariances with tensor operations.
 
 ### 1E. Fast scalar path for inverse-gamma sampling
 
 **File:** `lib/bsts_nx/distributions.ex` (lines 140-186)
+- **Status:** Partial. Scalar inverse-gamma calls have a direct keyed path, but the remaining key-splitting/materialization cleanup still needs a focused pass.
 - Add `when is_number(alpha) and is_number(beta)` guard clause that skips tensor round-trip entirely
 - Fix `Nx.Random.split(key, parts: 2)` → `Nx.Random.split(key)` tuple return (lines 105-107, 126-128, 170-179)
 - Merge `validate_prng_key!` into `rand_state_from_key` to avoid double materialization
@@ -87,18 +87,17 @@ These changes target code that runs `iterations × T` times (thousands to millio
 ### 1F. [NEW] Switch sample_general to use defn filter+smoother for scalar case
 
 **File:** `lib/bsts_nx/gibbs_sampler.ex` (lines 300-344)
-- `sample_general/5` currently uses eager `filter_with_pred` + `Smoother.rts` inside the MCMC loop
-- The compiled `filter_defn` + `rts_defn` paths already exist
-- Switch to: `KalmanFilter.filter_defn` + `Smoother.rts_defn` per iteration, keeping only IG sampling in Erlang
-- Converts O(T) eager Nx ops per filter/smooth pass into two compiled defn calls per iteration
+- **Status:** Complete. `sample_general/5` now runs `KalmanFilter.filter_defn` plus the scalar smoother defn path through `Smoother.rts_and_simulate_defn/5` inside the MCMC loop.
+- The compiled `filter_defn` + scalar smoother defn paths already exist
+- Keeps variance inverse-gamma sampling in Erlang, while the filter and smoother/simulation passes run through compiled defn calls per iteration
+- Added parity-first regression coverage against a manually assembled compiled filter+smoother Gibbs iteration
+- Preserved f64 scalar RTS accumulator types so the smoother defn path stays aligned with the existing public sampler behavior
 - This is the single highest-impact change for the scalar sampler path
 
 ### 1G. [NEW] Normalize H series without O(T) Nx.slice calls
 
 **File:** `lib/bsts_nx/kalman_filter.ex` (lines 393-402)
-- `normalize_h_series/2`: For rank-1 time-varying H, iterates `0..(T-1)` calling `Nx.slice(h, [idx], [1]) |> Nx.squeeze()` per step — T individual kernel dispatches
-- Replace with single `Nx.to_flat_list(h)` followed by `Enum.map(&Nx.tensor/1)` — one device transfer for all of H
-- Similarly for rank-2 case: use `Nx.to_batched(h, 1)` or `Nx.to_list`
+- **Status:** Complete. Rank-1 time-varying H now uses one `Nx.to_flat_list/1` transfer while preserving dtype, and rank-2/rank-3 time-varying H uses `Nx.to_batched/2` instead of per-step slices.
 
 ---
 
@@ -399,6 +398,8 @@ spec = BstsNx.Components.local_linear_trend_spec(0.1, 0.01)
 
 - **No precision impact:** Tiers 1-4 (identical arithmetic, just in tensor form)
 - **Minor f32 vs f64:** Tier 5A/5B defn paths default to f32; explicitly use `Nx.as_type(:f64)` for inputs if precision matters
+- **Tier 1F (sample_general defn path):** complete with f64 scalar RTS accumulators and parity coverage against the previous public sampler behavior
+- **Tier 1 tracker reconciliation:** 1A-1D and 1G are now marked complete from the current code; 1E remains the next Tier 1 cleanup item.
 - **Potential accumulation error:** Tier 3D Shapley value caching — none (exact same computation, just cached)
 - **Tier 5C (defn gamma):** complete in PR 7 with explicit f64 typing and targeted small-alpha validation
 - **Welford's algorithm** (4B): More numerically stable than two-pass for large n (avoids catastrophic cancellation)
@@ -407,8 +408,9 @@ spec = BstsNx.Components.local_linear_trend_spec(0.1, 0.01)
 ## Findings Cross-Reference
 
 Items marked [NEW] were discovered by the parallel code review agents and were not in the original plan. Key additions:
-- **1F** (sample_general → defn paths): Highest single-impact change for scalar sampler
-- **1G** (normalize_h_series): Eliminates T kernel dispatches in filter setup
+- **1F** (sample_general → defn paths): Complete; scalar sampler now uses compiled filter+smoother defn path
+- **1A-1D** (hot-loop residuals and near-zero checks): Complete in the current code
+- **1G** (normalize_h_series): Complete; eliminates T kernel dispatches in filter setup
 - **2D** (forward_simulate defn): Eliminates S×H redundant transpose + Elixir→Nx dispatch
 - **2E** (predict_structured batching): Mirrors existing predict_scalar optimization
 - **3E** (AR forecaster Nx rewrite): Replaces O(n×p³) Elixir with single BLAS call

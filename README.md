@@ -19,12 +19,14 @@ end
 
 `bsts_nx` targets the latest Nx stack and requires:
 
-- `nx ~> 0.11`
-- `exla ~> 0.11` (optional)
+- Elixir `~> 1.19`
+- `nx ~> 0.12.0`
+- `emlx ~> 0.3.0` (optional)
+- `exla ~> 0.12.0` (optional)
 - `xla ~> 0.10` (optional)
 
-If your app or `Mix.install/2` script pins `nx` to `0.6.x` (or any `< 0.11`),
-dependency resolution will fail. Upgrade the full graph to Nx 0.11.
+If your app or `Mix.install/2` script pins `nx` to `0.6.x` (or any `< 0.12`),
+dependency resolution will fail. Upgrade the full graph to Nx 0.12.
 
 For `Mix.install/2`, keep everything in a single call and avoid pinning an older Nx:
 
@@ -136,13 +138,28 @@ For offline validation and reporting, `BstsNx.RSidecar` can call R's CRAN
 When used in the Gibbs sampler, missing observations (`nil`/`NaN`) are skipped when updating
 the observation variance and a warning is logged.
 
-## EXLA acceleration (optional)
+## Backend acceleration (optional)
 
 Add `:exla` and configure Nx in your host application:
 
 ```elixir
 config :nx, :default_backend, EXLA.Backend
 ```
+
+EMLX is also supported as an optional backend dependency. For structured BSTS
+workflows, EMLX GPU support is currently limited by missing linalg primitives
+needed by the Kalman/smoother paths; EMLX CPU, EXLA, and BinaryBackend are the
+practical fallback paths today.
+
+To compare backend behavior on a structured workload:
+
+```bash
+mix bench.structured_backends
+```
+
+Useful environment overrides include `BSTS_NX_BENCH_BACKENDS`, `BSTS_NX_BENCH_T`,
+`BSTS_NX_BENCH_SAMPLES`, `BSTS_NX_BENCH_BURN_IN`, `BSTS_NX_BENCH_DTYPE`, and
+`BSTS_NX_BENCH_OUTPUT`.
 
 ## Documentation
 

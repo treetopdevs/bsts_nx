@@ -261,8 +261,8 @@ defmodule BstsNx.GibbsSampler do
                                                                           {q_prev, r_prev, acc, k} ->
         {xs, ps} = KalmanFilter.filter_defn(obs_tensor, f_t, h_tensor, q_prev, r_prev, x0, p0)
 
-        {sampled_xs, new_key_smooth} =
-          BstsNx.Smoother.simulate_from_filtered_defn(xs, ps, f_t, q_prev, k)
+        {_smoothed_xs, _smoothed_ps, sampled_xs, new_key_smooth} =
+          BstsNx.Smoother.rts_and_simulate_defn(xs, ps, f_t, q_prev, k)
 
         process_ss = process_sum_of_squares(sampled_xs, f_t)
         obs_ss = obs_sum_of_squares(obs_tensor, sampled_xs, h_tensor, obs_present_mask)
