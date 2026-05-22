@@ -98,6 +98,7 @@ These changes target code that runs `iterations × T` times (thousands to millio
 
 **File:** `lib/bsts_nx/kalman_filter.ex` (lines 393-402)
 - **Status:** Complete. Rank-1 time-varying H now uses one `Nx.to_flat_list/1` transfer while preserving dtype, and rank-2/rank-3 time-varying H uses `Nx.to_batched/2` instead of per-step slices.
+- Regression proof: `test/kalman_filter_h_normalization_test.exs` guards `normalize_h_series/2` against `Nx.slice`/`Nx.slice_along_axis` reintroduction and verifies rank-1, rank-2, and rank-3 tensor H inputs match equivalent list-H public behavior.
 
 ---
 
@@ -400,6 +401,7 @@ spec = BstsNx.Components.local_linear_trend_spec(0.1, 0.01)
 - **Minor f32 vs f64:** Tier 5A/5B defn paths default to f32; explicitly use `Nx.as_type(:f64)` for inputs if precision matters
 - **Tier 1F (sample_general defn path):** complete with f64 scalar RTS accumulators and parity coverage against the previous public sampler behavior
 - **Tier 1 tracker reconciliation:** 1A-1D and 1G are now marked complete from the current code; 1E remains the next Tier 1 cleanup item.
+- **Tier 1G H normalization:** complete with a source-level regression guard for the no-slice setup path and public parity coverage against equivalent list-H inputs.
 - **Potential accumulation error:** Tier 3D Shapley value caching — none (exact same computation, just cached)
 - **Tier 5C (defn gamma):** complete in PR 7 with explicit f64 typing and targeted small-alpha validation
 - **Welford's algorithm** (4B): More numerically stable than two-pass for large n (avoids catastrophic cancellation)

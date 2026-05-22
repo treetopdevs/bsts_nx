@@ -112,7 +112,8 @@ defmodule BstsNx.KalmanFilter do
     else
       # Determine H per time step.  If `h` is scalar or a constant matrix,
       # replicate for each step.  If `h` is a tensor whose first axis matches
-      # the number of observations, treat it as time-varying and slice per step.
+      # the number of observations, materialize the time-varying rows without
+      # per-step slice calls.
       h_series = normalize_h_series(h, obs_list)
 
       # zip observations and h series
