@@ -16,7 +16,7 @@ This section is the tracker of record for completion status.
 
 - [x] PR 1: Tracking + benchmark harness
 - [~] PR 2: Finish Tier 1 + Tier 2 core
-- [~] PR 3: Finish Tier 2D/2E + remaining Tier 4E batching
+- [~] PR 3: Finish Tier 2E + remaining Tier 4E batching
 - [~] PR 4: Close remaining Tier 3/4 medium work
 - [~] PR 5: Tier 5A compiled multi-dimensional filter
 - [~] PR 6: Tier 5B compiled multi-dimensional RTS smoother
@@ -132,6 +132,8 @@ These changes target code that runs `iterations × T` times (thousands to millio
 ### 2D. [NEW] Compile forward_simulate as defn for RollingBaseline
 
 **File:** `lib/bsts_nx/rolling_baseline.ex` (lines 518-554)
+- **Status:** Complete. `RollingBaseline.counterfactual/3` now feeds static and time-varying H rows into one compiled `forward_simulate_defn` horizon loop, hoisting `F'` once and returning tensor means/variances directly to the posterior aggregation path.
+- Regression proof: `test/bsts_nx/rolling_baseline_forward_simulation_test.exs` checks static-H and post-regressor time-varying-H closed-form moments and guards against reintroducing the eager `Enum.reduce(1..horizon)` / `Enum.reduce(h_list)` loops.
 - `forward_simulate` does S×H iterations with ~8 Nx ops each (including `Nx.transpose(f)` recomputed every step)
 - Immediate fix: hoist `Nx.transpose(f)` and `Nx.transpose(h_row)` outside the loop
 - Better: compile the entire horizon propagation as a `Nx.Defn.while` loop — eliminates S×H Elixir→Nx dispatch overhead
@@ -402,6 +404,7 @@ spec = BstsNx.Components.local_linear_trend_spec(0.1, 0.01)
 - **Tier 1F (sample_general defn path):** complete with f64 scalar RTS accumulators and parity coverage against the previous public sampler behavior
 - **Tier 1 tracker reconciliation:** 1A-1D and 1G are now marked complete from the current code; 1E remains the next Tier 1 cleanup item.
 - **Tier 1G H normalization:** complete with a source-level regression guard for the no-slice setup path and public parity coverage against equivalent list-H inputs.
+- **Tier 2D RollingBaseline forward simulation:** complete with closed-form moment regressions for static and time-varying H. Arithmetic stays in the existing tensor dtype inside the compiled loop, then returns f64 tensors at the public aggregation seam as before.
 - **Potential accumulation error:** Tier 3D Shapley value caching — none (exact same computation, just cached)
 - **Tier 5C (defn gamma):** complete in PR 7 with explicit f64 typing and targeted small-alpha validation
 - **Welford's algorithm** (4B): More numerically stable than two-pass for large n (avoids catastrophic cancellation)
@@ -413,7 +416,7 @@ Items marked [NEW] were discovered by the parallel code review agents and were n
 - **1F** (sample_general → defn paths): Complete; scalar sampler now uses compiled filter+smoother defn path
 - **1A-1D** (hot-loop residuals and near-zero checks): Complete in the current code
 - **1G** (normalize_h_series): Complete; eliminates T kernel dispatches in filter setup
-- **2D** (forward_simulate defn): Eliminates S×H redundant transpose + Elixir→Nx dispatch
+- **2D** (forward_simulate defn): Complete; eliminates S×H redundant transpose + Elixir→Nx dispatch
 - **2E** (predict_structured batching): Mirrors existing predict_scalar optimization
 - **3E** (AR forecaster Nx rewrite): Replaces O(n×p³) Elixir with single BLAS call
 - **3F** (diagonal extraction caching): Eliminates D×S×4 redundant Nx calls
