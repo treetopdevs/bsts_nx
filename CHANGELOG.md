@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- Added fully fused MCMC chains for the scalar and structured (non-spike-and-slab) Gibbs samplers: the Kalman filter, simulation smoother and variance resampling for the entire chain now run inside a single `Nx.Defn` while-loop. With a defn compiler configured (`Nx.Defn.global_default_options(compiler: EXLA)`), this collapses thousands of per-iteration dispatches into one compiled program (~19x faster scalar, ~9x faster structured in `mix bench.gibbs_fusion`). Fusion is enabled by default only when a defn compiler is configured; the `:fused` option on `sample/7`, `sample_general/5` and `sample_structured/4` overrides the default, and both paths produce identical draws for the same PRNG key.
+- Fixed an f32 precision round-trip in `Distributions.gamma_sample_defn/4` and `inv_gamma_sample_defn/4`: numeric (non-tensor) shape/scale parameters were truncated through an f32 tensor before the f64 cast, perturbing posterior parameters such as the structured sampler's observation-variance scale.
+- Added `mix bench.gibbs_fusion` comparing stepwise vs fused Gibbs chains per backend.
 - The scalar `sample_general/5` Gibbs path now uses the compiled scalar Kalman filter and smoother handoff while preserving f64 parity with the previous public behavior.
 - The project now targets Elixir 1.19 with Nx 0.12, plus optional EMLX 0.3 and EXLA 0.12 backend dependencies.
 - Added a structured backend benchmark exposed through `mix bench.structured_backends`; current docs clarify that EMLX GPU structured workflows are limited by missing linalg primitive support and should fall back to EMLX CPU, EXLA, or BinaryBackend.

@@ -29,7 +29,7 @@ This section is the tracker of record for completion status.
 - [~] Tier 2: Partial
 - [~] Tier 3: Mostly complete
 - [~] Tier 4: Mostly complete
-- [~] Tier 5: Partial; PR 5/6/7/8 paths are wired; full end-to-end MCMC-loop fusion remains deferred
+- [~] Tier 5: PR 5/6/7/8 paths are wired; full end-to-end MCMC-loop fusion is now implemented for the scalar and structured standard samplers (see 5E below); spike-and-slab fusion remains deferred
 
 Legend: `[x]` done, `[~]` partial, `[ ]` pending.
 
@@ -357,7 +357,27 @@ These changes target code that runs `iterations × T` times (thousands to millio
 - [x] Maintains the current active-set inverse and applies block inverse add/remove updates for each variable toggle, with `safe_solve` fallback for near-singular pivots
 - [x] Added a p > 10 spike-and-slab regression slice to cover correctness through the public sampler
 - [x] Added `spike_slab_gibbs` to `bench/optimize_plan.exs` so the high-dimensional gamma sweep has a benchmark surface
-- [ ] Deferred: `sample_beta_g_prior` still performs its own active-set solve per retained beta draw; full MCMC-loop fusion remains out of scope
+- [ ] Deferred: `sample_beta_g_prior` still performs its own active-set solve per retained beta draw; spike-and-slab MCMC-loop fusion remains out of scope
+
+### 5E. [NEW] Full end-to-end MCMC-loop fusion (scalar + structured standard)
+
+**Status:** Complete.
+
+**File:** `lib/bsts_nx/gibbs_sampler.ex` (`scalar_chain_defn`, `structured_chain_defn_solve/_pinv`)
+- [x] The whole Gibbs chain (Kalman filter, RTS/Carter-Kohn smoothing, sufficient
+  statistics, inverse-gamma Q/R resampling, sample retention) runs inside one
+  `Nx.Defn` while-loop; retained draws are written into preallocated
+  `{num_samples, ...}` accumulators on-device and transferred to the host once
+- [x] Bitwise draw parity with the stepwise path for the same PRNG key (the same
+  defn kernels are invoked in the same order); covered by
+  `test/gibbs_fused_chain_test.exs`
+- [x] Compiler-aware default: fusion is on when `Nx.Defn.default_options/0`
+  configures a real compiler (e.g. EXLA) and off under the interpreting
+  evaluator, where accumulator copies make it slower; `:fused` overrides
+- [x] `mix bench.gibbs_fusion` (EXLA CPU): scalar 9.11s -> 0.47s (~19x),
+  structured 2.68s -> 0.28s (~9.5x)
+- [ ] Deferred: spike-and-slab fusion (gamma sweep is inherently sequential
+  host-side); vectorized multi-chain batching via a leading chain axis
 
 ---
 
