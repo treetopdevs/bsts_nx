@@ -35,5 +35,7 @@ end
 if requested_backend in ["exla", "emlx"] do
   ExUnit.start(exclude: [:slow], max_cases: 1, timeout: 300_000)
 else
-  ExUnit.start(exclude: [:slow])
+  # The BinaryBackend is the slowest execution path; MCMC-heavy tests need
+  # more than the default 60s per test on shared CI hardware.
+  ExUnit.start(exclude: [:slow], timeout: 300_000)
 end

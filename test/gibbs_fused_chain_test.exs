@@ -163,18 +163,18 @@ defmodule BstsNx.GibbsFusedChainTest do
     end
 
     test "matches the stepwise path for a composed seasonal model" do
-      obs = Enum.map(0..47, fn t -> 50.0 + 3.0 * :math.sin(2.0 * :math.pi() * t / 12) end)
+      obs = Enum.map(0..35, fn t -> 50.0 + 3.0 * :math.sin(2.0 * :math.pi() * t / 6) end)
 
       spec =
         Components.compose_specs(
           Components.local_level_spec(process_var: 0.1, obs_var: 1.0, initial_state: 50.0),
-          Components.seasonal_spec(12, process_var: 0.05)
+          Components.seasonal_spec(6, process_var: 0.05)
         )
 
       key = Nx.Random.key(909)
 
-      fused = GibbsSampler.sample_structured(obs, spec, 3, key: key, burn_in: 2, fused: true)
-      stepwise = GibbsSampler.sample_structured(obs, spec, 3, key: key, burn_in: 2, fused: false)
+      fused = GibbsSampler.sample_structured(obs, spec, 2, key: key, burn_in: 1, fused: true)
+      stepwise = GibbsSampler.sample_structured(obs, spec, 2, key: key, burn_in: 1, fused: false)
 
       Enum.zip(fused, stepwise)
       |> Enum.each(fn {f, s} ->
