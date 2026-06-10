@@ -28,10 +28,22 @@ jobs:
 
     env:
       MIX_ENV: test
+      # Pin the full suite to the BinaryBackend. The test helper defaults to
+      # EMLX whenever its NIF loads, but MLX on Linux CPU raises an uncaught
+      # std::runtime_error (sgetrf on a singular matrix) that aborts the
+      # whole VM mid-suite. EXLA coverage runs in the test_exla job below.
+      BSTS_NX_TEST_BACKEND: native
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # EMLX 0.3's NIF links against OpenBLAS, which the runner image does
+      # not ship; without it the emlx application fails to start and
+      # `mix test` aborts before running anything. NumPy backs the Python
+      # comparison tests, which fail (rather than skip) when it is absent.
+      - name: Install EMLX runtime dependencies
+        run: sudo apt-get update && sudo apt-get install -y libopenblas0 python3-numpy
 
       - name: Setup Elixir + OTP
         uses: erlef/setup-beam@v1
@@ -72,6 +84,11 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # See the test job: emlx still starts as an application even when the
+      # suite runs on EXLA, and its NIF needs OpenBLAS to load.
+      - name: Install EMLX runtime dependencies
+        run: sudo apt-get update && sudo apt-get install -y libopenblas0
 
       - name: Setup Elixir + OTP
         uses: erlef/setup-beam@v1
