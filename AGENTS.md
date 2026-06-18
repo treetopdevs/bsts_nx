@@ -7,11 +7,16 @@
 
 ## Build, Test, and Development Commands
 - `mix deps.get`: fetch dependencies.
+- `bash scripts/ci.sh`: run the local CI-parity verifier (compile with warnings as errors, non-external tests, format check, and docs).
 - `mix compile`: compile the library.
 - `iex -S mix`: start an interactive shell with the project loaded.
 - `mix test`: run the full ExUnit suite.
 - `mix test --exclude external`: skip tests tagged `@moduletag :external`.
 - `mix test --only external`: run only the external tests.
+- `mix test --include slow`: include tests tagged `:slow`.
+- `BSTS_NX_TEST_BACKEND=exla mix test test/structured_performance_smoke_test.exs test/utils_safe_solve_test.exs`: run the optional EXLA smoke lane.
+- `BSTS_NX_TEST_BACKEND=emlx mix test test/structured_performance_smoke_test.exs test/utils_safe_solve_test.exs`: run the optional EMLX smoke lane where available.
+- `BSTS_NX_ENABLE_R_PARITY=1 mix test test/r_parity_test.exs`: run the optional R parity lane when R dependencies are installed.
 - `mix format`: apply standard Elixir formatting (no custom formatter config is present).
 - `mix bench.structured_backends`: compare structured sampler behavior across BinaryBackend, EXLA, and EMLX where available.
 

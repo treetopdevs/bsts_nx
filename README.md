@@ -161,6 +161,33 @@ Useful environment overrides include `BSTS_NX_BENCH_BACKENDS`, `BSTS_NX_BENCH_T`
 `BSTS_NX_BENCH_SAMPLES`, `BSTS_NX_BENCH_BURN_IN`, `BSTS_NX_BENCH_DTYPE`, and
 `BSTS_NX_BENCH_OUTPUT`.
 
+## Local CI parity
+
+Use the local verifier before opening a PR:
+
+```bash
+bash scripts/ci.sh
+```
+
+It mirrors the default GitHub Actions lanes by running dependency fetches for
+the relevant Mix environments, `MIX_ENV=test mix compile --warnings-as-errors`,
+`MIX_ENV=test mix test --exclude external`, `MIX_ENV=dev mix format --check-formatted`,
+and `MIX_ENV=dev mix docs`.
+
+Keep heavier or environment-specific checks separate:
+
+```bash
+BSTS_NX_TEST_BACKEND=exla mix test test/structured_performance_smoke_test.exs test/utils_safe_solve_test.exs
+BSTS_NX_TEST_BACKEND=emlx mix test test/structured_performance_smoke_test.exs test/utils_safe_solve_test.exs
+mix test --include slow
+mix test --only external
+BSTS_NX_ENABLE_R_PARITY=1 mix test test/r_parity_test.exs
+```
+
+The R parity lane also requires `Rscript` and the CRAN packages used by the
+sidecar tests. In GitHub Actions it is only run from the manual workflow
+dispatch input.
+
 ## Documentation
 
 - `docs/overview.md` for a map of modules and workflows
