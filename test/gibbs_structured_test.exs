@@ -444,6 +444,46 @@ defmodule BstsNx.GibbsStructuredTest do
       assert length(combined.h) == 3
     end
 
+    test "dynamic regression H rows preserve f64 precision" do
+      sentinel = 16_777_217.0
+      x = Nx.tensor([[sentinel], [sentinel + 2.0]], type: {:f, 64})
+
+      spec = Components.regression_spec(x)
+
+      assert [first_h | _] = spec.h
+      assert Nx.type(first_h) == {:f, 64}
+      assert Nx.to_flat_list(first_h) == [sentinel]
+    end
+
+    test "spike-and-slab regression H rows preserve f64 precision" do
+      sentinel = 16_777_217.0
+      x = Nx.tensor([[sentinel], [sentinel + 2.0]], type: {:f, 64})
+
+      spec = Components.regression_spec(x, mode: :spike_and_slab, g: 2.0)
+
+      assert [first_h | _] = spec.h
+      assert Nx.type(first_h) == {:f, 64}
+      assert Nx.to_flat_list(first_h) == [sentinel]
+    end
+
+    test "composed static and dynamic H rows preserve f64 precision" do
+      sentinel = 16_777_217.0
+      x = Nx.tensor([[sentinel], [sentinel + 2.0]], type: {:f, 64})
+      local = Components.local_level_spec()
+      regression = Components.regression_spec(x)
+
+      combined = Components.compose_specs(local, regression)
+      reversed = Components.compose_specs(regression, local)
+
+      assert [first_combined | _] = combined.h
+      assert Nx.type(first_combined) == {:f, 64}
+      assert Nx.to_flat_list(first_combined) == [1.0, sentinel]
+
+      assert [first_reversed | _] = reversed.h
+      assert Nx.type(first_reversed) == {:f, 64}
+      assert Nx.to_flat_list(first_reversed) == [sentinel, 1.0]
+    end
+
     test "shifts spike-and-slab regression metadata when composing" do
       x = Nx.tensor([[1.0], [2.0], [3.0]])
       s1 = Components.local_linear_trend_spec()
@@ -643,6 +683,14 @@ defmodule BstsNx.GibbsStructuredTest do
       end
     end
 
+    test "raises clearly for empty observations" do
+      spec = Components.local_level_spec()
+
+      assert_raise ArgumentError, ~r/observations must contain at least one value/, fn ->
+        GibbsSampler.sample_structured([], spec, 1, seed: 42)
+      end
+    end
+
     test "raises on negative burn_in" do
       spec = Components.local_level_spec()
 
@@ -711,6 +759,35 @@ defmodule BstsNx.GibbsStructuredTest do
         GibbsSampler.sample_structured_chains(obs, spec, 2, 3, key: key)
 
       assert length(chains) == 2
+    end
+
+    test "raises by default when any structured chain fails" do
+      obs = [1.0, 2.0, 3.0]
+      spec = Components.local_level_spec()
+
+      assert_raise RuntimeError, ~r/1 of 2 structured Gibbs sampler chains failed/, fn ->
+        capture_log(fn ->
+          GibbsSampler.sample_structured_chains(obs, spec, 2, 1, seeds: [42, :bad])
+        end)
+      end
+    end
+
+    test "allows partial structured chain results when requested" do
+      obs = [1.0, 2.0, 3.0]
+      spec = Components.local_level_spec()
+
+      {chains, log} =
+        capture_result_with_log(fn ->
+          GibbsSampler.sample_structured_chains(obs, spec, 2, 1,
+            seeds: [42, :bad],
+            allow_partial: true
+          )
+        end)
+
+      assert length(chains) == 1
+      assert [chain] = chains
+      assert length(chain) == 1
+      assert log =~ "Structured Gibbs sampler chain 1 failed"
     end
   end
 
