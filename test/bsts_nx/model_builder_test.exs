@@ -4,6 +4,37 @@ defmodule BstsNx.ModelBuilderTest do
   alias BstsNx.Components
   alias BstsNx.ModelBuilder
 
+  describe "coerce_obs/1" do
+    test "preserves missing observations as NaN sentinels" do
+      nan = Nx.Constants.nan() |> Nx.to_number()
+
+      result =
+        ModelBuilder.coerce_obs([
+          nil,
+          :nan,
+          nan,
+          Nx.Constants.nan(),
+          Nx.tensor(7),
+          8
+        ])
+
+      assert Enum.take(result, 4) |> Enum.all?(&BstsNx.Utils.missing_observation?/1)
+      assert Enum.at(result, 4) == 7.0
+      assert Enum.at(result, 5) == 8.0
+    end
+
+    test "first_obs/1 skips missing observations before falling back" do
+      assert ModelBuilder.first_obs([nil, :nan, Nx.Constants.nan(), 12.5]) == 12.5
+      assert ModelBuilder.first_obs([nil, :nan, Nx.Constants.nan()]) == 0.0
+    end
+
+    test "default structured specs use the first observed value for initial level" do
+      {spec, :structured} = ModelBuilder.build_spec([nil, :nan, 10.0, 11.0], seasonality: 3)
+
+      assert spec.x0 |> Nx.to_flat_list() |> hd() == 10.0
+    end
+  end
+
   describe "build_spec/2" do
     test "returns scalar when no options given" do
       assert {nil, :scalar} = ModelBuilder.build_spec([1.0, 2.0, 3.0])
@@ -269,6 +300,18 @@ defmodule BstsNx.ModelBuilderTest do
         # Should span the full state dimension (trend 2 + regressor 1 = 3)
         assert Nx.axis_size(h, 1) == 3
       end)
+    end
+
+    test "preserves f64 precision in future regressor rows" do
+      sentinel = 16_777_217.0
+      regressors = Nx.tensor([[1.0], [2.0], [3.0]], type: {:f, 64})
+      {spec, :structured} = ModelBuilder.build_spec([1.0, 2.0, 3.0], regressors: regressors)
+
+      future_reg = Nx.tensor([[sentinel], [sentinel + 2.0]], type: {:f, 64})
+      [first_h | _] = ModelBuilder.build_future_h(spec, future_reg, 1)
+
+      assert Nx.type(first_h) == {:f, 64}
+      assert List.last(Nx.to_flat_list(first_h)) == sentinel
     end
 
     test "rejects mismatched future regressor columns" do

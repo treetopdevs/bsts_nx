@@ -19,6 +19,28 @@ defmodule BstsNx.Utils do
   def to_tensor(v) when is_number(v), do: Nx.tensor(v)
   def to_tensor(list) when is_list(list), do: Nx.tensor(list)
 
+  @doc false
+  @spec tensor_rows_to_row_matrices(Nx.t()) :: [Nx.t()]
+  def tensor_rows_to_row_matrices(%Nx.Tensor{} = tensor) do
+    case Nx.shape(tensor) do
+      {rows, cols} ->
+        for row <- row_indices(rows) do
+          Nx.slice(tensor, [row, 0], [1, cols])
+        end
+
+      {rows, 1, cols} ->
+        for row <- row_indices(rows) do
+          tensor
+          |> Nx.slice([row, 0, 0], [1, 1, cols])
+          |> Nx.reshape({1, cols})
+        end
+
+      shape ->
+        raise ArgumentError,
+              "expected a rank-2 tensor or rank-3 tensor with singleton row axis, got: #{inspect(shape)}"
+    end
+  end
+
   @doc """
   Cholesky factorisation with exponentially increasing jitter.
 
@@ -48,6 +70,9 @@ defmodule BstsNx.Utils do
         end
     end
   end
+
+  defp row_indices(0), do: []
+  defp row_indices(rows), do: 0..(rows - 1)
 
   defp cholesky_with_jitter(mat) do
     dim = Nx.shape(mat) |> elem(0)

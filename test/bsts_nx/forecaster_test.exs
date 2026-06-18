@@ -1,5 +1,6 @@
 defmodule BstsNx.ForecasterTest do
   use ExUnit.Case, async: true
+  import ExUnit.CaptureLog
 
   alias BstsNx.Forecaster
 
@@ -29,6 +30,27 @@ defmodule BstsNx.ForecasterTest do
         assert l <= m + 1.0e-6
         assert m <= u + 1.0e-6
       end)
+    end
+
+    test "fit preserves missing observations and initializes from the first observed value" do
+      data = [nil, :nan, Nx.Constants.nan(), 50.0, 51.0, 52.0, 53.0]
+
+      log =
+        capture_log(fn ->
+          fit_result =
+            Forecaster.fit(data,
+              seasonality: 3,
+              num_samples: 1,
+              burn_in: 0,
+              seed: 42
+            )
+
+          assert fit_result.method == :structured
+          assert fit_result.training_length == length(data)
+          assert fit_result.spec.x0 |> Nx.to_flat_list() |> hd() == 50.0
+        end)
+
+      assert log =~ "missing observations"
     end
 
     test "structured model with seasonality" do
@@ -115,6 +137,30 @@ defmodule BstsNx.ForecasterTest do
       assert forecast.horizon == 5
     end
 
+    test "predict/2 accepts future_regressors as list rows" do
+      :rand.seed(:exsss, {515, 516, 517})
+      data = Enum.map(1..30, fn _ -> 50.0 + :rand.normal() * 2 end)
+      regressors = Nx.tensor(Enum.map(1..30, fn _ -> [:rand.normal() * 5] end))
+
+      fit_result =
+        BstsNx.Forecaster.fit(data,
+          regressors: regressors,
+          num_samples: 10,
+          burn_in: 5,
+          seed: 42
+        )
+
+      forecast =
+        BstsNx.Forecaster.predict(fit_result,
+          horizon: 3,
+          future_regressors: [[1.0], [2.0], [3.0]],
+          seed: 42
+        )
+
+      assert length(forecast.mean) == 3
+      assert forecast.horizon == 3
+    end
+
     test "predict/2 without future_regressors uses last H (backward compat)" do
       :rand.seed(:exsss, {520, 521, 522})
       data = Enum.map(1..30, fn _ -> 50.0 + :rand.normal() * 2 end)
@@ -151,6 +197,28 @@ defmodule BstsNx.ForecasterTest do
         BstsNx.Forecaster.predict(fit_result,
           horizon: 5,
           future_regressors: Nx.tensor([[1.0], [2.0], [3.0]]),
+          seed: 42
+        )
+      end
+    end
+
+    test "rejects future_regressors lists with wrong rank" do
+      :rand.seed(:exsss, {535, 536, 537})
+      data = Enum.map(1..30, fn _ -> 50.0 + :rand.normal() * 2 end)
+      regressors = Nx.tensor(Enum.map(1..30, fn _ -> [:rand.normal() * 5] end))
+
+      fit_result =
+        BstsNx.Forecaster.fit(data,
+          regressors: regressors,
+          num_samples: 10,
+          burn_in: 5,
+          seed: 42
+        )
+
+      assert_raise ArgumentError, ~r/future_regressors must be rank-2/, fn ->
+        BstsNx.Forecaster.predict(fit_result,
+          horizon: 3,
+          future_regressors: [1.0, 2.0, 3.0],
           seed: 42
         )
       end

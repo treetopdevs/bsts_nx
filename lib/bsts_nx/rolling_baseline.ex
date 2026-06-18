@@ -615,9 +615,7 @@ defmodule BstsNx.RollingBaseline do
     structural_h_batched = Nx.broadcast(structural_h, {horizon, n_structural})
     combined = Nx.concatenate([structural_h_batched, post_regressors_t], axis: 1)
 
-    combined
-    |> Nx.to_list()
-    |> Enum.map(fn row -> Nx.reshape(Nx.tensor(row), {1, n_state}) end)
+    BstsNx.Utils.tensor_rows_to_row_matrices(combined)
   end
 
   # Splits :regressors from opts into pre-period (for build_spec/fit) and

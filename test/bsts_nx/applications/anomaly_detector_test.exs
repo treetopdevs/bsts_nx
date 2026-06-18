@@ -2,6 +2,7 @@ defmodule BstsNx.Applications.AnomalyDetectorTest do
   use ExUnit.Case, async: true
 
   alias BstsNx.Applications.AnomalyDetector
+  alias BstsNx.Components
 
   describe "fit/2 and score/2 with MCMC" do
     test "fits baseline and scores normal data" do
@@ -46,6 +47,18 @@ defmodule BstsNx.Applications.AnomalyDetectorTest do
       assert last_score.value == 200.0
       assert abs(last_score.z_score) > 2.0
     end
+
+    test "initializes scalar MCMC from first observed value when leading observations are missing" do
+      detector =
+        AnomalyDetector.fit([nil, :nan, 50.0, 51.0, 52.0],
+          num_samples: 1,
+          burn_in: 0,
+          seed: 42
+        )
+
+      assert detector.method == :mcmc
+      assert length(detector.posterior_mean) == 5
+    end
   end
 
   describe "fit/2 and score_one/2 with filter" do
@@ -81,6 +94,39 @@ defmodule BstsNx.Applications.AnomalyDetectorTest do
         )
 
       assert_in_delta detector.filter_state, high_precision, 0.1
+    end
+
+    test "filter mode initializes from first observed value when leading observations are missing" do
+      detector =
+        AnomalyDetector.fit([nil, :nan, 50.0, 51.0, 52.0],
+          method: :filter,
+          q: 0.1,
+          r: 0.5
+        )
+
+      assert detector.method == :filter
+      assert is_float(detector.filter_state)
+      assert detector.filter_state == detector.filter_state
+    end
+
+    test "filter mode rejects structured model options instead of silently ignoring them" do
+      assert_raise ArgumentError, ~r/:seasonality.*method: :filter/, fn ->
+        AnomalyDetector.fit([1.0, 2.0, 3.0], method: :filter, seasonality: 7)
+      end
+
+      assert_raise ArgumentError, ~r/:regressors.*method: :filter/, fn ->
+        AnomalyDetector.fit([1.0, 2.0, 3.0],
+          method: :filter,
+          regressors: Nx.tensor([[1.0], [2.0], [3.0]])
+        )
+      end
+
+      assert_raise ArgumentError, ~r/:model_spec.*method: :filter/, fn ->
+        AnomalyDetector.fit([1.0, 2.0, 3.0],
+          method: :filter,
+          model_spec: Components.local_level_spec()
+        )
+      end
     end
   end
 

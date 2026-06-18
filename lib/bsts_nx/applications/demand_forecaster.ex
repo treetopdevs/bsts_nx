@@ -255,7 +255,7 @@ defmodule BstsNx.Applications.DemandForecaster do
   end
 
   defp build_demand_model(obs_list, horizon, seasonality, regressors) do
-    first = List.first(obs_list) || 0.0
+    first = ModelBuilder.first_obs(obs_list)
     t = length(obs_list)
 
     # Base: local linear trend
