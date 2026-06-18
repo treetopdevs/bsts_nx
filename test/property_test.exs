@@ -388,15 +388,16 @@ defmodule BstsNxPropertyTest do
       end
     end
 
-    property "out-of-bounds indices are silently filtered" do
+    property "invalid non-empty indices raise" do
       check all(
               obs <- observations(5, 30),
               max_runs: 20
             ) do
         n = length(obs)
-        result = CausalImpact.estimate_from_filter(obs, [n, n + 1, n + 100, -1])
-        assert result.actual == []
-        assert result.cumulative_effect.mean == 0.0
+
+        assert_raise ArgumentError, ~r/intervention_indices/, fn ->
+          CausalImpact.estimate_from_filter(obs, [n, n + 1, n + 100, -1])
+        end
       end
     end
 

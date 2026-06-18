@@ -49,6 +49,42 @@ defmodule BstsNx.InterventionAnalysisTest do
       # Effect should be near zero (within noise)
       assert abs(result.summary.cumulative_effect.mean) < 50
     end
+
+    test "mcmc summaries honor non-default alpha" do
+      :rand.seed(:exsss, {210, 211, 212})
+      pre = Enum.map(1..30, fn _ -> 50.0 + :rand.normal() * 2 end)
+      post = Enum.map(1..10, fn _ -> 55.0 + :rand.normal() * 2 end)
+      obs = pre ++ post
+
+      wide =
+        InterventionAnalysis.analyze(
+          obs,
+          %{pre_period: {1, 30}, post_period: {31, 40}},
+          num_samples: 30,
+          burn_in: 5,
+          seed: 42,
+          alpha: 0.01
+        )
+
+      narrow =
+        InterventionAnalysis.analyze(
+          obs,
+          %{pre_period: {1, 30}, post_period: {31, 40}},
+          num_samples: 30,
+          burn_in: 5,
+          seed: 42,
+          alpha: 0.20
+        )
+
+      wide_width = wide.summary.cumulative_effect.upper - wide.summary.cumulative_effect.lower
+
+      narrow_width =
+        narrow.summary.cumulative_effect.upper - narrow.summary.cumulative_effect.lower
+
+      assert wide.alpha == 0.01
+      assert narrow.alpha == 0.20
+      assert wide_width >= narrow_width
+    end
   end
 
   describe "analyze/3 with seasonality" do
