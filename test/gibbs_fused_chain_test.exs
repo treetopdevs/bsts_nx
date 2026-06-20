@@ -226,6 +226,11 @@ defmodule BstsNx.GibbsFusedChainTest do
 
         Enum.zip(f.states, s.states)
         |> Enum.each(fn {a, b} -> assert_tensor_close(a, b, "states") end)
+
+        assert length(f.state_covs) == length(s.state_covs)
+
+        Enum.zip(f.state_covs, s.state_covs)
+        |> Enum.each(fn {a, b} -> assert_tensor_close(a, b, "state_covs") end)
       end)
     end
   end
