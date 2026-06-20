@@ -75,6 +75,16 @@ defmodule BstsNx.GibbsFusedChainTest do
         |> Enum.each(fn {f, s} ->
           assert_scalar_close(f.process_var, s.process_var, "process_var")
           assert_scalar_close(f.obs_var, s.obs_var, "obs_var")
+
+          assert length(f.states) == length(s.states)
+
+          Enum.zip(f.states, s.states)
+          |> Enum.each(fn {a, b} -> assert_scalar_close(a, b, "state") end)
+
+          assert length(f.state_covs) == length(s.state_covs)
+
+          Enum.zip(f.state_covs, s.state_covs)
+          |> Enum.each(fn {a, b} -> assert_scalar_close(a, b, "state_cov") end)
         end)
       end)
     end
@@ -177,6 +187,16 @@ defmodule BstsNx.GibbsFusedChainTest do
         |> Enum.each(fn {f, s} ->
           assert_tensor_close(f.q_matrix, s.q_matrix, "q_matrix")
           assert_scalar_close(f.obs_var, s.obs_var, "obs_var")
+
+          assert length(f.states) == length(s.states)
+
+          Enum.zip(f.states, s.states)
+          |> Enum.each(fn {a, b} -> assert_tensor_close(a, b, "states") end)
+
+          assert length(f.state_covs) == length(s.state_covs)
+
+          Enum.zip(f.state_covs, s.state_covs)
+          |> Enum.each(fn {a, b} -> assert_tensor_close(a, b, "state_covs") end)
         end)
       end)
     end

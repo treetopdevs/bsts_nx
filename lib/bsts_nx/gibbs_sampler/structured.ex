@@ -50,8 +50,7 @@ defmodule BstsNx.GibbsSampler.Structured do
          total_iters
        ) do
     obs_tensor = observations_to_filter_tensor(observations)
-    h_tensor = Nx.stack(h_list)
-    h_rows_tensor = h_rows_tensor(h_list)
+    h_rows = h_rows_tensor(h_list)
     num_diffs = latent_transition_count(observations)
 
     {_, _, samples_acc, _key_acc} =
@@ -60,7 +59,7 @@ defmodule BstsNx.GibbsSampler.Structured do
           KalmanFilter.filter_defn_multi(
             obs_tensor,
             spec.f,
-            h_tensor,
+            h_rows,
             q_prev,
             r_prev,
             spec.x0,
@@ -79,7 +78,7 @@ defmodule BstsNx.GibbsSampler.Structured do
         per_dim_ss = Residuals.process_structured(sampled_states_tensor, spec.f, spec.q_specs)
 
         {obs_ss, t_obs} =
-          Residuals.obs_structured(observations, sampled_states_tensor, h_rows_tensor)
+          Residuals.obs_structured(observations, sampled_states_tensor, h_rows)
 
         {q_new, key_after_q} = resample_q_components(spec.q_specs, per_dim_ss, num_diffs, new_key)
         q_matrix_new = rebuild_q(q_prev, q_new)
