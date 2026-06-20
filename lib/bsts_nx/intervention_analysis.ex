@@ -337,8 +337,8 @@ defmodule BstsNx.InterventionAnalysis do
             CausalImpact.estimate(observations, pre_period, post_period, ci_opts)
           end
 
-        summary = CausalImpact.summary(impact)
-        sig = is_significant?(summary, alpha)
+        summary = CausalImpact.summary(impact, alpha: alpha)
+        sig = is_significant?(summary)
 
         %{
           impact: impact,
@@ -412,7 +412,7 @@ defmodule BstsNx.InterventionAnalysis do
     %{
       impact: nil,
       summary: summary,
-      significant?: is_significant?(summary, alpha),
+      significant?: is_significant?(summary),
       alpha: alpha,
       model_spec: model_spec,
       execution: forecast.execution
@@ -450,7 +450,7 @@ defmodule BstsNx.InterventionAnalysis do
     end
   end
 
-  defp is_significant?(summary, _alpha) do
+  defp is_significant?(summary) do
     cum = summary.cumulative_effect
 
     case {cum.lower, cum.upper} do

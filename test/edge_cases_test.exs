@@ -9,6 +9,7 @@ defmodule BstsNxEdgeCasesTest do
   - Series is very short
   """
   use ExUnit.Case, async: true
+  import ExUnit.CaptureLog
 
   alias BstsNx.CausalImpact
   alias BstsNx.Diagnostics
@@ -120,6 +121,18 @@ defmodule BstsNxEdgeCasesTest do
   # ---------------------------------------------------------------------------
 
   describe "GibbsSampler with degenerate data" do
+    test "raises clearly for empty observations" do
+      assert_raise ArgumentError, ~r/observations must contain at least one value/, fn ->
+        GibbsSampler.sample([], 1, 0.0, 1.0, 1.0, 1.0, seed: 42)
+      end
+    end
+
+    test "sample_chains raises clearly for empty observations" do
+      assert_raise ArgumentError, ~r/observations must contain at least one value/, fn ->
+        GibbsSampler.sample_chains([], 2, 1, 0.0, 1.0, 1.0, 1.0, seed: 42)
+      end
+    end
+
     test "handles constant observations without crashing" do
       obs = List.duplicate(10.0, 20)
 
@@ -203,6 +216,33 @@ defmodule BstsNxEdgeCasesTest do
 
       assert length(chains) == 3
       Enum.each(chains, fn chain -> assert length(chain) > 0 end)
+    end
+
+    test "sample_chains raises by default when any chain fails" do
+      obs = [1.0, 2.0, 3.0]
+
+      assert_raise RuntimeError, ~r/1 of 2 Gibbs sampler chains failed/, fn ->
+        capture_log(fn ->
+          GibbsSampler.sample_chains(obs, 2, 1, 0.0, 1.0, 1.0, 1.0, seeds: [42, :bad])
+        end)
+      end
+    end
+
+    test "sample_chains allows partial results when requested" do
+      obs = [1.0, 2.0, 3.0]
+
+      {chains, log} =
+        capture_result_with_log(fn ->
+          GibbsSampler.sample_chains(obs, 2, 1, 0.0, 1.0, 1.0, 1.0,
+            seeds: [42, :bad],
+            allow_partial: true
+          )
+        end)
+
+      assert length(chains) == 1
+      assert [chain] = chains
+      assert length(chain) == 1
+      assert log =~ "Gibbs sampler chain 1 failed"
     end
   end
 
@@ -296,10 +336,10 @@ defmodule BstsNxEdgeCasesTest do
   end
 
   # ---------------------------------------------------------------------------
-  # P2: CausalImpact with empty/out-of-bounds intervention indices
+  # P2: CausalImpact with empty/invalid intervention indices
   # ---------------------------------------------------------------------------
 
-  describe "CausalImpact.estimate_from_filter empty indices (P2 fix)" do
+  describe "CausalImpact.estimate_from_filter empty/invalid indices (P2 fix)" do
     test "returns zero-effect result for empty intervention_indices" do
       obs = [1.0, 2.0, 3.0, 4.0, 5.0]
 
@@ -312,23 +352,23 @@ defmodule BstsNxEdgeCasesTest do
       assert result.baseline == []
     end
 
-    test "returns zero-effect result when all indices are out of bounds" do
+    test "rejects invalid non-empty intervention_indices" do
       obs = [1.0, 2.0, 3.0]
 
-      result = CausalImpact.estimate_from_filter(obs, [10, 20, -1])
-
-      assert result.point_effects == %{mean: [], lower: [], upper: []}
-      assert result.cumulative_effect.mean == 0.0
-      assert result.actual == []
+      for intervention_indices <- [[10], [-1], [1.5]] do
+        assert_raise ArgumentError, ~r/intervention_indices/, fn ->
+          CausalImpact.estimate_from_filter(obs, intervention_indices)
+        end
+      end
     end
 
-    test "filters out-of-bounds indices but processes valid ones" do
+    test "sorts and deduplicates valid intervention_indices" do
       obs = [1.0, 2.0, 3.0, 4.0, 5.0]
 
-      # Mix of valid (2, 3) and invalid (10, -1)
-      result = CausalImpact.estimate_from_filter(obs, [2, 3, 10, -1])
+      result = CausalImpact.estimate_from_filter(obs, [3, 2, 3])
 
       assert length(result.actual) == 2
+      assert result.actual == [3.0, 4.0]
       assert length(result.baseline) == 2
       assert length(result.point_effects.mean) == 2
     end
@@ -530,5 +570,24 @@ defmodule BstsNxEdgeCasesTest do
         assert c >= 0.0, "Covariance must be non-negative"
       end)
     end
+  end
+
+  defp capture_result_with_log(fun) do
+    parent = self()
+
+    log =
+      capture_log(fn ->
+        result = fun.()
+        send(parent, {:captured_result, result})
+      end)
+
+    result =
+      receive do
+        {:captured_result, value} -> value
+      after
+        10_000 -> flunk("timed out waiting for captured result")
+      end
+
+    {result, log}
   end
 end

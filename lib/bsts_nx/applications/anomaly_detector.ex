@@ -23,7 +23,7 @@ defmodule BstsNx.Applications.AnomalyDetector do
   - **Interpretable**: Decomposition shows *why* something is anomalous
     (trend break? seasonal deviation? noise spike?)
   - **Streaming-friendly**: Kalman filter updates in O(1) per observation
-  - **Handles seasonality natively**: Won't flag known seasonal patterns
+  - **Handles seasonality natively**: MCMC baselines can model known seasonal patterns
 
   ## Applications
 
@@ -92,11 +92,13 @@ defmodule BstsNx.Applications.AnomalyDetector do
   ## Options
 
     * `:method` - `:mcmc` for full Bayesian (default) or `:filter` for
-      streaming-optimized Kalman filter
+      streaming-optimized scalar Kalman filter with explicit `:f`, `:h`,
+      `:q`, `:r`, `:x0`, and `:p0` options
     * `:seasonality` - seasonal periods (e.g., 24 for hourly with daily pattern)
+      for MCMC baselines
     * `:regressors` - a `{T, p}` Nx tensor of known covariates (e.g., promotions,
       holidays) for the training period. When provided, known effects are modeled
-      in the baseline so they don't trigger false anomalies.
+      in the MCMC baseline so they don't trigger false anomalies.
     * `:alpha` - significance level for anomaly threshold (default: 0.01)
     * `:num_samples` - posterior draws for MCMC method (default: 200)
     * `:seed` - PRNG seed
@@ -130,6 +132,10 @@ defmodule BstsNx.Applications.AnomalyDetector do
       raise ArgumentError, "method must be :mcmc or :filter, got: #{inspect(method)}"
     end
 
+    if method == :filter do
+      reject_filter_model_options!(opts)
+    end
+
     # Validate regressors dimensions if provided
     case Keyword.get(opts, :regressors) do
       nil ->
@@ -153,6 +159,27 @@ defmodule BstsNx.Applications.AnomalyDetector do
     case method do
       :mcmc -> fit_mcmc(observations, alpha, z_threshold, opts)
       :filter -> fit_filter(observations, alpha, z_threshold, opts)
+    end
+  end
+
+  defp reject_filter_model_options!(opts) do
+    unsupported =
+      [:seasonality, :regressors, :model_spec]
+      |> Enum.filter(&Keyword.has_key?(opts, &1))
+
+    case unsupported do
+      [] ->
+        :ok
+
+      [option] ->
+        raise ArgumentError,
+              "#{inspect(option)} is not supported with method: :filter; " <>
+                "use method: :mcmc for structured anomaly baselines or scalar f/h/q/r filter options"
+
+      options ->
+        raise ArgumentError,
+              "#{inspect(options)} are not supported with method: :filter; " <>
+                "use method: :mcmc for structured anomaly baselines or scalar f/h/q/r filter options"
     end
   end
 
@@ -308,7 +335,7 @@ defmodule BstsNx.Applications.AnomalyDetector do
           GibbsSampler.sample_structured(obs_list, spec, num_samples, sampler_opts)
 
         :scalar ->
-          first = List.first(obs_list) || 0.0
+          first = ModelBuilder.first_obs(obs_list)
           GibbsSampler.sample(obs_list, num_samples, first, 1.0, 1.0, 1.0, sampler_opts)
       end
 
@@ -351,7 +378,7 @@ defmodule BstsNx.Applications.AnomalyDetector do
     h = Keyword.get(opts, :h, 1.0)
     q = Keyword.get(opts, :q, 1.0)
     r = Keyword.get(opts, :r, 1.0)
-    x0 = Keyword.get(opts, :x0, List.first(obs_list) || 0.0)
+    x0 = Keyword.get(opts, :x0, ModelBuilder.first_obs(obs_list))
     p0 = Keyword.get(opts, :p0, 1.0)
 
     # Run filter through training data to get final state. Keep list inputs on

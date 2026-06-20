@@ -69,6 +69,25 @@ defmodule BstsNx.SmootherDefnMatrixTest do
     assert Nx.shape(key_out) == {2}
   end
 
+  test "compiled scalar smoother raises clearly for empty filtered inputs" do
+    assert_raise ArgumentError, ~r/filtered_xs must contain at least one time step/, fn ->
+      Smoother.rts_and_simulate_defn([], [], 1.0, 0.2, Nx.Random.key(77))
+    end
+  end
+
+  test "compiled matrix smoother raises clearly for empty filtered inputs" do
+    f = Nx.eye(2)
+    q = Nx.eye(2)
+
+    assert_raise ArgumentError, ~r/filtered_xs must contain at least one time step/, fn ->
+      Smoother.rts_defn_matrix([], [], f, q)
+    end
+
+    assert_raise ArgumentError, ~r/filtered_xs must contain at least one time step/, fn ->
+      Smoother.simulate_from_filtered_defn_matrix([], [], f, q, Nx.Random.key(77))
+    end
+  end
+
   if @emlx_backend? do
     @tag skip:
            "EMLX backend does not implement Nx.Backend.lu/3 required by matrix simulation path"

@@ -10,6 +10,7 @@ BstsNx is a pure-Elixir library for Bayesian Structural Time Series (BSTS) model
 
 ```bash
 mix deps.get          # Fetch dependencies
+bash scripts/ci.sh    # Local CI-parity verifier: compile, non-external tests, format check, docs
 mix compile           # Compile the library
 mix test              # Run full test suite (excludes @tag :slow by default)
 mix test path/to/test.exs           # Run a single test file
@@ -18,9 +19,16 @@ mix test --only external            # Run tests tagged @moduletag :external
 mix test --include slow             # Include slow tests
 mix format            # Format all code
 mix format --check-formatted        # Check formatting without modifying
+BSTS_NX_TEST_BACKEND=exla mix test test/structured_performance_smoke_test.exs test/utils_safe_solve_test.exs
+BSTS_NX_TEST_BACKEND=emlx mix test test/structured_performance_smoke_test.exs test/utils_safe_solve_test.exs
+BSTS_NX_ENABLE_R_PARITY=1 mix test test/r_parity_test.exs
 mix bench.structured_backends       # Compare structured sampler backend behavior
 mix bench.gibbs_fusion              # Compare stepwise vs fused Gibbs chains (BENCH_BACKEND=binary|exla)
 ```
+
+`bash scripts/ci.sh` mirrors the default GitHub Actions `test` and `quality`
+jobs. EXLA, EMLX, slow, external, and R parity checks are intentionally separate
+optional lanes.
 
 ## Architecture
 

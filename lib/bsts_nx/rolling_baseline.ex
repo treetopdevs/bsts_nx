@@ -30,6 +30,7 @@ defmodule BstsNx.RollingBaseline do
   alias BstsNx.Diagnostics
   alias BstsNx.GibbsSampler
   alias BstsNx.ModelSpec
+  import Nx.Defn
 
   @default_num_seasons 96
   @default_num_samples 200
@@ -278,7 +279,7 @@ defmodule BstsNx.RollingBaseline do
               forward_simulate_h(final_state, final_cov, spec.f, h_list, q_matrix, horizon)
           end
 
-        {Nx.tensor(means, type: {:f, 64}), Nx.tensor(vars, type: {:f, 64}), obs_var}
+        {Nx.as_type(means, {:f, 64}), Nx.as_type(vars, {:f, 64}), obs_var}
       end)
 
     n = length(samples)
@@ -493,47 +494,62 @@ defmodule BstsNx.RollingBaseline do
   # -- Private helpers --
 
   defp forward_simulate(state, cov, f, h_row, q_matrix, horizon) do
-    f_t = Nx.transpose(f)
-    h_col = Nx.transpose(h_row)
-
-    {means_rev, vars_rev, _state, _cov} =
-      Enum.reduce(1..horizon, {[], [], state, cov}, fn _t, {ms, vs, x, p} ->
-        x_pred = Nx.dot(f, x)
-        p_pred = Nx.add(Nx.dot(Nx.dot(f, p), f_t), q_matrix)
-
-        y_mean = Nx.dot(h_row, x_pred) |> Nx.squeeze() |> Nx.to_number()
-
-        y_var =
-          Nx.dot(Nx.dot(h_row, p_pred), h_col)
-          |> Nx.squeeze()
-          |> Nx.to_number()
-
-        {[y_mean | ms], [max(y_var, 0.0) | vs], x_pred, p_pred}
-      end)
-
-    {Enum.reverse(means_rev), Enum.reverse(vars_rev)}
+    h_vec = Nx.flatten(h_row)
+    h_steps = Nx.broadcast(h_vec, {horizon, Nx.axis_size(h_vec, 0)})
+    forward_simulate_defn(state, cov, f, h_steps, q_matrix)
   end
 
   # Forward-simulates with per-step time-varying H (list of {1, n_state} tensors).
   defp forward_simulate_h(state, cov, f, h_list, q_matrix, _horizon) do
-    f_t = Nx.transpose(f)
+    h_steps = h_steps_tensor(h_list)
+    forward_simulate_defn(state, cov, f, h_steps, q_matrix)
+  end
 
-    {means_rev, vars_rev, _state, _cov} =
-      Enum.reduce(h_list, {[], [], state, cov}, fn h_row, {ms, vs, x, p} ->
-        x_pred = Nx.dot(f, x)
-        p_pred = Nx.add(Nx.dot(Nx.dot(f, p), f_t), q_matrix)
+  defp h_steps_tensor(h_list) do
+    stacked = Nx.stack(h_list)
+    horizon = Nx.axis_size(stacked, 0)
 
-        y_mean = Nx.dot(h_row, x_pred) |> Nx.squeeze() |> Nx.to_number()
+    case Nx.rank(stacked) do
+      2 ->
+        stacked
 
-        y_var =
-          Nx.dot(Nx.dot(h_row, p_pred), Nx.transpose(h_row))
-          |> Nx.squeeze()
-          |> Nx.to_number()
+      3 ->
+        Nx.reshape(stacked, {horizon, Nx.axis_size(stacked, 2)})
+    end
+  end
 
-        {[y_mean | ms], [max(y_var, 0.0) | vs], x_pred, p_pred}
-      end)
+  defnp forward_simulate_defn(state, cov, f, h_steps, q_matrix) do
+    x0 = Nx.flatten(state)
+    type = Nx.type(x0)
+    p0 = Nx.as_type(cov, type)
+    f_t = Nx.as_type(f, type)
+    f_t_t = Nx.transpose(f_t)
+    q_t = Nx.as_type(q_matrix, type)
+    h_t = Nx.as_type(h_steps, type)
+    horizon = Nx.axis_size(h_t, 0)
+    state_dim = Nx.axis_size(h_t, 1)
+    zero = Nx.tensor(0.0, type: type)
+    means = Nx.broadcast(zero, {horizon})
+    variances = Nx.broadcast(zero, {horizon})
 
-    {Enum.reverse(means_rev), Enum.reverse(vars_rev)}
+    {_, means_out, variances_out, _, _, _, _, _, _} =
+      while {i = Nx.tensor(0, type: {:s, 64}), means_acc = means, vars_acc = variances, x = x0,
+             p = p0, f_in = f_t, f_trans = f_t_t, q_in = q_t, h_in = h_t},
+            i < horizon do
+        x_pred = Nx.dot(f_in, x)
+        p_pred = Nx.add(Nx.dot(Nx.dot(f_in, p), f_trans), q_in)
+        h_i = Nx.take(h_in, Nx.reshape(i, {1}), axis: 0) |> Nx.reshape({state_dim})
+        mean = Nx.dot(h_i, x_pred)
+        raw_variance = Nx.dot(h_i, Nx.dot(p_pred, h_i))
+        variance = Nx.select(Nx.less(raw_variance, zero), zero, raw_variance)
+
+        means_new = Nx.put_slice(means_acc, [i], Nx.reshape(mean, {1}))
+        vars_new = Nx.put_slice(vars_acc, [i], Nx.reshape(variance, {1}))
+
+        {i + 1, means_new, vars_new, x_pred, p_pred, f_in, f_trans, q_in, h_in}
+      end
+
+    {means_out, variances_out}
   end
 
   # Builds the H observation matrix/series for counterfactual forward simulation.
@@ -599,9 +615,7 @@ defmodule BstsNx.RollingBaseline do
     structural_h_batched = Nx.broadcast(structural_h, {horizon, n_structural})
     combined = Nx.concatenate([structural_h_batched, post_regressors_t], axis: 1)
 
-    combined
-    |> Nx.to_list()
-    |> Enum.map(fn row -> Nx.reshape(Nx.tensor(row), {1, n_state}) end)
+    BstsNx.Utils.tensor_rows_to_row_matrices(combined)
   end
 
   # Splits :regressors from opts into pre-period (for build_spec/fit) and

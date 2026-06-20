@@ -37,6 +37,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # EMLX 0.3's NIF links against OpenBLAS, which the runner image does
       # not ship; without it the emlx application fails to start and
@@ -84,6 +86,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       # See the test job: emlx still starts as an application even when the
       # suite runs on EXLA, and its NIF needs OpenBLAS to load.
@@ -128,6 +132,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Elixir + OTP
         uses: erlef/setup-beam@v1
@@ -170,6 +176,8 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        with:
+          persist-credentials: false
 
       - name: Setup Elixir + OTP
         uses: erlef/setup-beam@v1

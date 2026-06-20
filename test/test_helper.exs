@@ -2,7 +2,7 @@ requested_backend =
   System.get_env("BSTS_NX_TEST_BACKEND")
   |> case do
     nil ->
-      if Code.ensure_loaded?(EMLX.Backend), do: "emlx", else: "native"
+      "native"
 
     value ->
       String.downcase(value)

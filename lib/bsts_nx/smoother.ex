@@ -48,6 +48,9 @@ defmodule BstsNx.Smoother do
   """
   @spec rts_defn(Nx.t(), Nx.t(), number | Nx.t(), number | Nx.t()) :: {Nx.t(), Nx.t()}
   def rts_defn(xs, ps, f, q) do
+    validate_non_empty_time_axis!(xs, "filtered_xs")
+    validate_non_empty_time_axis!(ps, "filtered_ps")
+
     f_t = to_tensor(f)
     q_t = to_tensor(q)
     rts_defn_impl(xs, ps, f_t, q_t)
@@ -61,6 +64,9 @@ defmodule BstsNx.Smoother do
   """
   @spec rts_defn_matrix(Nx.t(), Nx.t(), number | Nx.t(), number | Nx.t()) :: {Nx.t(), Nx.t()}
   def rts_defn_matrix(xs, ps, f, q) do
+    validate_non_empty_time_axis!(xs, "filtered_xs")
+    validate_non_empty_time_axis!(ps, "filtered_ps")
+
     xs_t = Nx.as_type(xs, {:f, 64})
     ps_t = Nx.as_type(ps, {:f, 64})
     f_t = Nx.as_type(f, {:f, 64})
@@ -194,6 +200,9 @@ defmodule BstsNx.Smoother do
   @spec rts_defn_with_lag1(Nx.t(), Nx.t(), number | Nx.t(), number | Nx.t()) ::
           {Nx.t(), Nx.t(), Nx.t()}
   def rts_defn_with_lag1(xs, ps, f, q) do
+    validate_non_empty_time_axis!(xs, "filtered_xs")
+    validate_non_empty_time_axis!(ps, "filtered_ps")
+
     f_t = to_tensor(f)
     q_t = to_tensor(q)
     {sxs, sps, lag1_padded} = rts_defn_with_lag1_impl(xs, ps, f_t, q_t)
@@ -279,6 +288,11 @@ defmodule BstsNx.Smoother do
           Nx.t()
         ) :: {Nx.t(), Nx.t()}
   def simulate_defn(smoothed_xs, smoothed_ps, filtered_xs, filtered_ps, f, q, key) do
+    validate_non_empty_time_axis!(smoothed_xs, "smoothed_xs")
+    validate_non_empty_time_axis!(smoothed_ps, "smoothed_ps")
+    validate_non_empty_time_axis!(filtered_xs, "filtered_xs")
+    validate_non_empty_time_axis!(filtered_ps, "filtered_ps")
+
     f_t = to_tensor(f)
     q_t = to_tensor(q)
     simulate_defn_impl(smoothed_xs, smoothed_ps, filtered_xs, filtered_ps, f_t, q_t, key)
@@ -293,6 +307,9 @@ defmodule BstsNx.Smoother do
   @spec simulate_from_filtered_defn(Nx.t(), Nx.t(), number | Nx.t(), number | Nx.t(), Nx.t()) ::
           {Nx.t(), Nx.t()}
   def simulate_from_filtered_defn(filtered_xs, filtered_ps, f, q, key) do
+    validate_non_empty_time_axis!(filtered_xs, "filtered_xs")
+    validate_non_empty_time_axis!(filtered_ps, "filtered_ps")
+
     f_t = to_tensor(f)
     q_t = to_tensor(q)
     simulate_from_filtered_defn_impl(filtered_xs, filtered_ps, f_t, q_t, key)
@@ -312,6 +329,9 @@ defmodule BstsNx.Smoother do
           Nx.t()
         ) :: {Nx.t(), Nx.t()}
   def simulate_from_filtered_defn_matrix(filtered_xs, filtered_ps, f, q, key) do
+    validate_non_empty_time_axis!(filtered_xs, "filtered_xs")
+    validate_non_empty_time_axis!(filtered_ps, "filtered_ps")
+
     f_t = to_tensor(f)
     q_t = to_tensor(q)
 
@@ -483,6 +503,20 @@ defmodule BstsNx.Smoother do
       _ -> true
     end
   end
+
+  defp validate_non_empty_time_axis!([], name) do
+    raise ArgumentError, "#{name} must contain at least one time step"
+  end
+
+  defp validate_non_empty_time_axis!(%Nx.Tensor{} = tensor, name) do
+    if Nx.rank(tensor) == 0 or Nx.axis_size(tensor, 0) < 1 do
+      raise ArgumentError, "#{name} must contain at least one time step"
+    end
+
+    :ok
+  end
+
+  defp validate_non_empty_time_axis!(_input, _name), do: :ok
 
   Nx.Defn.defnp matrix_gain_solve(p_pred_next_reg, rhs) do
     Nx.LinAlg.solve(p_pred_next_reg, rhs) |> Nx.transpose()

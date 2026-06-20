@@ -121,7 +121,7 @@ defmodule BstsNx.Pipeline do
         ci_result =
           CausalImpact.estimate_structured(observations, pre_period, post_period, spec, ci_opts)
 
-        ci_summary = CausalImpact.summary(ci_result)
+        ci_summary = CausalImpact.summary(ci_result, alpha: Keyword.get(ci_opts, :alpha, 0.05))
 
         attribution_result =
           SpotAttributor.attribute_posterior(

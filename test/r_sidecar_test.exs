@@ -7,12 +7,23 @@ defmodule BstsNx.RSidecarTest do
   @moduletag timeout: 180_000
 
   setup do
-    old_rscript = System.get_env("BSTS_NX_RSCRIPT")
-    old_timeout = System.get_env("BSTS_NX_R_TIMEOUT_MS")
+    env_keys = [
+      "BSTS_NX_RSCRIPT",
+      "BSTS_NX_R_TIMEOUT_MS",
+      "BSTS_NX_R_LIBS_USER",
+      "BSTS_NX_R_LIBS_SITE",
+      "HOME",
+      "PATH",
+      "R_HOME",
+      "R_LIBS",
+      "R_LIBS_USER",
+      "R_LIBS_SITE"
+    ]
+
+    old_env = Map.new(env_keys, &{&1, System.get_env(&1)})
 
     on_exit(fn ->
-      restore_env("BSTS_NX_RSCRIPT", old_rscript)
-      restore_env("BSTS_NX_R_TIMEOUT_MS", old_timeout)
+      Enum.each(old_env, fn {key, value} -> restore_env(key, value) end)
     end)
 
     :ok
@@ -165,6 +176,244 @@ defmodule BstsNx.RSidecarTest do
     assert result.report == "ok"
   end
 
+  test "run_report invokes Rscript with startup isolation flags" do
+    args_file =
+      Path.join(System.tmp_dir!(), "bsts_nx_r_sidecar_args_#{System.unique_integer([:positive])}")
+
+    on_exit(fn -> File.rm(args_file) end)
+
+    rscript =
+      fake_rscript!("""
+      printf '%s\\n' "$*" >> "#{args_file}"
+
+      if echo "$*" | grep -q "requireNamespace"; then
+        echo "BSTS_NX_R_SIDECAR_READY"
+        exit 0
+      fi
+
+      cat <<'EOF'
+      BSTS_NX_BEGIN_SUMMARY
+      metric\tActual
+      Average\t1.0
+      BSTS_NX_END_SUMMARY
+      BSTS_NX_BEGIN_REPORT
+      ok
+      BSTS_NX_END_REPORT
+      BSTS_NX_BEGIN_SERIES
+      index\tresponse
+      1\t1.0
+      2\t2.0
+      3\t3.0
+      4\t4.0
+      5\t5.0
+      6\t6.0
+      7\t7.0
+      8\t8.0
+      9\t9.0
+      10\t10.0
+      BSTS_NX_END_SERIES
+      EOF
+      exit 0
+      """)
+
+    System.put_env("BSTS_NX_RSCRIPT", rscript)
+
+    assert {:ok, _result} =
+             RSidecar.run_report(Enum.map(1..10, &(&1 * 1.0)), {1, 6}, {7, 10}, [])
+
+    assert {:ok, args_log} = File.read(args_file)
+    assert args_log =~ "--vanilla"
+    assert args_log =~ "--no-environ"
+    assert args_log =~ "--no-site-file"
+    assert args_log =~ "--no-init-file"
+    assert args_log =~ " -e "
+  end
+
+  test "run_report isolates HOME PATH and ambient R library environment" do
+    rscript =
+      fake_rscript!("""
+      case "$HOME" in
+        *bsts_nx_r_sidecar_*/home) ;;
+        *) echo "unexpected HOME=$HOME"; exit 8 ;;
+      esac
+
+      case "$TMPDIR" in
+        *bsts_nx_r_sidecar_*/tmp) ;;
+        *) echo "unexpected TMPDIR=$TMPDIR"; exit 8 ;;
+      esac
+
+      if [ "$PATH" != "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin" ]; then
+        echo "unexpected PATH=$PATH"
+        exit 8
+      fi
+
+      if [ -n "$R_HOME$R_LIBS$R_LIBS_USER$R_LIBS_SITE" ]; then
+        echo "ambient R env leaked"
+        exit 8
+      fi
+
+      if echo "$*" | grep -q "requireNamespace"; then
+        echo "BSTS_NX_R_SIDECAR_READY"
+        exit 0
+      fi
+
+      cat <<'EOF'
+      BSTS_NX_BEGIN_SUMMARY
+      metric\tActual
+      Average\t1.0
+      BSTS_NX_END_SUMMARY
+      BSTS_NX_BEGIN_REPORT
+      ok
+      BSTS_NX_END_REPORT
+      BSTS_NX_BEGIN_SERIES
+      index\tresponse
+      1\t1.0
+      2\t2.0
+      3\t3.0
+      4\t4.0
+      5\t5.0
+      6\t6.0
+      7\t7.0
+      8\t8.0
+      9\t9.0
+      10\t10.0
+      BSTS_NX_END_SERIES
+      EOF
+      exit 0
+      """)
+
+    System.put_env("BSTS_NX_RSCRIPT", rscript)
+    System.put_env("HOME", "/tmp/hostile-home")
+    System.put_env("PATH", "/tmp/hostile-path")
+    System.put_env("R_HOME", "/tmp/hostile-r-home")
+    System.put_env("R_LIBS", "/tmp/hostile-r-libs")
+    System.put_env("R_LIBS_USER", "/tmp/hostile-r-libs-user")
+    System.put_env("R_LIBS_SITE", "/tmp/hostile-r-libs-site")
+
+    assert {:ok, result} =
+             RSidecar.run_report(Enum.map(1..10, &(&1 * 1.0)), {1, 6}, {7, 10}, [])
+
+    assert result.report == "ok"
+  end
+
+  test "run_report forwards only explicitly configured trusted R library paths" do
+    lib_dir =
+      Path.join(System.tmp_dir!(), "bsts_nx_r_lib_#{System.unique_integer([:positive])}")
+
+    File.mkdir_p!(lib_dir)
+    on_exit(fn -> File.rm_rf(lib_dir) end)
+
+    rscript =
+      fake_rscript!("""
+      if [ "$R_LIBS_USER" != "#{Path.expand(lib_dir)}" ]; then
+        echo "unexpected R_LIBS_USER=$R_LIBS_USER"
+        exit 8
+      fi
+
+      if [ -n "$R_LIBS_SITE" ]; then
+        echo "unexpected R_LIBS_SITE=$R_LIBS_SITE"
+        exit 8
+      fi
+
+      if echo "$*" | grep -q "requireNamespace"; then
+        echo "BSTS_NX_R_SIDECAR_READY"
+        exit 0
+      fi
+
+      cat <<'EOF'
+      BSTS_NX_BEGIN_SUMMARY
+      metric\tActual
+      Average\t1.0
+      BSTS_NX_END_SUMMARY
+      BSTS_NX_BEGIN_REPORT
+      ok
+      BSTS_NX_END_REPORT
+      BSTS_NX_BEGIN_SERIES
+      index\tresponse
+      1\t1.0
+      2\t2.0
+      3\t3.0
+      4\t4.0
+      5\t5.0
+      6\t6.0
+      7\t7.0
+      8\t8.0
+      9\t9.0
+      10\t10.0
+      BSTS_NX_END_SERIES
+      EOF
+      exit 0
+      """)
+
+    System.put_env("BSTS_NX_RSCRIPT", rscript)
+    System.put_env("BSTS_NX_R_LIBS_USER", lib_dir)
+    System.put_env("R_LIBS_USER", "/tmp/ambient-r-libs-user")
+
+    assert {:ok, result} =
+             RSidecar.run_report(Enum.map(1..10, &(&1 * 1.0)), {1, 6}, {7, 10}, [])
+
+    assert result.report == "ok"
+  end
+
+  test "run_report rejects invalid explicit R library paths" do
+    missing =
+      Path.join(System.tmp_dir!(), "bsts_nx_missing_r_lib_#{System.unique_integer([:positive])}")
+
+    rscript =
+      fake_rscript!("""
+      echo "should not execute with invalid configured library path"
+      exit 9
+      """)
+
+    System.put_env("BSTS_NX_RSCRIPT", rscript)
+    System.put_env("BSTS_NX_R_LIBS_USER", missing)
+
+    assert {:error, %{reason: :invalid_r_library_path, path: ^missing}} =
+             RSidecar.run_report(Enum.map(1..10, &(&1 * 1.0)), {1, 6}, {7, 10}, [])
+  end
+
+  test "run_report terminates sidecar output that exceeds the configured byte cap" do
+    rscript =
+      fake_rscript!("""
+      if echo "$*" | grep -q "requireNamespace"; then
+        echo "BSTS_NX_R_SIDECAR_READY"
+        exit 0
+      fi
+
+      yes "unbounded sidecar output"
+      """)
+
+    System.put_env("BSTS_NX_RSCRIPT", rscript)
+
+    assert {:error, %{reason: :r_output_too_large, max_bytes: 128}} =
+             RSidecar.run_report(Enum.map(1..10, &(&1 * 1.0)), {1, 6}, {7, 10},
+               max_output_bytes: 128
+             )
+  end
+
+  test "run_report validates list regressors before tensor materialization" do
+    rscript =
+      fake_rscript!("""
+      if echo "$*" | grep -q "requireNamespace"; then
+        echo "BSTS_NX_R_SIDECAR_READY"
+        exit 0
+      fi
+
+      echo "payload should not be written"
+      exit 9
+      """)
+
+    System.put_env("BSTS_NX_RSCRIPT", rscript)
+
+    assert {:error, %{reason: :invalid_regressors, row: 1}} =
+             RSidecar.run_report([1.0, 2.0], {1, 1}, {2, 2}, regressors: [[1.0], []])
+
+    assert {:error, %{reason: :payload_too_large}} =
+             RSidecar.run_report([1.0, 2.0], {1, 1}, {2, 2},
+               regressors: [List.duplicate(1.0, 250_000), List.duplicate(1.0, 250_000)]
+             )
+  end
+
   test "run_report returns bounded error output instead of full stdout and stderr" do
     rscript =
       fake_rscript!("""
@@ -218,8 +467,12 @@ defmodule BstsNx.RSidecarTest do
 
     System.put_env("BSTS_NX_RSCRIPT", rscript)
 
-    assert {:error, %{reason: :r_timeout, timeout_ms: 10}} =
-             RSidecar.run_report(Enum.map(1..10, &(&1 * 1.0)), {1, 6}, {7, 10}, timeout_ms: 10)
+    timeout_ms = 250
+
+    assert {:error, %{reason: :r_timeout, timeout_ms: ^timeout_ms}} =
+             RSidecar.run_report(Enum.map(1..10, &(&1 * 1.0)), {1, 6}, {7, 10},
+               timeout_ms: timeout_ms
+             )
 
     assert {:ok, pid} = read_pid(pid_file)
     refute process_alive?(pid)

@@ -112,9 +112,9 @@ defmodule BstsNx.CausalImpactFilterTest do
     end)
   end
 
-  test "estimate_from_filter ignores out-of-range intervention indices" do
-    obs = Enum.map(0..9, fn _ -> 10.0 end)
-    on_air = [-1, 2, 3, 99]
+  test "estimate_from_filter sorts and deduplicates valid intervention indices" do
+    obs = Enum.map(0..9, &(&1 * 1.0))
+    on_air = [3, 1, 3, 2]
 
     result =
       CausalImpact.estimate_from_filter(obs, on_air,
@@ -124,10 +124,30 @@ defmodule BstsNx.CausalImpactFilterTest do
         p0: 1.0
       )
 
-    # Only valid indices (2 and 3) should be used.
-    assert length(result.actual) == 2
-    assert length(result.baseline) == 2
-    assert length(result.point_effects.mean) == 2
+    assert result.actual == [1.0, 2.0, 3.0]
+    assert length(result.baseline) == 3
+    assert length(result.point_effects.mean) == 3
+  end
+
+  test "estimate_from_filter rejects invalid non-empty intervention indices" do
+    obs = Enum.map(0..9, &(&1 * 1.0))
+
+    invalid_index_lists = [
+      [-1, 2],
+      [2, 10],
+      [2, 2.5]
+    ]
+
+    Enum.each(invalid_index_lists, fn on_air ->
+      assert_raise ArgumentError, ~r/intervention_indices/, fn ->
+        CausalImpact.estimate_from_filter(obs, on_air,
+          q: 1.0e-3,
+          r: 1.0e-3,
+          x0: 10.0,
+          p0: 1.0
+        )
+      end
+    end)
   end
 
   test "estimate_from_filter empty intervention result keeps covariance metadata" do
@@ -355,9 +375,9 @@ defmodule BstsNx.CausalImpactFilterTest do
            "EMLX backend does not implement Nx.Backend.lu/3 required by structured filter smoothing"
   end
 
-  test "estimate_structured_from_filter normalizes mask indices before smoothing" do
+  test "estimate_structured_from_filter sorts and deduplicates valid intervention indices" do
     observations = Enum.map(1..8, &(&1 * 1.0))
-    intervention_indices = [6, -1, 3, 3, 99]
+    intervention_indices = [6, 3, 3]
 
     spec =
       Components.local_level_spec(
@@ -377,6 +397,34 @@ defmodule BstsNx.CausalImpactFilterTest do
     assert result.actual == [4.0, 7.0]
     assert length(result.baseline) == 2
     assert length(result.point_effects.mean) == 2
+  end
+
+  test "estimate_structured_from_filter rejects invalid non-empty intervention indices" do
+    observations = Enum.map(1..8, &(&1 * 1.0))
+
+    spec =
+      Components.local_level_spec(
+        initial_state: 1.0,
+        initial_cov: 1.0,
+        process_var: 0.1,
+        obs_var: 0.1
+      )
+
+    invalid_index_lists = [
+      [-1, 3],
+      [3, 8],
+      [3, 3.5]
+    ]
+
+    Enum.each(invalid_index_lists, fn intervention_indices ->
+      assert_raise ArgumentError, ~r/intervention_indices/, fn ->
+        CausalImpact.estimate_structured_from_filter(
+          observations,
+          intervention_indices,
+          spec
+        )
+      end
+    end)
   end
 
   if @emlx_backend? do

@@ -274,13 +274,15 @@ defmodule BstsNx.CausalImpact do
 
   Given an `impact_result` returned by `estimate/4` or
   `estimate_structured/5`, this function computes summary statistics
-  including the posterior mean, standard deviation and 95% credible
+  including the posterior mean, standard deviation and credible
   interval for the point effects at each post‑period time step, as
   well as for the cumulative and relative
   effects.  Returns a map with keys `:point_effects`, `:cumulative_effect`,
   and `:relative_effect`.  Each entry contains the mean, sd and
   interval bounds.  If fewer than 2 posterior samples are provided,
   the standard deviation and interval bounds are returned as `:nan`.
+  The interval significance level defaults to `0.05`, producing 95%
+  credible intervals.
 
   ## Examples
 
@@ -297,12 +299,14 @@ defmodule BstsNx.CausalImpact do
       iex> summary.cumulative_effect.mean
       4.5
   """
-  @spec summary(impact_result()) :: map()
-  def summary(result) do
+  @spec summary(impact_result(), keyword()) :: map()
+  def summary(result, opts \\ []) do
     n_post = length(result.actual)
     m = length(result.point_effects)
-    lower_q = 0.025
-    upper_q = 0.975
+    alpha = Keyword.get(opts, :alpha, @default_alpha)
+    Validation.validate_alpha!(alpha)
+    lower_q = alpha / 2.0
+    upper_q = 1.0 - alpha / 2.0
 
     point_summaries =
       cond do
@@ -680,10 +684,25 @@ defmodule BstsNx.CausalImpact do
   end
 
   defp valid_filter_indices(intervention_indices, t) do
+    Enum.each(intervention_indices, &validate_filter_index!(&1, t))
+
     intervention_indices
-    |> Enum.filter(fn idx -> idx >= 0 and idx < t end)
     |> Enum.uniq()
     |> Enum.sort()
+  end
+
+  defp validate_filter_index!(idx, t) when is_integer(idx) and idx >= 0 and idx < t, do: :ok
+
+  defp validate_filter_index!(idx, t) do
+    range =
+      if t > 0 do
+        "0..#{t - 1}"
+      else
+        "no valid indices for an empty observation series"
+      end
+
+    raise ArgumentError,
+          "intervention_indices must contain only 0-based integer indices within #{range}, got: #{inspect(idx)}"
   end
 
   defp empty_filter_summary(obs_variance, cross_cov_included) do

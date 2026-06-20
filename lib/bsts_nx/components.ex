@@ -558,8 +558,7 @@ defmodule BstsNx.Components do
     h2_stack = h2 |> Enum.map(&ensure_row/1) |> Nx.stack()
 
     Nx.concatenate([h1_stack, h2_stack], axis: 2)
-    |> Nx.to_list()
-    |> Enum.map(&Nx.tensor/1)
+    |> BstsNx.Utils.tensor_rows_to_row_matrices()
   end
 
   defp compose_h(%Nx.Tensor{} = h1, %Nx.Tensor{} = h2, _n1) do
@@ -573,8 +572,7 @@ defmodule BstsNx.Components do
     h1_stack = Nx.broadcast(h1_row, {t_len, Nx.axis_size(h1_row, 0), Nx.axis_size(h1_row, 1)})
 
     Nx.concatenate([h1_stack, h2_stack], axis: 2)
-    |> Nx.to_list()
-    |> Enum.map(&Nx.tensor/1)
+    |> BstsNx.Utils.tensor_rows_to_row_matrices()
   end
 
   defp compose_h(h1_list, %Nx.Tensor{} = h2, _n1) when is_list(h1_list) do
@@ -584,8 +582,7 @@ defmodule BstsNx.Components do
     h2_stack = Nx.broadcast(h2_row, {t_len, Nx.axis_size(h2_row, 0), Nx.axis_size(h2_row, 1)})
 
     Nx.concatenate([h1_stack, h2_stack], axis: 2)
-    |> Nx.to_list()
-    |> Enum.map(&Nx.tensor/1)
+    |> BstsNx.Utils.tensor_rows_to_row_matrices()
   end
 
   # Ensures a tensor is a {1, n} row matrix
@@ -652,10 +649,7 @@ defmodule BstsNx.Components do
       end
 
     # Time-varying H: list of {1, p} tensors, one per timestep
-    h_list =
-      regressors_t
-      |> Nx.to_list()
-      |> Enum.map(fn row -> Nx.reshape(Nx.tensor(row), {1, p}) end)
+    h_list = BstsNx.Utils.tensor_rows_to_row_matrices(regressors_t)
 
     q_specs =
       Enum.map(0..(p - 1), fn d ->
@@ -712,10 +706,7 @@ defmodule BstsNx.Components do
         list when is_list(list) -> list
       end
 
-    h_list =
-      regressors_t
-      |> Nx.to_list()
-      |> Enum.map(fn row -> Nx.reshape(Nx.tensor(row), {1, p}) end)
+    h_list = BstsNx.Utils.tensor_rows_to_row_matrices(regressors_t)
 
     %ModelSpec{
       f: Nx.eye(p),

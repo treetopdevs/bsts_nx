@@ -119,7 +119,7 @@ defmodule BstsNx.Forecaster do
           GibbsSampler.sample_structured(obs_list, spec, num_samples, sampler_opts)
 
         :scalar ->
-          first = List.first(obs_list) || 0.0
+          first = ModelBuilder.first_obs(obs_list)
 
           GibbsSampler.sample(
             obs_list,
@@ -151,9 +151,9 @@ defmodule BstsNx.Forecaster do
     * `:horizon` - number of future periods to forecast (required)
     * `:alpha` - significance level for credible intervals (default: 0.05)
     * `:seed` - PRNG seed for forecast simulation
-    * `:future_regressors` - a `{horizon, p}` Nx tensor of future regressor values,
-      where `p` must match the number of regressors used during `fit/2`. When provided,
-      builds per-step observation matrices for regressor-aware forecasts.
+    * `:future_regressors` - a `{horizon, p}` Nx tensor or list of future
+      regressor values, where `p` must match the number of regressors used during
+      `fit/2`. When provided, builds per-step observation matrices for regressor-aware forecasts.
       Without this option, the last training H is used for all forecast steps
       (appropriate for trend/seasonal-only models).
   """
@@ -171,25 +171,12 @@ defmodule BstsNx.Forecaster do
     seed = Keyword.get(opts, :seed, System.os_time())
     key = Keyword.get(opts, :key, Nx.Random.key(seed))
 
-    future_regressors = Keyword.get(opts, :future_regressors)
     n_reg = Map.get(fit_result, :n_regression_dims, 0)
 
-    # Validate future_regressors dimensions
-    case future_regressors do
-      %Nx.Tensor{} = fr ->
-        if Nx.axis_size(fr, 0) != horizon do
-          raise ArgumentError,
-                "future_regressors rows (#{Nx.axis_size(fr, 0)}) must match horizon (#{horizon})"
-        end
-
-        if Nx.axis_size(fr, 1) != n_reg do
-          raise ArgumentError,
-                "future_regressors columns (#{Nx.axis_size(fr, 1)}) must match training regressors (#{n_reg})"
-        end
-
-      nil ->
-        :ok
-    end
+    future_regressors =
+      opts
+      |> Keyword.get(:future_regressors)
+      |> normalize_future_regressors!(horizon, n_reg)
 
     trajectories =
       case method do
@@ -301,6 +288,36 @@ defmodule BstsNx.Forecaster do
       end
 
     Forward.posterior_structured_trajectories(samples, spec, h_list, base_key)
+  end
+
+  defp normalize_future_regressors!(nil, _horizon, _n_reg), do: nil
+
+  defp normalize_future_regressors!(future_regressors, horizon, n_reg) do
+    future_t =
+      try do
+        ModelBuilder.ensure_tensor(future_regressors)
+      rescue
+        e in ArgumentError ->
+          raise ArgumentError,
+                "future_regressors must be an Nx tensor or rank-2 list, got: #{Exception.message(e)}"
+      end
+
+    if Nx.rank(future_t) != 2 do
+      raise ArgumentError,
+            "future_regressors must be rank-2, got shape #{inspect(Nx.shape(future_t))}"
+    end
+
+    if Nx.axis_size(future_t, 0) != horizon do
+      raise ArgumentError,
+            "future_regressors rows (#{Nx.axis_size(future_t, 0)}) must match horizon (#{horizon})"
+    end
+
+    if Nx.axis_size(future_t, 1) != n_reg do
+      raise ArgumentError,
+            "future_regressors columns (#{Nx.axis_size(future_t, 1)}) must match training regressors (#{n_reg})"
+    end
+
+    future_t
   end
 
   defp split_fit_predict_prng_opts(opts) do

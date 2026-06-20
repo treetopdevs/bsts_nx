@@ -1,5 +1,6 @@
 defmodule BstsNx.Applications.DemandForecasterTest do
   use ExUnit.Case, async: true
+  import ExUnit.CaptureLog
 
   alias BstsNx.Applications.DemandForecaster
 
@@ -70,6 +71,30 @@ defmodule BstsNx.Applications.DemandForecasterTest do
         )
 
       assert length(forecast.mean) == 5
+    end
+
+    test "preserves missing observations through wrapper coercion" do
+      observations = [nil, :nan, Nx.Constants.nan(), 100.0, 101.0, 102.0, 103.0]
+
+      log =
+        capture_log(fn ->
+          forecast =
+            DemandForecaster.forecast(observations,
+              horizon: 2,
+              num_samples: 2,
+              burn_in: 0,
+              seed: 42
+            )
+
+          assert forecast.horizon == 2
+          assert length(forecast.mean) == 2
+
+          Enum.each(forecast.mean ++ forecast.sd ++ forecast.lower ++ forecast.upper, fn value ->
+            assert finite_number?(value)
+          end)
+        end)
+
+      assert log =~ "missing observations"
     end
   end
 
@@ -277,4 +302,7 @@ defmodule BstsNx.Applications.DemandForecasterTest do
       assert length(decomp.fitted) == n
     end
   end
+
+  defp finite_number?(value) when is_number(value), do: value == value and abs(value) < 1.0e300
+  defp finite_number?(_value), do: false
 end

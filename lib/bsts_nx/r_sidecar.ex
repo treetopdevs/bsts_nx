@@ -13,20 +13,12 @@ defmodule BstsNx.RSidecar do
   @default_timeout_ms 120_000
   @max_payload_cells 500_000
   @max_error_output_bytes 4_096
+  @max_sidecar_output_bytes 10 * 1024 * 1024
   @availability_sentinel "BSTS_NX_R_SIDECAR_READY"
   @missing_packages_sentinel "BSTS_NX_R_PACKAGES_MISSING"
-  @sidecar_env_allowlist [
-    "PATH",
-    "HOME",
-    "TMPDIR",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "R_HOME",
-    "R_LIBS",
-    "R_LIBS_USER",
-    "R_LIBS_SITE"
-  ]
+  @rscript_startup_flags ["--vanilla", "--no-environ", "--no-site-file", "--no-init-file"]
+  @trusted_path "/usr/local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+  @locale_env_allowlist ["LANG", "LC_ALL", "LC_CTYPE"]
 
   @type run_result :: %{
           summary: [map()],
@@ -46,7 +38,7 @@ defmodule BstsNx.RSidecar do
   @doc """
   Returns `:ok` or `{:error, reason}` with the missing sidecar dependency.
   """
-  @spec availability() :: :ok | {:error, atom()}
+  @spec availability() :: :ok | {:error, atom() | map()}
   def availability do
     with {:ok, rscript} <- rscript_path(),
          :ok <- require_r_packages(rscript) do
@@ -67,6 +59,11 @@ defmodule BstsNx.RSidecar do
     * `:alpha` - interval tail probability, default `0.05`
     * `:timeout_ms` - process timeout, default `BSTS_NX_R_TIMEOUT_MS` or 120s
     * `:nseasons` and `:season_duration` - optional CausalImpact model args
+
+  The sidecar runs with an isolated R startup environment. Ambient `R_LIBS*`,
+  `R_HOME`, `HOME`, and `PATH` are not inherited. If your R packages live
+  outside system libraries, configure trusted paths with `BSTS_NX_R_LIBS_USER`
+  or `BSTS_NX_R_LIBS_SITE`.
   """
   @spec run_report(
           [number()],
@@ -98,7 +95,12 @@ defmodule BstsNx.RSidecar do
       try do
         {elapsed_us, result} =
           Execution.measure(fn ->
-            system_cmd(rscript, ["-e", r_code()], [env: env, stderr_to_stdout: true], timeout_ms)
+            system_cmd(rscript, r_eval_args(r_code()),
+              env: env,
+              stderr_to_stdout: true,
+              max_output_bytes: Keyword.get(opts, :max_output_bytes, @max_sidecar_output_bytes)
+            )
+            |> wait_or_timeout(timeout_ms)
           end)
 
         case result do
@@ -116,15 +118,21 @@ defmodule BstsNx.RSidecar do
                 {:error, reason}
             end
 
+          {:output_too_large, max_bytes} ->
+            {:error, %{reason: :r_output_too_large, max_bytes: max_bytes}}
+
+          :timeout ->
+            {:error, %{reason: :r_timeout, timeout_ms: timeout_ms}}
+
+          {:error, reason} ->
+            {:error, reason}
+
           {out, status} ->
             Logger.debug(fn ->
               "R sidecar failed with status #{status}:\n#{String.trim(out)}"
             end)
 
             {:error, %{reason: :r_failed, status: status, output_excerpt: output_excerpt(out)}}
-
-          :timeout ->
-            {:error, %{reason: :r_timeout, timeout_ms: timeout_ms}}
         end
       after
         cleanup_payload(data_path, temp_dir)
@@ -150,7 +158,7 @@ defmodule BstsNx.RSidecar do
       is_binary(env_path) and env_path != "" ->
         validate_rscript_override(env_path)
 
-      path = System.find_executable("Rscript") ->
+      path = find_trusted_rscript() ->
         {:ok, path}
 
       true ->
@@ -171,6 +179,15 @@ defmodule BstsNx.RSidecar do
     end
   end
 
+  defp find_trusted_rscript do
+    @trusted_path
+    |> String.split(path_separator(), trim: true)
+    |> Enum.map(&Path.join(&1, "Rscript"))
+    |> Enum.find(fn path ->
+      match?({:ok, %{type: :regular, mode: mode}} when band(mode, 0o111) != 0, File.stat(path))
+    end)
+  end
+
   defp require_r_packages(rscript) do
     code = """
     ok <- requireNamespace("CausalImpact", quietly = TRUE) &&
@@ -184,7 +201,8 @@ defmodule BstsNx.RSidecar do
     }
     """
 
-    case system_cmd(rscript, ["-e", code], [stderr_to_stdout: true], 30_000) do
+    case system_cmd(rscript, r_eval_args(code), stderr_to_stdout: true)
+         |> wait_or_timeout(30_000) do
       {out, 0} ->
         if sentinel_line?(out, @availability_sentinel) do
           :ok
@@ -192,15 +210,21 @@ defmodule BstsNx.RSidecar do
           {:error, :rscript_invalid}
         end
 
+      :timeout ->
+        {:error, :r_timeout}
+
+      {:output_too_large, _max_bytes} ->
+        {:error, :r_unavailable}
+
+      {:error, reason} ->
+        {:error, reason}
+
       {out, _status} ->
         if sentinel_line?(out, @missing_packages_sentinel) do
           {:error, :r_packages_not_installed}
         else
           {:error, :r_unavailable}
         end
-
-      :timeout ->
-        {:error, :r_timeout}
     end
   rescue
     _ -> {:error, :r_unavailable}
@@ -212,31 +236,65 @@ defmodule BstsNx.RSidecar do
     |> Enum.any?(&(String.trim(&1) == sentinel))
   end
 
-  defp system_cmd(command, args, opts, timeout_ms) do
-    port_opts =
-      [
-        :binary,
-        :exit_status,
-        args: args,
-        env: sidecar_env(Keyword.get(opts, :env, []))
-      ]
-      |> maybe_stderr_to_stdout(Keyword.get(opts, :stderr_to_stdout, false))
+  defp r_eval_args(code), do: @rscript_startup_flags ++ ["-e", code]
 
-    port = Port.open({:spawn_executable, String.to_charlist(command)}, port_opts)
-    deadline = System.monotonic_time(:millisecond) + timeout_ms
+  defp system_cmd(command, args, opts) do
+    case sidecar_runtime_env() do
+      {:ok, runtime_dir, runtime_env} ->
+        case sidecar_env(Keyword.get(opts, :env, []), runtime_env) do
+          {:ok, env} ->
+            port_opts =
+              [
+                :binary,
+                :exit_status,
+                args: args,
+                env: env
+              ]
+              |> maybe_stderr_to_stdout(Keyword.get(opts, :stderr_to_stdout, false))
 
-    collect_port(port, [], deadline)
+            port = Port.open({:spawn_executable, String.to_charlist(command)}, port_opts)
+
+            {:ok, port, runtime_dir,
+             Keyword.get(opts, :max_output_bytes, @max_sidecar_output_bytes)}
+
+          {:error, reason} ->
+            cleanup_temp_dir(runtime_dir)
+            {:error, reason}
+        end
+
+      {:error, reason} ->
+        {:error, reason}
+    end
   end
 
   defp maybe_stderr_to_stdout(port_opts, true), do: [:stderr_to_stdout | port_opts]
   defp maybe_stderr_to_stdout(port_opts, _false), do: port_opts
 
-  defp collect_port(port, chunks, deadline) do
+  defp wait_or_timeout({:ok, port, runtime_dir, max_output_bytes}, timeout_ms) do
+    deadline = System.monotonic_time(:millisecond) + timeout_ms
+
+    try do
+      collect_port(port, [], 0, max_output_bytes, deadline)
+    after
+      cleanup_temp_dir(runtime_dir)
+    end
+  end
+
+  defp wait_or_timeout({:error, reason}, _timeout_ms), do: {:error, reason}
+
+  defp collect_port(port, chunks, byte_count, max_output_bytes, deadline) do
     timeout = max(deadline - System.monotonic_time(:millisecond), 0)
 
     receive do
       {^port, {:data, data}} ->
-        collect_port(port, [data | chunks], deadline)
+        new_byte_count = byte_count + byte_size(data)
+
+        if new_byte_count > max_output_bytes do
+          terminate_port(port)
+          {:output_too_large, max_output_bytes}
+        else
+          collect_port(port, [data | chunks], new_byte_count, max_output_bytes, deadline)
+        end
 
       {^port, {:exit_status, status}} ->
         {chunks |> Enum.reverse() |> IO.iodata_to_binary(), status}
@@ -281,14 +339,33 @@ defmodule BstsNx.RSidecar do
     _ -> :ok
   end
 
-  defp sidecar_env(extra_env) do
+  defp sidecar_runtime_env do
+    runtime_dir = private_temp_dir()
+    home_dir = Path.join(runtime_dir, "home")
+    tmp_dir = Path.join(runtime_dir, "tmp")
+
+    with :ok <- File.mkdir(runtime_dir),
+         :ok <- File.chmod(runtime_dir, 0o700),
+         :ok <- File.mkdir(home_dir),
+         :ok <- File.chmod(home_dir, 0o700),
+         :ok <- File.mkdir(tmp_dir),
+         :ok <- File.chmod(tmp_dir, 0o700) do
+      {:ok, runtime_dir, [{"HOME", home_dir}, {"TMPDIR", tmp_dir}]}
+    else
+      {:error, reason} ->
+        cleanup_temp_dir(runtime_dir)
+        {:error, %{reason: :sidecar_runtime_dir_failed, message: :file.format_error(reason)}}
+    end
+  end
+
+  defp sidecar_env(extra_env, runtime_env) do
     cleared_parent =
       System.get_env()
       |> Map.keys()
       |> Enum.map(fn key -> {String.to_charlist(key), false} end)
 
-    allowed_parent =
-      @sidecar_env_allowlist
+    locale_env =
+      @locale_env_allowlist
       |> Enum.flat_map(fn key ->
         case System.get_env(key) do
           nil -> []
@@ -296,16 +373,74 @@ defmodule BstsNx.RSidecar do
         end
       end)
 
-    explicit =
-      Enum.map(extra_env, fn {key, value} ->
-        {to_env_charlist(key), to_env_charlist(value)}
-      end)
+    with {:ok, r_library_env} <- trusted_r_library_env() do
+      explicit =
+        (runtime_env ++ [{"PATH", @trusted_path}] ++ r_library_env ++ extra_env)
+        |> Enum.map(fn {key, value} ->
+          {to_env_charlist(key), to_env_charlist(value)}
+        end)
 
-    cleared_parent ++ allowed_parent ++ explicit
+      {:ok, cleared_parent ++ locale_env ++ explicit}
+    end
   end
 
   defp to_env_charlist(value) when is_binary(value), do: String.to_charlist(value)
   defp to_env_charlist(value), do: value |> to_string() |> String.to_charlist()
+
+  defp trusted_r_library_env do
+    [
+      {"BSTS_NX_R_LIBS_USER", "R_LIBS_USER"},
+      {"BSTS_NX_R_LIBS_SITE", "R_LIBS_SITE"}
+    ]
+    |> Enum.reduce_while({:ok, []}, fn {source_key, target_key}, {:ok, acc} ->
+      case System.get_env(source_key) do
+        nil ->
+          {:cont, {:ok, acc}}
+
+        value ->
+          case trusted_r_library_paths(value) do
+            {:ok, ""} ->
+              {:cont, {:ok, acc}}
+
+            {:ok, paths} ->
+              {:cont, {:ok, [{target_key, paths} | acc]}}
+
+            {:error, reason} ->
+              {:halt, {:error, reason}}
+          end
+      end
+    end)
+    |> case do
+      {:ok, env} -> {:ok, Enum.reverse(env)}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp trusted_r_library_paths(value) do
+    value
+    |> String.split(path_separator(), trim: true)
+    |> Enum.map(&Path.expand/1)
+    |> Enum.reduce_while({:ok, []}, fn path, {:ok, acc} ->
+      case File.stat(path) do
+        {:ok, %{type: :directory}} ->
+          {:cont, {:ok, [path | acc]}}
+
+        _ ->
+          {:halt, {:error, %{reason: :invalid_r_library_path, path: path}}}
+      end
+    end)
+    |> case do
+      {:ok, paths} -> {:ok, paths |> Enum.reverse() |> Enum.join(path_separator())}
+      {:error, reason} -> {:error, reason}
+    end
+  end
+
+  defp path_separator do
+    case :os.type() do
+      {:win32, _} -> ";"
+      _ -> ":"
+    end
+  end
 
   defp validate_periods(observations, {pre_start, pre_end}, {post_start, post_end}) do
     n = length(observations)
@@ -327,8 +462,7 @@ defmodule BstsNx.RSidecar do
 
   defp write_payload_file(observations, regressors) do
     with {:ok, response_values} <- normalize_numeric_list(observations, :response),
-         {:ok, regressor_rows, regressor_cols} <- normalize_regressors(observations, regressors),
-         :ok <- validate_payload_size(length(response_values), regressor_cols) do
+         {:ok, regressor_rows, regressor_cols} <- normalize_regressors(observations, regressors) do
       data =
         response_values
         |> payload_lines(regressor_rows, regressor_cols)
@@ -378,39 +512,134 @@ defmodule BstsNx.RSidecar do
     end
   end
 
-  defp normalize_regressors(observations, nil) do
-    {:ok, List.duplicate([], length(observations)), 0}
+  defp cleanup_temp_dir(temp_dir) do
+    expanded_temp = Path.expand(temp_dir)
+    expected_prefix = Path.join(System.tmp_dir!(), "bsts_nx_r_sidecar_") |> Path.expand()
+
+    if String.starts_with?(expanded_temp, expected_prefix) do
+      File.rm_rf(temp_dir)
+    end
   end
 
-  defp normalize_regressors(observations, regressors) do
-    tensor =
-      case regressors do
-        %Nx.Tensor{} = t ->
-          t
+  defp normalize_regressors(observations, nil) do
+    with :ok <- validate_payload_size(length(observations), 0) do
+      {:ok, List.duplicate([], length(observations)), 0}
+    end
+  end
 
-        rows when is_list(rows) ->
-          Nx.tensor(rows)
-
-        other ->
-          raise ArgumentError, "regressors must be an Nx tensor or list, got: #{inspect(other)}"
-      end
-
+  defp normalize_regressors(observations, %Nx.Tensor{} = tensor) do
     if Nx.rank(tensor) != 2 do
       {:error, %{reason: :invalid_regressors, shape: Nx.shape(tensor)}}
     else
       {rows, cols} = Nx.shape(tensor)
 
-      if rows != length(observations) do
-        {:error,
-         %{reason: :invalid_regressor_rows, rows: rows, observations: length(observations)}}
+      cond do
+        rows != length(observations) ->
+          {:error,
+           %{reason: :invalid_regressor_rows, rows: rows, observations: length(observations)}}
+
+        validate_payload_size(rows, cols) != :ok ->
+          validate_payload_size(rows, cols)
+
+        cols == 0 ->
+          {:ok, List.duplicate([], rows), 0}
+
+        true ->
+          with {:ok, values} <- tensor |> Nx.to_flat_list() |> normalize_numeric_list(:regressors) do
+            {:ok, Enum.chunk_every(values, cols), cols}
+          end
+      end
+    end
+  end
+
+  defp normalize_regressors(observations, rows) when is_list(rows) do
+    with {:ok, cols} <- validate_regressor_rows_shape(rows, length(observations)),
+         :ok <- validate_payload_size(length(rows), cols) do
+      if cols == 0 do
+        {:ok, List.duplicate([], length(rows)), 0}
       else
-        with {:ok, values} <- tensor |> Nx.to_flat_list() |> normalize_numeric_list(:regressors) do
+        with {:ok, values} <- rows |> List.flatten() |> normalize_numeric_list(:regressors) do
           {:ok, Enum.chunk_every(values, cols), cols}
         end
       end
     end
-  rescue
-    e in ArgumentError -> {:error, %{reason: :invalid_regressors, message: Exception.message(e)}}
+  end
+
+  defp normalize_regressors(_observations, other) do
+    {:error,
+     %{
+       reason: :invalid_regressors,
+       message: "regressors must be an Nx tensor or list, got: #{inspect(other)}"
+     }}
+  end
+
+  defp validate_regressor_rows_shape(rows, observations_length) do
+    if length(rows) != observations_length do
+      {:error,
+       %{reason: :invalid_regressor_rows, rows: length(rows), observations: observations_length}}
+    else
+      validate_regressor_row_lengths(rows)
+    end
+  end
+
+  defp validate_regressor_row_lengths([]), do: {:ok, 0}
+
+  defp validate_regressor_row_lengths([first | rest]) when is_list(first) do
+    cols = length(first)
+
+    rest
+    |> Enum.with_index(1)
+    |> Enum.reduce_while(:ok, fn
+      {row, idx}, :ok when is_list(row) ->
+        if length(row) == cols do
+          {:cont, :ok}
+        else
+          {:halt,
+           {:error,
+            %{reason: :invalid_regressors, row: idx, columns: length(row), expected_columns: cols}}}
+        end
+
+      {_row, idx}, :ok ->
+        {:halt,
+         {:error,
+          %{reason: :invalid_regressors, row: idx, message: "regressor rows must be lists"}}}
+    end)
+    |> case do
+      :ok -> {:ok, cols}
+      error -> error
+    end
+  end
+
+  defp validate_regressor_row_lengths([_first | _rest]) do
+    {:error, %{reason: :invalid_regressors, row: 0, message: "regressor rows must be lists"}}
+  end
+
+  defp validate_payload_size(rows, regressor_cols) do
+    cells = rows * (regressor_cols + 1)
+
+    if cells > @max_payload_cells do
+      {:error, %{reason: :payload_too_large, cells: cells, max_cells: @max_payload_cells}}
+    else
+      :ok
+    end
+  end
+
+  defp payload_lines(response_values, regressor_rows, regressor_cols) do
+    header =
+      if regressor_cols == 0 do
+        ["response"]
+      else
+        ["response" | Enum.map(1..regressor_cols//1, &"x#{&1}")]
+      end
+
+    rows =
+      Enum.zip(response_values, regressor_rows)
+      |> Enum.map(fn {response, regressors} ->
+        [response | regressors]
+        |> Enum.map_join("\t", &to_string/1)
+      end)
+
+    [Enum.join(header, "\t") | rows]
   end
 
   defp normalize_numeric_list(values, field) do
@@ -432,29 +661,6 @@ defmodule BstsNx.RSidecar do
       {:ok, normalized} -> {:ok, Enum.reverse(normalized)}
       error -> error
     end
-  end
-
-  defp validate_payload_size(rows, regressor_cols) do
-    cells = rows * (regressor_cols + 1)
-
-    if cells > @max_payload_cells do
-      {:error, %{reason: :payload_too_large, cells: cells, max_cells: @max_payload_cells}}
-    else
-      :ok
-    end
-  end
-
-  defp payload_lines(response_values, regressor_rows, regressor_cols) do
-    header = ["response" | Enum.map(1..regressor_cols//1, &"x#{&1}")]
-
-    rows =
-      Enum.zip(response_values, regressor_rows)
-      |> Enum.map(fn {response, regressors} ->
-        [response | regressors]
-        |> Enum.map_join("\t", &to_string/1)
-      end)
-
-    [Enum.join(header, "\t") | rows]
   end
 
   defp timeout_ms(opts) do

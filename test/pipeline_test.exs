@@ -395,6 +395,14 @@ defmodule BstsNx.PipelineTest do
       narrow_width = a_narrow.lift_upper - a_narrow.lift_lower
       wide_width = a_wide.lift_upper - a_wide.lift_lower
       assert narrow_width >= wide_width
+
+      narrow_summary_width =
+        r_narrow.summary.cumulative_effect.upper - r_narrow.summary.cumulative_effect.lower
+
+      wide_summary_width =
+        r_wide.summary.cumulative_effect.upper - r_wide.summary.cumulative_effect.lower
+
+      assert narrow_summary_width >= wide_summary_width
     end
   end
 

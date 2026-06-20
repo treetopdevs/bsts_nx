@@ -2,6 +2,7 @@ defmodule BstsNx.RollingBaselineRegressionTest do
   use ExUnit.Case, async: true
 
   alias BstsNx.RollingBaseline
+  alias BstsNx.ModelSpec
 
   # All tests in this module exercise the MCMC sampler
   @moduletag :external
@@ -125,6 +126,38 @@ defmodule BstsNx.RollingBaselineRegressionTest do
 
       # All variances non-negative
       Enum.each(cf.variance, fn v -> assert v >= 0.0 end)
+    end
+
+    test "preserves f64 post regressor precision when building counterfactual H" do
+      sentinel = 16_777_217.0
+
+      spec = %ModelSpec{
+        f: Nx.eye(2, type: {:f, 64}),
+        h: [Nx.tensor([[0.0, 0.0]], type: {:f, 64})],
+        x0: Nx.tensor([0.0, 1.0], type: {:f, 64}),
+        p0: Nx.broadcast(0.0, {2, 2}) |> Nx.as_type({:f, 64}),
+        obs_var: 1.0,
+        q_specs: []
+      }
+
+      sample = %{
+        states: [Nx.tensor([0.0, 1.0], type: {:f, 64})],
+        state_covs: [Nx.broadcast(0.0, {2, 2}) |> Nx.as_type({:f, 64})],
+        q_matrix: Nx.broadcast(0.0, {2, 2}) |> Nx.as_type({:f, 64}),
+        obs_var: Nx.tensor(1.0, type: {:f, 64})
+      }
+
+      fit_result = %{
+        posterior_samples: [sample],
+        spec: spec,
+        n_regression_dims: 1
+      }
+
+      post_regressors = Nx.tensor([[sentinel], [sentinel + 2.0]], type: {:f, 64})
+
+      cf = RollingBaseline.counterfactual(fit_result, 2, post_regressors: post_regressors)
+
+      assert cf.mean == [sentinel, sentinel + 2.0]
     end
 
     test "infers regression dims when fit_result.n_regression_dims is 0" do

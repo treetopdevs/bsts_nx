@@ -71,6 +71,10 @@ defmodule BstsNx.Bench.GibbsFusion do
   end
 
   defp configure_backend!("exla") do
+    unless Code.ensure_loaded?(EXLA) do
+      raise "BENCH_BACKEND=exla requested, but EXLA is unavailable; add :exla to your deps"
+    end
+
     Nx.global_default_backend(EXLA.Backend)
     Nx.Defn.global_default_options(compiler: EXLA)
     "EXLA"

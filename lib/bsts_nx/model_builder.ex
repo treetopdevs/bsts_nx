@@ -235,22 +235,30 @@ defmodule BstsNx.ModelBuilder do
   @doc """
   Coerces a list of observations to floats.
 
-  Handles Nx tensors (extracts scalar) and integers (converts to float).
+  Handles Nx tensors (extracts scalar), integers (converts to float), and
+  missing observations (`nil`, `:nan`, or NaN values) by preserving them as a
+  NaN sentinel for downstream missing-data handling.
   """
-  @spec coerce_obs([number() | Nx.t()]) :: [float()]
+  @spec coerce_obs([number() | nil | atom() | Nx.t()]) :: [float()]
   def coerce_obs(observations) do
-    Enum.map(observations, fn
-      %Nx.Tensor{} = t -> Nx.to_number(t)
-      x when is_number(x) -> x + 0.0
-    end)
+    Enum.map(observations, &coerce_observation/1)
   end
 
   @doc """
-  Returns the first observation as a float, defaulting to 0.0.
+  Returns the first observed value as a float, defaulting to 0.0.
   """
-  @spec first_obs([number()]) :: float()
+  @spec first_obs([number() | nil | atom() | Nx.t()]) :: float()
   def first_obs([]), do: 0.0
-  def first_obs([first | _]) when is_number(first), do: first + 0.0
+
+  def first_obs(observations) do
+    Enum.find_value(observations, fn obs ->
+      if BstsNx.Utils.missing_observation?(obs) do
+        nil
+      else
+        coerce_observation(obs)
+      end
+    end) || 0.0
+  end
 
   @doc """
   Safely converts potentially non-numeric values to floats.
@@ -419,11 +427,8 @@ defmodule BstsNx.ModelBuilder do
 
     static_h_batched = Nx.broadcast(static_h, {horizon, n_non_reg})
     combined = Nx.concatenate([static_h_batched, future_t], axis: 1)
-    n_cols = n_non_reg + p
 
-    combined
-    |> Nx.to_list()
-    |> Enum.map(fn row -> Nx.reshape(Nx.tensor(row), {1, n_cols}) end)
+    BstsNx.Utils.tensor_rows_to_row_matrices(combined)
   end
 
   defp build_base_spec(_observations, nil), do: nil
@@ -575,6 +580,27 @@ defmodule BstsNx.ModelBuilder do
 
   defp build_selected_regressors(regressors, selected_indices) do
     Nx.take(regressors, Nx.tensor(selected_indices, type: {:s, 64}), axis: 1)
+  end
+
+  defp coerce_observation(obs) do
+    cond do
+      BstsNx.Utils.missing_observation?(obs) ->
+        missing_observation_sentinel()
+
+      match?(%Nx.Tensor{}, obs) ->
+        Nx.to_number(obs) + 0.0
+
+      is_number(obs) ->
+        obs + 0.0
+
+      true ->
+        raise ArgumentError,
+              "observations must be numbers, scalar Nx tensors, or missing values; got: #{inspect(obs)}"
+    end
+  end
+
+  defp missing_observation_sentinel do
+    Nx.Constants.nan() |> Nx.to_number()
   end
 
   defp normalize_number(n) when is_number(n) do

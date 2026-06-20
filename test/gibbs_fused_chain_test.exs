@@ -39,15 +39,20 @@ defmodule BstsNx.GibbsFusedChainTest do
       assert length(fused) == 6
       assert length(stepwise) == 6
 
+      assert length(fused) == length(stepwise)
+
       Enum.zip(fused, stepwise)
       |> Enum.with_index()
       |> Enum.each(fn {{f, s}, idx} ->
         assert_scalar_close(f.process_var, s.process_var, "process_var[#{idx}]")
         assert_scalar_close(f.obs_var, s.obs_var, "obs_var[#{idx}]")
+
         assert length(f.states) == length(s.states)
 
         Enum.zip(f.states, s.states)
         |> Enum.each(fn {a, b} -> assert_scalar_close(a, b, "state[#{idx}]") end)
+
+        assert length(f.state_covs) == length(s.state_covs)
 
         Enum.zip(f.state_covs, s.state_covs)
         |> Enum.each(fn {a, b} -> assert_scalar_close(a, b, "state_cov[#{idx}]") end)
@@ -63,6 +68,8 @@ defmodule BstsNx.GibbsFusedChainTest do
 
         stepwise =
           GibbsSampler.sample_general(obs, 1.0, 1.0, 4, key: key, burn_in: 2, fused: false)
+
+        assert length(fused) == length(stepwise)
 
         Enum.zip(fused, stepwise)
         |> Enum.each(fn {f, s} ->
@@ -80,10 +87,14 @@ defmodule BstsNx.GibbsFusedChainTest do
       fused = GibbsSampler.sample_general(obs, 1.0, h, 3, key: key, fused: true)
       stepwise = GibbsSampler.sample_general(obs, 1.0, h, 3, key: key, fused: false)
 
+      assert length(fused) == length(stepwise)
+
       Enum.zip(fused, stepwise)
       |> Enum.each(fn {f, s} ->
         assert_scalar_close(f.process_var, s.process_var, "process_var")
         assert_scalar_close(f.obs_var, s.obs_var, "obs_var")
+
+        assert length(f.states) == length(s.states)
 
         Enum.zip(f.states, s.states)
         |> Enum.each(fn {a, b} -> assert_scalar_close(a, b, "state") end)
@@ -119,6 +130,8 @@ defmodule BstsNx.GibbsFusedChainTest do
 
       assert length(fused) == 5
 
+      assert length(fused) == length(stepwise)
+
       Enum.zip(fused, stepwise)
       |> Enum.with_index()
       |> Enum.each(fn {{f, s}, idx} ->
@@ -127,8 +140,12 @@ defmodule BstsNx.GibbsFusedChainTest do
         assert f.regression_beta == nil
         assert f.regression_gamma == nil
 
+        assert length(f.states) == length(s.states)
+
         Enum.zip(f.states, s.states)
         |> Enum.each(fn {a, b} -> assert_tensor_close(a, b, "states[#{idx}]") end)
+
+        assert length(f.state_covs) == length(s.state_covs)
 
         Enum.zip(f.state_covs, s.state_covs)
         |> Enum.each(fn {a, b} -> assert_tensor_close(a, b, "state_covs[#{idx}]") end)
@@ -154,6 +171,8 @@ defmodule BstsNx.GibbsFusedChainTest do
         stepwise =
           GibbsSampler.sample_structured(obs, spec, 4, key: key, burn_in: 2, fused: false)
 
+        assert length(fused) == length(stepwise)
+
         Enum.zip(fused, stepwise)
         |> Enum.each(fn {f, s} ->
           assert_tensor_close(f.q_matrix, s.q_matrix, "q_matrix")
@@ -176,10 +195,14 @@ defmodule BstsNx.GibbsFusedChainTest do
       fused = GibbsSampler.sample_structured(obs, spec, 2, key: key, burn_in: 1, fused: true)
       stepwise = GibbsSampler.sample_structured(obs, spec, 2, key: key, burn_in: 1, fused: false)
 
+      assert length(fused) == length(stepwise)
+
       Enum.zip(fused, stepwise)
       |> Enum.each(fn {f, s} ->
         assert_tensor_close(f.q_matrix, s.q_matrix, "q_matrix")
         assert_scalar_close(f.obs_var, s.obs_var, "obs_var")
+
+        assert length(f.states) == length(s.states)
 
         Enum.zip(f.states, s.states)
         |> Enum.each(fn {a, b} -> assert_tensor_close(a, b, "states") end)
