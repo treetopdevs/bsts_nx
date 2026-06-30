@@ -80,48 +80,10 @@ defmodule BstsNx.Smoother do
   end
 
   Nx.Defn.defn rts_defn_impl(xs, ps, f, q) do
-    t = Nx.axis_size(xs, 0)
-    x_type = Nx.type(xs)
-    p_type = Nx.type(ps)
-    # Initialize output accumulators
-    sxs = Nx.broadcast(Nx.tensor(0.0, type: x_type), {t})
-    sps = Nx.broadcast(Nx.tensor(0.0, type: p_type), {t})
-    # Set the last element to the filtered value (smoother boundary condition)
-    last_idx = t - 1
-    sxs = Nx.put_slice(sxs, [last_idx], Nx.reshape(take_scalar_at(xs, last_idx), {1}))
-    sps = Nx.put_slice(sps, [last_idx], Nx.reshape(take_scalar_at(ps, last_idx), {1}))
-
-    # Backward pass: iterate from t-2 down to 0
-    # Use an ascending counter k from 0..(t-2) and compute i = t - 2 - k
-    # to avoid signed integer issues with decrementing Nx while loops
-    num_steps = t - 1
-
-    {_, sxs_out, sps_out, _, _, _, _} =
-      while {k = Nx.tensor(0), sxs_acc = sxs, sps_acc = sps, xs_in = xs, ps_in = ps, f_in = f,
-             q_in = q},
-            k < num_steps do
-        i = last_idx - 1 - k
-        x_filt = take_scalar_at(xs_in, i)
-        p_filt = take_scalar_at(ps_in, i)
-        # Recompute predicted state/cov at i+1 from filtered at i
-        x_pred_next = f_in * x_filt
-        p_pred_next = f_in * p_filt * f_in + q_in
-        # Smoothing gain: C_k = P_filt * F / P_pred_next
-        # Guard against zero predicted covariance (perfect state knowledge)
-        near_zero_p = Nx.abs(p_pred_next) < @near_zero_covariance
-        safe_pred = Nx.select(near_zero_p, 1.0, p_pred_next)
-        c = Nx.select(near_zero_p, 0.0, p_filt * f_in / safe_pred)
-        # Smoothed state from previously stored smooth_{i+1}
-        x_smooth_next = take_scalar_at(sxs_acc, i + 1)
-        p_smooth_next = take_scalar_at(sps_acc, i + 1)
-        x_smooth = x_filt + c * (x_smooth_next - x_pred_next)
-        p_smooth = p_filt + c * (p_smooth_next - p_pred_next) * c
-        sxs_new = Nx.put_slice(sxs_acc, [i], Nx.reshape(x_smooth, {1}))
-        sps_new = Nx.put_slice(sps_acc, [i], Nx.reshape(p_smooth, {1}))
-        {k + 1, sxs_new, sps_new, xs_in, ps_in, f_in, q_in}
-      end
-
-    {sxs_out, sps_out}
+    # Single source of truth for the scalar backward pass lives in
+    # rts_defn_with_lag1_impl/4; this variant simply discards the lag-1 output.
+    {sxs, sps, _lag1} = rts_defn_with_lag1_impl(xs, ps, f, q)
+    {sxs, sps}
   end
 
   for {name, gain_fun} <- [
