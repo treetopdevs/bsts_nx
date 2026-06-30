@@ -390,7 +390,7 @@ defmodule BstsNx.InterventionAnalysis do
     spec =
       model_spec ||
         Components.local_level_spec(
-          initial_state: Keyword.get(opts, :x0, List.first(observations) || 0.0),
+          initial_state: Keyword.get(opts, :x0, ModelBuilder.first_obs(observations)),
           initial_cov: Keyword.get(opts, :p0, 1.0),
           process_var: Keyword.get(opts, :q, 1.0),
           obs_var: Keyword.get(opts, :r, 1.0)
