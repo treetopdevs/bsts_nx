@@ -49,3 +49,6 @@ docs/~$
 /logs
 /.specstory
 bench/results/current.json
+
+# Local development planning artifact (kept on disk, not tracked).
+/optimize-plan.md
