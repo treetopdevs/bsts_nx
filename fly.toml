@@ -1,0 +1,40 @@
+# fly.toml — BstsNx showcase site
+# Build context is the repo root (the site has a path dependency on the library).
+app = "bsts-nx"
+primary_region = "iad"
+
+[build]
+  dockerfile = "Dockerfile"
+
+[env]
+  PHX_HOST = "bsts-nx.fly.dev"
+  PORT = "8080"
+
+[http_service]
+  internal_port = 8080
+  force_https = true
+  auto_stop_machines = "suspend"
+  auto_start_machines = true
+  # Keep one machine warm: demos are computed in-process and the first
+  # impression should be instant.
+  min_machines_running = 1
+  processes = ["app"]
+
+  [http_service.concurrency]
+    type = "connections"
+    hard_limit = 200
+    soft_limit = 150
+
+[[vm]]
+  size = "shared-cpu-2x"
+  memory = "2gb"
+
+[checks]
+  [checks.http]
+    grace_period = "20s"
+    interval = "30s"
+    method = "get"
+    path = "/"
+    port = 8080
+    timeout = "5s"
+    type = "http"

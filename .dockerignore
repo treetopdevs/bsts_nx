@@ -1,0 +1,21 @@
+# Build context is the repo root; keep the context lean.
+_build/
+deps/
+doc/
+cover/
+bench/
+test/
+plans/
+docs/
+livebooks/
+scripts/
+.git/
+.claude/
+*.md
+!site/DESIGN_CONTRACT.md
+
+site/_build/
+site/deps/
+site/test/
+site/priv/static/assets/
+site/.claude/
