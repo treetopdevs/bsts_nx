@@ -494,7 +494,9 @@ defmodule BstsNx.Smoother do
     end
   end
 
-  defp backend_supports_lu? do
+  @doc false
+  # Used by GibbsSampler to pick between solve/pinv compiled chain variants.
+  def backend_supports_lu? do
     case Nx.default_backend() do
       EMLX.Backend -> false
       {EMLX.Backend, _opts} -> false

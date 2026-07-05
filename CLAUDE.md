@@ -23,6 +23,7 @@ BSTS_NX_TEST_BACKEND=exla mix test test/structured_performance_smoke_test.exs te
 BSTS_NX_TEST_BACKEND=emlx mix test test/structured_performance_smoke_test.exs test/utils_safe_solve_test.exs
 BSTS_NX_ENABLE_R_PARITY=1 mix test test/r_parity_test.exs
 mix bench.structured_backends       # Compare structured sampler backend behavior
+mix bench.gibbs_fusion              # Compare stepwise vs fused Gibbs chains (BENCH_BACKEND=binary|exla)
 ```
 
 `bash scripts/ci.sh` mirrors the default GitHub Actions `test` and `quality`
@@ -82,6 +83,7 @@ optional lanes.
 - **Dual implementations**: Core algorithms have both eager (list-based, multi-dim) and compiled (`Nx.Defn`, scalar-only) versions. The `_defn` suffix indicates JIT-compilable functions.
 - **`ModelSpec` composition**: Complex models are built by composing simple specs via `Components.compose_specs/2`, which block-diagonalizes F/Q, concatenates H, and shifts q_specs indices.
 - **Parallel chains**: Both `sample_chains` and `sample_structured_chains` use `Task.async_stream` for parallel MCMC chains with per-chain PRNG seeds.
+- **Fused MCMC chains**: The scalar and structured (non-spike-and-slab) Gibbs samplers can run the entire chain inside one `Nx.Defn` while-loop (`:fused` option). The default is compiler-aware: fusion is on when a defn compiler is configured (e.g. `Nx.Defn.global_default_options(compiler: EXLA)`) and off under the interpreting evaluator. Both paths produce identical draws for the same key.
 
 ## Dependencies
 

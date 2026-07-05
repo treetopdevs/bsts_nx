@@ -34,6 +34,7 @@ defmodule BstsNx.GibbsSampler do
     only: [to_tensor: 1, missing_observation?: 1, split_key_at: 2]
 
   require Logger
+  require Nx.Defn
 
   @type sample_result :: %{
           states: [Nx.t()],
@@ -92,6 +93,13 @@ defmodule BstsNx.GibbsSampler do
       process and observation variances (default: 1.0).
     * `:prior_scale` – scale parameter for the inverse‑gamma prior on both
       process and observation variances (default: 1.0).
+    * `:fused` – when `true`, the entire MCMC chain runs inside a single
+      `Nx.Defn` while-loop, so a compiled backend executes the whole run as
+      one program (roughly an order of magnitude faster under EXLA).
+      Defaults to `true` when a global defn compiler is configured via
+      `Nx.Defn.global_default_options(compiler: ...)` and `false` under the
+      interpreting evaluator, where stepwise execution is faster.  Draws are
+      identical between both paths for the same key.
 
   The sampler returns a list of `num_samples` draws, after applying burn‑in
   and thinning.  Each draw is a map containing the latent state trajectory,
@@ -261,6 +269,66 @@ defmodule BstsNx.GibbsSampler do
     t_steps = obs_present_mask |> Nx.sum() |> Nx.to_number() |> round()
     num_diffs = Structured.latent_transition_count(observations)
 
+    if Keyword.get(opts, :fused, fused_default()) and t >= 2 do
+      sample_general_fused(
+        obs_tensor,
+        h_tensor,
+        f_t,
+        process_var_t,
+        obs_var_t,
+        x0,
+        p0,
+        prior_shape,
+        prior_scale,
+        num_diffs,
+        t_steps,
+        obs_present_mask,
+        burn_in,
+        thin,
+        num_samples,
+        total_iters,
+        key
+      )
+    else
+      sample_general_stepwise(
+        obs_tensor,
+        h_tensor,
+        f_t,
+        process_var_t,
+        obs_var_t,
+        x0,
+        p0,
+        prior_shape,
+        prior_scale,
+        num_diffs,
+        t_steps,
+        obs_present_mask,
+        burn_in,
+        thin,
+        total_iters,
+        key
+      )
+    end
+  end
+
+  defp sample_general_stepwise(
+         obs_tensor,
+         h_tensor,
+         f_t,
+         process_var_t,
+         obs_var_t,
+         x0,
+         p0,
+         prior_shape,
+         prior_scale,
+         num_diffs,
+         t_steps,
+         obs_present_mask,
+         burn_in,
+         thin,
+         total_iters,
+         key
+       ) do
     {_, _, samples_acc, _key_acc} =
       Enum.reduce(1..total_iters, {process_var_t, obs_var_t, [], key}, fn iter,
                                                                           {q_prev, r_prev, acc, k} ->
@@ -301,6 +369,152 @@ defmodule BstsNx.GibbsSampler do
     Enum.reverse(samples_acc)
   end
 
+  # Runs the whole scalar Gibbs chain inside a single compiled defn so the
+  # filter, smoother, simulation smoother and variance resampling execute as
+  # one backend program with no per-iteration host round-trips.  Draws are
+  # bitwise-identical to the stepwise path for the same PRNG key because the
+  # same defn kernels are invoked in the same order.
+  defp sample_general_fused(
+         obs_tensor,
+         h_tensor,
+         f_t,
+         process_var_t,
+         obs_var_t,
+         x0,
+         p0,
+         prior_shape,
+         prior_scale,
+         num_diffs,
+         t_steps,
+         obs_present_mask,
+         burn_in,
+         thin,
+         num_samples,
+         total_iters,
+         key
+       ) do
+    f64 = {:f, 64}
+    t = Nx.axis_size(obs_tensor, 0)
+
+    shape_qr =
+      Nx.tensor([prior_shape + num_diffs / 2, prior_shape + t_steps / 2], type: f64)
+
+    loop_meta = Nx.tensor([burn_in, thin, total_iters], type: {:s, 64})
+    zero = Nx.tensor(0.0, type: f64)
+
+    {states_out, covs_out, qr_out} =
+      scalar_chain_defn(
+        obs_tensor,
+        h_tensor,
+        Nx.as_type(f_t, f64),
+        Nx.as_type(process_var_t, f64),
+        Nx.as_type(obs_var_t, f64),
+        Nx.as_type(x0, f64),
+        Nx.as_type(p0, f64),
+        shape_qr,
+        Nx.tensor(prior_scale, type: f64),
+        obs_present_mask,
+        loop_meta,
+        key,
+        Nx.broadcast(zero, {num_samples, t}),
+        Nx.broadcast(zero, {num_samples, t}),
+        Nx.broadcast(zero, {num_samples, 2})
+      )
+
+    # Pull chain outputs to the host once so the per-sample slicing below does
+    # not issue thousands of small device ops on compiled backends.
+    states_rows =
+      states_out |> to_host() |> Nx.to_batched(1) |> Enum.map(&Nx.squeeze(&1, axes: [0]))
+
+    covs_rows = covs_out |> to_host() |> Nx.to_batched(1) |> Enum.map(&Nx.squeeze(&1, axes: [0]))
+    qr_rows = qr_out |> to_host() |> Nx.to_batched(1) |> Enum.map(&Nx.squeeze(&1, axes: [0]))
+
+    [states_rows, covs_rows, qr_rows]
+    |> Enum.zip()
+    |> Enum.map(fn {states_row, covs_row, qr_row} ->
+      %{
+        states: Structured.scalar_tensor_list(states_row),
+        state_covs: Structured.scalar_tensor_list(covs_row),
+        process_var: qr_row[0],
+        obs_var: qr_row[1]
+      }
+    end)
+  end
+
+  # Compiled scalar Gibbs chain.  `loop_meta` is `[burn_in, thin, total_iters]`
+  # and `shape_qr` holds the (iteration-invariant) inverse-gamma posterior
+  # shapes for Q and R.  Retained draws are written to the preallocated
+  # accumulators: non-retained iterations overwrite the pending slot, which is
+  # finalized by the next retained iteration (the final iteration is always
+  # retained because total_iters = burn_in + num_samples * thin).
+  Nx.Defn.defn scalar_chain_defn(
+                 obs,
+                 h_vec,
+                 f_t,
+                 q0,
+                 r0,
+                 x0,
+                 p0,
+                 shape_qr,
+                 prior_scale,
+                 obs_mask,
+                 loop_meta,
+                 key,
+                 states_acc0,
+                 covs_acc0,
+                 qr_acc0
+               ) do
+    t = Nx.axis_size(obs, 0)
+
+    {_, _, _, _, _, states_out, covs_out, qr_out, _, _, _, _, _, _, _, _, _} =
+      while {iter = Nx.tensor(1, type: {:s, 64}), q = q0, r = r0, k = key,
+             kept = Nx.tensor(0, type: {:s, 64}), states_acc = states_acc0, covs_acc = covs_acc0,
+             qr_acc = qr_acc0, obs_in = obs, h_in = h_vec, f_in = f_t, x0_in = x0, p0_in = p0,
+             shape_in = shape_qr, prior_scale_in = prior_scale, mask_in = obs_mask,
+             meta = loop_meta},
+            iter <= meta[2] do
+        {xs, ps} = KalmanFilter.filter_defn_vec(obs_in, f_in, h_in, q, r, x0_in, p0_in)
+        {sxs, sps} = BstsNx.Smoother.rts_defn_impl(xs, ps, f_in, q)
+        {states_raw, k2} = BstsNx.Smoother.simulate_defn_impl(sxs, sps, xs, ps, f_in, q, k)
+        states = Nx.as_type(states_raw, {:f, 64})
+
+        prev = Nx.slice(states, [0], [t - 1])
+        curr = Nx.slice(states, [1], [t - 1])
+        pdiff = curr - f_in * prev
+        process_ss = Nx.sum(pdiff * pdiff)
+
+        odiff = obs_in - h_in * states
+        obs_ss = Nx.sum(Nx.select(mask_in, odiff * odiff, 0.0))
+
+        scales = Nx.stack([prior_scale_in + process_ss / 2.0, prior_scale_in + obs_ss / 2.0])
+
+        {qr_draw, k3} =
+          Distributions.inv_gamma_sample_defn_impl(
+            shape_in,
+            scales,
+            k2,
+            Nx.tensor(0.0, type: {:f, 64}),
+            Nx.tensor(0, type: {:u, 8})
+          )
+
+        keep =
+          Nx.logical_and(iter > meta[0], Nx.remainder(iter - meta[0], meta[1]) == 0)
+          |> Nx.as_type({:s, 64})
+
+        states_acc = Nx.put_slice(states_acc, [kept, 0], Nx.new_axis(states, 0))
+
+        covs_acc =
+          Nx.put_slice(covs_acc, [kept, 0], Nx.new_axis(Nx.as_type(ps, {:f, 64}), 0))
+
+        qr_acc = Nx.put_slice(qr_acc, [kept, 0], Nx.reshape(qr_draw, {1, 2}))
+
+        {iter + 1, qr_draw[0], qr_draw[1], k3, kept + keep, states_acc, covs_acc, qr_acc, obs_in,
+         h_in, f_in, x0_in, p0_in, shape_in, prior_scale_in, mask_in, meta}
+      end
+
+    {states_out, covs_out, qr_out}
+  end
+
   # ---------------------------------------------------------------------------
   # Structured sampler for multi-dimensional state-space models
   # ---------------------------------------------------------------------------
@@ -336,6 +550,13 @@ defmodule BstsNx.GibbsSampler do
     * `:thin` — keep every nth sample after burn-in (default: 1)
     * `:seed` — integer PRNG seed (default: `System.os_time()`)
     * `:key` — Nx.Random PRNG key (overrides `:seed`)
+    * `:fused` — when `true`, the standard (non-spike-and-slab) sampler runs
+      the entire MCMC chain inside a single `Nx.Defn` while-loop, so a
+      compiled backend executes the whole run as one program.  Defaults to
+      `true` when a global defn compiler is configured via
+      `Nx.Defn.global_default_options(compiler: ...)` and `false` under the
+      interpreting evaluator.  Draws are identical between both paths for
+      the same key.
 
   ## Returns
 
@@ -412,9 +633,20 @@ defmodule BstsNx.GibbsSampler do
           burn_in,
           thin,
           key,
-          total_iters
+          total_iters,
+          Keyword.get(opts, :fused, fused_default())
         )
     end
+  end
+
+  # Whole-chain fusion pays off when defn graphs are compiled (e.g. EXLA),
+  # where it collapses thousands of per-iteration dispatches into one
+  # program.  Under the interpreting evaluator the fused while-loop copies
+  # its sample accumulators every iteration and is slower than the stepwise
+  # path, so fusion is off unless a real compiler is configured.
+  defp fused_default do
+    compiler = Nx.Defn.default_options() |> Keyword.get(:compiler, Nx.Defn.Evaluator)
+    compiler != Nx.Defn.Evaluator
   end
 
   @doc """
@@ -562,6 +794,12 @@ defmodule BstsNx.GibbsSampler do
         end)
     end
   end
+
+  # Moves a (potentially device-backed) tensor to the host BinaryBackend so
+  # repeated small slices stay off the device dispatch path.  Cross-backend
+  # arithmetic remains supported by Nx, so downstream consumers are
+  # unaffected.
+  defp to_host(tensor), do: Nx.backend_copy(tensor, Nx.BinaryBackend)
 
   # -- Input validation helpers ------------------------------------------------
 

@@ -183,7 +183,8 @@ defmodule BstsNx.MixProject do
   defp aliases do
     [
       "bench.optimize": ["run bench/optimize_plan.exs"],
-      "bench.structured_backends": ["run bench/structured_backend_benchmark.exs"]
+      "bench.structured_backends": ["run bench/structured_backend_benchmark.exs"],
+      "bench.gibbs_fusion": ["run bench/gibbs_fusion_benchmark.exs"]
     ]
   end
 end

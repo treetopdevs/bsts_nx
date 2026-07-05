@@ -136,8 +136,8 @@ defmodule BstsNx.Distributions do
     end
 
     validate_prng_key_shape!(key)
-    a = to_tensor(alpha) |> Nx.as_type({:f, 64})
-    s = to_tensor(scale) |> Nx.as_type({:f, 64})
+    a = to_f64_tensor(alpha)
+    s = to_f64_tensor(scale)
 
     unless Nx.shape(a) == Nx.shape(s) do
       raise ArgumentError, "alpha and scale must have the same shape; broadcasting not supported"
@@ -173,8 +173,8 @@ defmodule BstsNx.Distributions do
 
     validate_prng_key_shape!(key)
     max_value = opts |> Keyword.get(:max_value, :infinity) |> parse_max_value()
-    a = to_tensor(alpha) |> Nx.as_type({:f, 64})
-    b = to_tensor(beta) |> Nx.as_type({:f, 64})
+    a = to_f64_tensor(alpha)
+    b = to_f64_tensor(beta)
 
     unless Nx.shape(a) == Nx.shape(b) do
       raise ArgumentError, "alpha and beta must have the same shape; broadcasting not supported"
@@ -352,6 +352,12 @@ defmodule BstsNx.Distributions do
     sample = Nx.add(mean, Nx.dot(chol, noise))
     {sample, next_key}
   end
+
+  # Converts parameters to f64 without an intermediate f32 round-trip:
+  # `to_tensor/1` defaults numbers/lists to f32, which silently truncates
+  # f64 posterior parameters before the cast back to f64.
+  defp to_f64_tensor(%Nx.Tensor{} = t), do: Nx.as_type(t, {:f, 64})
+  defp to_f64_tensor(v), do: Nx.tensor(v, type: {:f, 64})
 
   defp prepare_inv_gamma_inputs(alpha, beta, opts) do
     a = to_tensor(alpha)
