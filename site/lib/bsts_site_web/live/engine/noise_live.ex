@@ -47,8 +47,13 @@ defmodule BstsSiteWeb.Engine.NoiseLive do
     <Layouts.app flash={@flash} track={:engine}>
       <div class="mx-auto max-w-4xl">
         <.mantra active={:decompose} />
-        <.section_heading class="mt-4" eyebrow="Engine · chapter 1" title="Why raw data lies">
-          Each series below is {NoiseQuiz.n()} steps of a random walk — accumulated coin-flip
+        <.section_heading
+          level={1}
+          class="mt-4"
+          eyebrow="Engine · chapter 1"
+          title="Why raw data lies"
+        >
+          Each series below is {NoiseQuiz.n()} steps of a random walk; accumulated coin-flip
           noise with no trend, no seasonality, no cause. Except one: from step {NoiseQuiz.half()},
           it carries a planted shift ramping to +{fmt(NoiseQuiz.shift())} per step.
           Your eyes evolved to find patterns, so all four will look like they're going somewhere.
@@ -64,7 +69,7 @@ defmodule BstsSiteWeb.Engine.NoiseLive do
             Deal four fresh walks
           </button>
           <span class="font-data text-xs text-(--color-ink-faint)">
-            set #{@counter + 1} — the counter seeds the generator, so every visitor's set
+            set #{@counter + 1}; the counter seeds the generator, so every visitor's set
             #{@counter + 1} is identical
           </span>
         </div>
@@ -95,6 +100,8 @@ defmodule BstsSiteWeb.Engine.NoiseLive do
             >
               <.line_figure
                 id={"walk-chart-#{i}"}
+                title={"Random walk #{Enum.at(@batch.labels, i)}"}
+                desc="One random walk candidate in the noise quiz, with the filter baseline and uncertainty band shown after a guess."
                 height={180}
                 series={walk_series(walk, Enum.at(@batch.verdicts, i), @guess)}
                 bands={walk_bands(Enum.at(@batch.verdicts, i), @guess)}
@@ -105,8 +112,7 @@ defmodule BstsSiteWeb.Engine.NoiseLive do
         </div>
 
         <p :if={@guess == nil} class="report-prose mt-1 text-sm text-(--color-ink-soft)">
-          One honest warning before you click: each chart is scaled to fill its own frame —
-          exactly how dashboards do it. The axes tell the truth; the shapes exaggerate.
+          One honest warning before you click: each chart is scaled to fill its own frame; exactly how dashboards do it. The axes tell the truth; the shapes exaggerate.
         </p>
 
         <section :if={@guess != nil}>
@@ -118,16 +124,21 @@ defmodule BstsSiteWeb.Engine.NoiseLive do
             <:legend>
               <.swatch color={:lift} label="estimated cumulative effect" />
             </:legend>
-            <.bar_figure id="quiz-verdict-bars" height={220} items={verdict_items(@batch)} />
+            <.bar_figure
+              id="quiz-verdict-bars"
+              title="Noise quiz effect intervals"
+              desc="Cumulative second-half effects for the four walks are shown with 95% intervals."
+              height={220}
+              items={verdict_items(@batch)}
+            />
           </.figure>
 
           <p class="report-prose -mt-3 mb-4 px-1 text-xs text-(--color-ink-faint)">
             Footnote: <code>estimate_from_filter</code>
-            is the library's fast lane — a
+            is the library's fast lane; a
             filter-and-smooth interpolation that gets to see every point it isn't told to mask.
             Here we masked the whole second half, so it behaves like a forecast; in general its
-            baseline is not a causal counterfactual. It also gets handed the true step size —
-            learning that from data is the Gibbs chapter. And because a 95% interval clears the
+            baseline is not a causal counterfactual. It also gets handed the true step size; learning that from data is the Gibbs chapter. And because a 95% interval clears the
             bar on pure noise about one time in twenty, we deal only vetted sets; the
             calibration page shows what happens when nobody vets.
             <.link navigate={~p"/speed"} class="underline underline-offset-2">
@@ -156,7 +167,7 @@ defmodule BstsSiteWeb.Engine.NoiseLive do
 
             <.reveal_truth
               revealed={@revealed}
-              truth={"Planted: a shift ramping to +#{fmt(@batch.truth.shift)} per step from step #{@batch.truth.start} of walk #{Enum.at(@batch.labels, @batch.planted)} — #{signed(@batch.truth.cumulative)} cumulative."}
+              truth={"Planted: a shift ramping to +#{fmt(@batch.truth.shift)} per step from step #{@batch.truth.start} of walk #{Enum.at(@batch.labels, @batch.planted)}; #{signed(@batch.truth.cumulative)} cumulative."}
               grade={grade_line(@batch)}
             />
           </div>
@@ -164,7 +175,7 @@ defmodule BstsSiteWeb.Engine.NoiseLive do
 
         <p class="report-prose mt-6 text-sm text-(--color-ink-soft)">
           This is the whole reason the site exists. A random walk grows "trends" out of
-          nothing — it has to end up somewhere, and wherever it ends up looks like a story.
+          nothing; it has to end up somewhere, and wherever it ends up looks like a story.
           Your eyes find the pattern; the filter quantifies the doubt. Three of those
           intervals straddle zero, which is the model saying, plainly, "a walk like this
           wanders that much on its own."
@@ -192,7 +203,7 @@ defmodule BstsSiteWeb.Engine.NoiseLive do
             eyebrow="Trust"
             title="Are the intervals honest?"
           >
-            Five planted truths, every interval graded in public — a spot-check of the
+            Five planted truths, every interval graded in public; a spot-check of the
             one-in-twenty promise.
           </.cross_link>
         </div>
@@ -242,22 +253,22 @@ defmodule BstsSiteWeb.Engine.NoiseLive do
   defp parse_walk(_), do: nil
 
   defp walk_caption(i, nil, batch) do
-    "Walk #{Enum.at(batch.labels, i)} — #{NoiseQuiz.n()} steps, axes scaled to fill the frame."
+    "Walk #{Enum.at(batch.labels, i)}; #{NoiseQuiz.n()} steps, axes scaled to fill the frame."
   end
 
   defp walk_caption(i, guess, batch) do
     label = Enum.at(batch.labels, i)
 
     cond do
-      i == batch.planted -> "Walk #{label} — the planted shift lived here."
-      i == guess -> "Walk #{label} — your pick. Pure noise."
-      true -> "Walk #{label} — pure noise."
+      i == batch.planted -> "Walk #{label}; the planted shift lived here."
+      i == guess -> "Walk #{label}; your pick. Pure noise."
+      true -> "Walk #{label}; pure noise."
     end
   end
 
   defp verdict_items(batch) do
     Enum.with_index(batch.verdicts, fn v, i ->
-      suffix = if i == batch.planted, do: " — planted", else: ""
+      suffix = if i == batch.planted, do: "; planted", else: ""
 
       %{
         label: "#{Enum.at(batch.labels, i)}#{suffix}",
@@ -276,9 +287,9 @@ defmodule BstsSiteWeb.Engine.NoiseLive do
     planted_label = Enum.at(batch.labels, batch.planted)
 
     if guess == batch.planted do
-      "Your eyes got it — and the filter agrees: walk #{planted_label}."
+      "Your eyes got it; and the filter agrees: walk #{planted_label}."
     else
-      "Your eyes said #{Enum.at(batch.labels, guess)}. The filter says #{planted_label} — the only interval that excludes zero."
+      "Your eyes said #{Enum.at(batch.labels, guess)}. The filter says #{planted_label}; the only interval that excludes zero."
     end
   end
 
@@ -291,7 +302,7 @@ defmodule BstsSiteWeb.Engine.NoiseLive do
     if truth >= v.lower and truth <= v.upper do
       "The planted #{signed(truth)} sits inside the filter's 95% interval [#{fmt(v.lower)}, #{fmt(v.upper)}]. Recovered."
     else
-      "The planted #{signed(truth)} fell outside the filter's interval [#{fmt(v.lower)}, #{fmt(v.upper)}] — rare, and exactly what the calibration page keeps score on."
+      "The planted #{signed(truth)} fell outside the filter's interval [#{fmt(v.lower)}, #{fmt(v.upper)}]; rare, and exactly what the calibration page keeps score on."
     end
   end
 

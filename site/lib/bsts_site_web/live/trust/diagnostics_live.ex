@@ -58,7 +58,11 @@ defmodule BstsSiteWeb.Trust.DiagnosticsLive do
     <Layouts.app flash={@flash} track={:trust}>
       <div class="mx-auto max-w-4xl">
         <.mantra active={:compare} class="mb-4" />
-        <.section_heading eyebrow="Trust · one fit, five attacks" title="Break your own results">
+        <.section_heading
+          level={1}
+          eyebrow="Trust · one fit, five attacks"
+          title="Break your own results"
+        >
           A causal estimate that merely <em>looks</em> plausible is not worth much. The
           library ships a validation suite that attacks a finished analysis from five
           directions: does the baseline even track the data, are the intervals honest,
@@ -78,6 +82,8 @@ defmodule BstsSiteWeb.Trust.DiagnosticsLive do
           </:legend>
           <.line_figure
             id="diagnostics-fit"
+            title="Diagnostic fit check"
+            desc="Observed series is compared with the model baseline or counterfactual and uncertainty band after checks run."
             height={300}
             y_label="units/day"
             series={fit_series(@scenario, @result)}
@@ -98,7 +104,13 @@ defmodule BstsSiteWeb.Trust.DiagnosticsLive do
           >
             {if @result, do: "Run the fit and its checks again", else: "Run the fit and its checks"}
           </button>
-          <p :if={@running} class="font-data text-sm text-(--color-ink-soft)" aria-live="polite">
+          <p
+            :if={@running}
+            role="status"
+            aria-live="polite"
+            aria-busy="true"
+            class="font-data text-sm text-(--color-ink-soft)"
+          >
             Fitting, then re-fitting three more times for the placebo and stability checks…
           </p>
         </div>
@@ -106,7 +118,9 @@ defmodule BstsSiteWeb.Trust.DiagnosticsLive do
         <.verdict_card
           :if={@busy}
           class="mt-6"
-          verdict="Another visitor is sampling — try again in a moment."
+          role="status"
+          aria-live="polite"
+          verdict="Another visitor is sampling, try again in a moment."
           tone={:warning}
         >
           This page runs four MCMC fits back to back, so concurrent runs are limited on
@@ -130,14 +144,14 @@ defmodule BstsSiteWeb.Trust.DiagnosticsLive do
 
             <.reveal_truth
               revealed={@revealed}
-              truth={"Planted: +#{fmt(@scenario.truth.per_step)}/day from day #{Diagnostics.post_start()} — #{signed(@scenario.truth.cumulative)} cumulative over the #{@scenario.truth.window_days}-day window."}
+              truth={"Planted: +#{fmt(@scenario.truth.per_step)}/day from day #{Diagnostics.post_start()}; #{signed(@scenario.truth.cumulative)} cumulative over the #{@scenario.truth.window_days}-day window."}
               grade={grade_line(@result, @scenario)}
             />
           </div>
 
           <.figure
             no="2"
-            caption={"Pre-period residuals (observed minus the model's baseline) against the 95% band the coverage check tests — #{cov_pct(@result)}% of the #{Diagnostics.n_pre()} points fall inside."}
+            caption={"Pre-period residuals (observed minus the model's baseline) against the 95% band the coverage check tests; #{cov_pct(@result)}% of the #{Diagnostics.n_pre()} points fall inside."}
             execution={@result.execution_checks}
           >
             <:legend>
@@ -146,6 +160,8 @@ defmodule BstsSiteWeb.Trust.DiagnosticsLive do
             </:legend>
             <.line_figure
               id="diagnostics-residuals"
+              title="Diagnostic residuals"
+              desc="Residuals from the fitted model are shown against a 95% band."
               height={220}
               y_label="residual"
               series={[%{points: @result.residuals, color: :ink, width: 1.3}]}
@@ -162,7 +178,7 @@ defmodule BstsSiteWeb.Trust.DiagnosticsLive do
               verdict={check_verdict(@result.verdicts.prediction_error, "Prediction error")}
               tone={check_tone(@result.verdicts.prediction_error)}
             >
-              Would catch a baseline that cannot even track the pre-period — everything
+              Would catch a baseline that cannot even track the pre-period; everything
               downstream inherits that failure.
               <:stat label="MAPE" value={pct_plain(@result.details.prediction_error.mape)} />
               <:stat label="RMSE" value={fmt(@result.details.prediction_error.rmse)} />
@@ -172,7 +188,7 @@ defmodule BstsSiteWeb.Trust.DiagnosticsLive do
               verdict={check_verdict(@result.verdicts.coverage, "CI coverage")}
               tone={check_tone(@result.verdicts.coverage)}
             >
-              Would catch dishonest intervals — too narrow means overconfident, too wide
+              Would catch dishonest intervals; too narrow means overconfident, too wide
               means the uncertainty is theater. Target: 85–99% of points inside.
               <:stat
                 label="Coverage"
@@ -185,7 +201,7 @@ defmodule BstsSiteWeb.Trust.DiagnosticsLive do
               verdict={check_verdict(@result.verdicts.durbin_watson, "Durbin-Watson")}
               tone={check_tone(@result.verdicts.durbin_watson)}
             >
-              Would catch structure left in the residuals — a trend or cycle the model
+              Would catch structure left in the residuals; a trend or cycle the model
               never absorbed. 2.0 means uncorrelated; 1.5–2.5 passes.
               <:stat label="Statistic" value={fmt2(@result.details.durbin_watson.statistic)} />
             </.verdict_card>
@@ -202,7 +218,7 @@ defmodule BstsSiteWeb.Trust.DiagnosticsLive do
               <:stat
                 label="Fake-window effect"
                 value={signed(@result.details.placebo.lift)}
-                hint={"CI [#{fmt(@result.details.placebo.ci95.lower)}, #{fmt(@result.details.placebo.ci95.upper)}] — #{if @result.details.placebo.is_significant, do: "significant (bad)", else: "not significant"}"}
+                hint={"CI [#{fmt(@result.details.placebo.ci95.lower)}, #{fmt(@result.details.placebo.ci95.upper)}]; #{if @result.details.placebo.is_significant, do: "significant (bad)", else: "not significant"}"}
               />
             </.verdict_card>
 
@@ -220,7 +236,7 @@ defmodule BstsSiteWeb.Trust.DiagnosticsLive do
             </.verdict_card>
 
             <.verdict_card verdict="What this run can't check" tone={:neutral}>
-              Coverage here is judged on {Diagnostics.n_pre()} pre-period points — each
+              Coverage here is judged on {Diagnostics.n_pre()} pre-period points; each
               point is worth about 1%, so the pass band is coarse. And all five checks
               validate the <em>baseline and method</em>, not the causal claim itself:
               only a truth you planted (or a randomized experiment) can grade that.
@@ -229,13 +245,13 @@ defmodule BstsSiteWeb.Trust.DiagnosticsLive do
 
           <div class="report-prose mt-6 text-sm text-(--color-ink-soft)">
             Two honest footnotes. The pre-period baseline for the first three checks
-            comes from a second, identically configured run of the same sampler —
+            comes from a second, identically configured run of the same sampler;
             <code>estimate/4</code>
             keeps its posterior states private and derives its
             own PRNG stream from the seed, so this is an independent chain from the
             same posterior. And the
             placebo and stability checks re-fit the model three more times through
-            callbacks — the Validation API deliberately takes functions, not fitted
+            callbacks; the Validation API deliberately takes functions, not fitted
             models, so any estimator can be plugged in. All four fits are included in
             the badge's elapsed time.
           </div>
@@ -319,7 +335,7 @@ defmodule BstsSiteWeb.Trust.DiagnosticsLive do
   end
 
   defp effect_verdict(%{significant?: false}) do
-    "The fit says: can't tell — the interval straddles zero."
+    "The fit says: can't tell; the interval straddles zero."
   end
 
   defp grade_line(result, scenario) do
@@ -327,16 +343,16 @@ defmodule BstsSiteWeb.Trust.DiagnosticsLive do
     %{lower: lo, upper: hi} = result.cumulative
 
     if truth >= lo and truth <= hi do
-      "The planted truth sits inside the fit's 95% interval — and the five checks below graded the same fit without knowing it."
+      "The planted truth sits inside the fit's 95% interval; and the five checks below graded the same fit without knowing it."
     else
-      "The planted truth fell outside the 95% interval this run — rare by design, and exactly what the calibration page measures across many plants."
+      "The planted truth fell outside the 95% interval this run; rare by design, and exactly what the calibration page measures across many plants."
     end
   end
 
-  defp check_verdict(:pass, name), do: "Pass — #{name}"
-  defp check_verdict(:warn, name), do: "Marginal — #{name}"
-  defp check_verdict(:fail, name), do: "Fail — #{name}"
-  defp check_verdict(:skip, name), do: "Skipped — #{name}"
+  defp check_verdict(:pass, name), do: "Pass; #{name}"
+  defp check_verdict(:warn, name), do: "Marginal; #{name}"
+  defp check_verdict(:fail, name), do: "Fail; #{name}"
+  defp check_verdict(:skip, name), do: "Skipped; #{name}"
 
   defp check_tone(:pass), do: :truth
   defp check_tone(:warn), do: :warning

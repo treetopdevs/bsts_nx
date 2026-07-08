@@ -1,6 +1,6 @@
 defmodule BstsSiteWeb.Demos.MarketingLive do
   @moduledoc """
-  /demos/marketing — "Did the campaign actually work?"
+  /demos/marketing; "Did the campaign actually work?"
 
   Two lanes on the same planted data: an instant filter lane so the page is
   never empty, and the full Bayesian lane behind a button and the limiter.
@@ -80,12 +80,13 @@ defmodule BstsSiteWeb.Demos.MarketingLive do
     <Layouts.app flash={@flash} track={:questions}>
       <section class="mx-auto max-w-4xl">
         <.section_heading
+          level={1}
           eyebrow="Did the campaign actually work?"
           title="Ninety days of conversions, one campaign, two lanes."
         >
           We generated 90 days of daily conversions around a steady 200/day and planted a
           campaign that starts on day 61. You choose how big the true lift is and how noisy
-          the world is. The model never sees the truth — it learns the baseline from the
+          the world is. The model never sees the truth; it learns the baseline from the
           first 60 days, projects what should have happened, and measures the gap.
           Then you grade it.
         </.section_heading>
@@ -112,7 +113,7 @@ defmodule BstsSiteWeb.Demos.MarketingLive do
 
         <.figure
           no="1"
-          caption="Fast lane — the operational filter's forecast-first counterfactual, recomputed on every slider drag. The magenta shading is its estimated lift."
+          caption="Fast lane; the operational filter's forecast-first counterfactual, recomputed on every slider drag. The magenta shading is its estimated lift."
           execution={@fast.execution}
         >
           <:legend>
@@ -122,6 +123,8 @@ defmodule BstsSiteWeb.Demos.MarketingLive do
           </:legend>
           <.line_figure
             id="marketing-fast"
+            title="Fast marketing lift estimate"
+            desc="Daily conversions are compared with a forecast-first counterfactual; the post-campaign gap is the fast lift estimate."
             height={300}
             y_label="conversions/day"
             series={[
@@ -157,7 +160,7 @@ defmodule BstsSiteWeb.Demos.MarketingLive do
           tone={if @fast.significant?, do: :lift, else: :neutral}
         >
           <p>
-            This is the millisecond lane — a Kalman filter we hand the noise level you dialed
+            This is the millisecond lane; a Kalman filter we hand the noise level you dialed
             in. A first impression, not a measurement. The Bayesian lane below has to learn
             the noise from the data itself, and reports a full posterior for its trouble.
           </p>
@@ -173,8 +176,8 @@ defmodule BstsSiteWeb.Demos.MarketingLive do
       <section class="mx-auto mt-12 max-w-4xl">
         <.section_heading eyebrow="The slow lane" title="Run the full Bayesian analysis">
           <code>MarketingLift.measure_lift</code> fits the pre-campaign baseline by Gibbs
-          sampling — {Marketing.num_samples()} posterior draws of the level and both
-          variances — then simulates {Marketing.num_samples()} counterfactual futures for
+          sampling; {Marketing.num_samples()} posterior draws of the level and both
+          variances; then simulates {Marketing.num_samples()} counterfactual futures for
           the campaign window. It takes about a second on this server, and unlike the fast
           lane it earns its uncertainty instead of being told it.
         </.section_heading>
@@ -188,7 +191,13 @@ defmodule BstsSiteWeb.Demos.MarketingLive do
           >
             Run the full Bayesian analysis
           </button>
-          <span :if={@running} class="font-data animate-pulse text-sm text-(--color-ink-soft)">
+          <span
+            :if={@running}
+            role="status"
+            aria-live="polite"
+            aria-busy="true"
+            class="font-data motion-safe:animate-pulse text-sm text-(--color-ink-soft)"
+          >
             Sampling {Marketing.num_samples()} posterior draws on this server…
           </span>
           <span :if={@mcmc && !@running} class="font-data text-xs text-(--color-ink-faint)">
@@ -199,8 +208,10 @@ defmodule BstsSiteWeb.Demos.MarketingLive do
         <.verdict_card
           :if={@busy}
           class="mt-4"
+          role="status"
+          aria-live="polite"
           tone={:warning}
-          verdict="Another visitor is sampling — try again in a moment."
+          verdict="Another visitor is sampling, try again in a moment."
         >
           <p>MCMC runs are limited to a few at a time so the demo stays responsive.</p>
         </.verdict_card>
@@ -208,7 +219,7 @@ defmodule BstsSiteWeb.Demos.MarketingLive do
         <div :if={@mcmc}>
           <.figure
             no="2"
-            caption={"Bayesian lane — the posterior counterfactual (mean and 95% band across #{@mcmc.num_samples} draws). The magenta shading between it and the observed line is the estimated lift."}
+            caption={"Bayesian lane; the posterior counterfactual (mean and 95% band across #{@mcmc.num_samples} draws). The magenta shading between it and the observed line is the estimated lift."}
             execution={@mcmc.execution}
           >
             <:legend>
@@ -218,6 +229,8 @@ defmodule BstsSiteWeb.Demos.MarketingLive do
             </:legend>
             <.line_figure
               id="marketing-mcmc"
+              title="Bayesian marketing lift estimate"
+              desc="Daily conversions are compared with the posterior counterfactual mean and effect band from the full Bayesian analysis."
               height={300}
               y_label="conversions/day"
               series={[
@@ -250,7 +263,7 @@ defmodule BstsSiteWeb.Demos.MarketingLive do
 
           <.figure
             no="3"
-            caption={"The posterior distribution of cumulative lift — #{@mcmc.num_samples} draws. The spread is the answer, not a nuisance."}
+            caption={"The posterior distribution of cumulative lift; #{@mcmc.num_samples} draws. The spread is the answer, not a nuisance."}
             execution={@mcmc.execution}
           >
             <:legend>
@@ -259,6 +272,8 @@ defmodule BstsSiteWeb.Demos.MarketingLive do
             </:legend>
             <.histogram
               id="marketing-posterior"
+              title="Marketing lift posterior"
+              desc="Posterior draws of cumulative campaign lift, with interval and planted-truth markers when revealed."
               values={@mcmc.cumulative_draws}
               bins={24}
               vlines={histogram_vlines(@mcmc, @revealed)}
@@ -330,23 +345,23 @@ defmodule BstsSiteWeb.Demos.MarketingLive do
   end
 
   defp fast_verdict(%{significant?: true, cumulative: cum}) do
-    "First impression: the campaign shows — #{signed(cum.mean)} conversions."
+    "First impression: the campaign shows; #{signed(cum.mean)} conversions."
   end
 
   defp fast_verdict(%{significant?: false}) do
-    "First impression: can't tell — the interval straddles zero."
+    "First impression: can't tell; the interval straddles zero."
   end
 
   defp mcmc_verdict(%{significant?: true, effect: %{cumulative: cum}}) when cum >= 0 do
-    "Yes — the campaign added #{signed(cum)} conversions."
+    "Yes; the campaign added #{signed(cum)} conversions."
   end
 
   defp mcmc_verdict(%{significant?: true, effect: %{cumulative: cum}}) do
-    "The model sees #{signed(cum)} conversions — a drop, not a lift."
+    "The model sees #{signed(cum)} conversions; a drop, not a lift."
   end
 
   defp mcmc_verdict(_mcmc) do
-    "Honestly? Can't tell — the interval straddles zero."
+    "Honestly? Can't tell; the interval straddles zero."
   end
 
   defp histogram_vlines(mcmc, revealed) do
@@ -357,11 +372,11 @@ defmodule BstsSiteWeb.Demos.MarketingLive do
   end
 
   defp truth_line(%{truth: %{lift_per_day: lift}}) when lift == 0.0 do
-    "Planted: nothing. The campaign has zero true effect — any lift the model reports is noise."
+    "Planted: nothing. The campaign has zero true effect; any lift the model reports is noise."
   end
 
   defp truth_line(%{truth: truth}) do
-    "Planted: +#{trunc(truth.lift_per_day)}/day from day 61 — #{signed(truth.cumulative_lift)} conversions over #{truth.post_days} days."
+    "Planted: +#{trunc(truth.lift_per_day)}/day from day 61; #{signed(truth.cumulative_lift)} conversions over #{truth.post_days} days."
   end
 
   defp grade_line(mcmc) do
@@ -371,7 +386,7 @@ defmodule BstsSiteWeb.Demos.MarketingLive do
     if truth >= lo and truth <= hi do
       "The planted truth sits inside the model's 95% interval. Recovered."
     else
-      "The planted truth fell outside the 95% interval this time — that should be rare. " <>
+      "The planted truth fell outside the 95% interval this time; that should be rare. " <>
         "Intervals are promises about the long run, not every draw; see the calibration page."
     end
   end

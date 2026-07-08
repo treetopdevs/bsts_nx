@@ -1,7 +1,7 @@
 defmodule BstsSiteWeb.Trust.CalibrationLive do
   @moduledoc """
   Trust: the planted truth, systematically. Five copies of one series, five
-  sealed planted lifts (one of them zero), five MCMC fits — then the answer
+  sealed planted lifts (one of them zero), five MCMC fits; then the answer
   key comes out and every interval gets graded in public.
   """
   use BstsSiteWeb, :live_view
@@ -60,19 +60,20 @@ defmodule BstsSiteWeb.Trust.CalibrationLive do
       <div class="mx-auto max-w-4xl">
         <.mantra active={:compare} class="mb-4" />
         <.section_heading
+          level={1}
           eyebrow="Trust · does it recover what we hid?"
           title="The planted truth, systematically"
         >
           One planted truth recovered could be luck. So here are five: the same 90-point
           series, five times over, each with a different lift sealed into the last 20
-          points — and one of the five is zero, a placebo hiding among the real effects.
+          points; and one of the five is zero, a placebo hiding among the real effects.
           The model fits each series knowing nothing about what we planted, and then we
           grade all five intervals at once.
         </.section_heading>
 
         <.figure
           no="1"
-          caption={"The five case series overlaid — identical seeded noise (sd #{@series.noise_sd}), different planted per-day lifts from day 71 onward, ranging up to +#{@series.max_per_step}/day. Per day, even the largest plant barely clears the noise."}
+          caption={"The five case series overlaid; identical seeded noise (sd #{@series.noise_sd}), different planted per-day lifts from day 71 onward, ranging up to +#{@series.max_per_step}/day. Per day, even the largest plant barely clears the noise."}
         >
           <:legend>
             <.swatch color={:ink} label="observed (5 cases)" />
@@ -80,6 +81,8 @@ defmodule BstsSiteWeb.Trust.CalibrationLive do
           </:legend>
           <.line_figure
             id="calibration-data"
+            title="Calibration case series"
+            desc="Five seeded case series are overlaid, with planted means shown after the answer key is revealed."
             height={280}
             y_label="level"
             series={data_series(@series, @revealed)}
@@ -96,7 +99,13 @@ defmodule BstsSiteWeb.Trust.CalibrationLive do
           >
             {if @sweep, do: "Run the sweep again", else: "Run the sweep"}
           </button>
-          <p :if={@running} class="font-data text-sm text-(--color-ink-soft)" aria-live="polite">
+          <p
+            :if={@running}
+            role="status"
+            aria-live="polite"
+            aria-busy="true"
+            class="font-data text-sm text-(--color-ink-soft)"
+          >
             Fitting five models, one after another, on this server…
           </p>
         </div>
@@ -104,7 +113,9 @@ defmodule BstsSiteWeb.Trust.CalibrationLive do
         <.verdict_card
           :if={@busy}
           class="mt-6"
-          verdict="Another visitor is sampling — try again in a moment."
+          role="status"
+          aria-live="polite"
+          verdict="Another visitor is sampling, try again in a moment."
           tone={:warning}
         >
           This page runs real MCMC on a small shared machine, so concurrent sweeps are
@@ -114,7 +125,7 @@ defmodule BstsSiteWeb.Trust.CalibrationLive do
         <div :if={@sweep} class="mt-2">
           <.figure
             no="2"
-            caption="Estimated cumulative effect per case with its 95% credible interval. Each fit saw only its own series — never the planted value."
+            caption="Estimated cumulative effect per case with its 95% credible interval. Each fit saw only its own series; never the planted value."
             execution={@sweep.execution}
           >
             <:legend>
@@ -123,6 +134,8 @@ defmodule BstsSiteWeb.Trust.CalibrationLive do
             </:legend>
             <.bar_figure
               id="calibration-sweep"
+              title="Calibration interval sweep"
+              desc="Estimated cumulative effect and 95% interval are shown for each case, with planted truth when revealed."
               items={sweep_items(@sweep, @revealed)}
               height={if @revealed, do: 400, else: 230}
             />
@@ -147,17 +160,17 @@ defmodule BstsSiteWeb.Trust.CalibrationLive do
 
             <.reveal_truth
               revealed={@revealed}
-              truth="Planted, in order: +0 (placebo), +5, +10, +20, +40 cumulative — never shown to the model."
+              truth="Planted, in order: +0 (placebo), +5, +10, +20, +40 cumulative; never shown to the model."
               grade={grade_line(@sweep)}
             />
           </div>
 
           <div class="report-prose mt-6 text-sm text-(--color-ink-soft)">
             A 95% interval is a promise about the long run: over many studies, it should
-            contain the truth about 19 times in 20 — which also means that roughly one
+            contain the truth about 19 times in 20; which also means that roughly one
             miss in twenty is the promise <em>working</em>, not breaking. Five fits are a
             spot-check of that promise, not its proof. The library ships the systematic
-            version as <code>BstsNx.Validation.known_lift_injection/3</code> — the same
+            version as <code>BstsNx.Validation.known_lift_injection/3</code>; the same
             plant-and-grade loop, run offline with structured models and hundreds of
             samples per fit.
           </div>
@@ -171,7 +184,7 @@ defmodule BstsSiteWeb.Trust.CalibrationLive do
             eyebrow="The engine behind it"
             title="The Gibbs sampler"
           >
-            The MCMC machinery this sweep stresses five times over — watch a chain converge.
+            The MCMC machinery this sweep stresses five times over; watch a chain converge.
           </.cross_link>
           <.cross_link
             navigate={~p"/trust/diagnostics"}
@@ -274,9 +287,9 @@ defmodule BstsSiteWeb.Trust.CalibrationLive do
   defp grade_line(sweep) do
     placebo =
       if sweep.placebo_straddles? do
-        "The placebo case straddles zero — the model declined to invent an effect where none was planted."
+        "The placebo case straddles zero; the model declined to invent an effect where none was planted."
       else
-        "The placebo case did not straddle zero this run — a false alarm worth noticing."
+        "The placebo case did not straddle zero this run; a false alarm worth noticing."
       end
 
     "#{sweep.covered_count} of 5 landed inside their intervals. #{placebo}"

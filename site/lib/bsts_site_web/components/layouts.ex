@@ -1,23 +1,24 @@
 defmodule BstsSiteWeb.Layouts do
   @moduledoc """
   Site chrome: header with the three tracks, quiet footer, flash handling.
-  Single "paper" theme — a technical report is printed on paper.
+  Single "paper" theme; a technical report is printed on paper.
   """
   use BstsSiteWeb, :html
 
-  embed_templates "layouts/*"
+  embed_templates("layouts/*")
 
   @doc """
   The app layout. `track` highlights the active track in the nav.
   """
-  attr :flash, :map, required: true, doc: "the map of flash messages"
-  attr :track, :atom, default: nil, values: [nil, :questions, :engine, :trust, :speed, :start]
+  attr(:flash, :map, required: true, doc: "the map of flash messages")
+  attr(:track, :atom, default: nil, values: [nil, :questions, :engine, :trust, :speed, :start])
 
-  attr :current_scope, :map,
+  attr(:current_scope, :map,
     default: nil,
     doc: "the current [scope](https://phoenix.hexdocs.pm/scopes.html)"
+  )
 
-  slot :inner_block, required: true
+  slot(:inner_block, required: true)
 
   def app(assigns) do
     ~H"""
@@ -37,7 +38,7 @@ defmodule BstsSiteWeb.Layouts do
           <.link
             navigate={~p"/start"}
             class={[
-              "ml-1 rounded-full border px-3 py-1.5 transition-colors",
+              "nav-pill ml-1 rounded-full border px-3 py-1.5 transition-colors",
               @track == :start && "border-(--color-ink) bg-(--color-ink) text-(--color-paper)",
               @track != :start &&
                 "border-(--color-ink) hover:bg-(--color-ink) hover:text-(--color-paper)"
@@ -59,8 +60,9 @@ defmodule BstsSiteWeb.Layouts do
           <div class="font-display font-bold">BstsNx</div>
           <p class="mt-1 text-sm text-(--color-ink-soft)">
             An early-stage, pure-Elixir library for Bayesian structural time series,
-            validated against the R <span class="font-data text-xs">bsts</span> /
-            <span class="font-data text-xs">CausalImpact</span> reference stack.
+            validated against the R <span class="font-data text-xs">bsts</span>
+            / <span class="font-data text-xs">CausalImpact</span>
+            reference stack.
             LGPL-2.1 licensed.
           </p>
         </div>
@@ -91,16 +93,16 @@ defmodule BstsSiteWeb.Layouts do
     """
   end
 
-  attr :navigate, :string, required: true
-  attr :active, :boolean, default: false
-  slot :inner_block, required: true
+  attr(:navigate, :string, required: true)
+  attr(:active, :boolean, default: false)
+  slot(:inner_block, required: true)
 
   defp nav_link(assigns) do
     ~H"""
     <.link
       navigate={@navigate}
       class={[
-        "rounded-full px-3 py-1.5 transition-colors",
+        "nav-pill rounded-full px-3 py-1.5 transition-colors",
         @active && "bg-(--color-base-200) text-(--color-ink) font-medium",
         !@active && "text-(--color-ink-soft) hover:text-(--color-ink)"
       ]}
@@ -115,8 +117,8 @@ defmodule BstsSiteWeb.Layouts do
   @doc """
   Shows the flash group with standard titles and content.
   """
-  attr :flash, :map, required: true, doc: "the map of flash messages"
-  attr :id, :string, default: "flash-group", doc: "the optional id of flash container"
+  attr(:flash, :map, required: true, doc: "the map of flash messages")
+  attr(:id, :string, default: "flash-group", doc: "the optional id of flash container")
 
   def flash_group(assigns) do
     ~H"""
@@ -135,7 +137,7 @@ defmodule BstsSiteWeb.Layouts do
         phx-connected={hide("#client-error") |> JS.set_attribute({"hidden", ""})}
         hidden
       >
-        Live demos need the socket — reconnecting
+        Live demos need the socket; reconnecting
         <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
       </.flash>
 
@@ -150,8 +152,7 @@ defmodule BstsSiteWeb.Layouts do
         phx-connected={hide("#server-error") |> JS.set_attribute({"hidden", ""})}
         hidden
       >
-        Reconnecting
-        <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
+        Reconnecting <.icon name="hero-arrow-path" class="ml-1 size-3 motion-safe:animate-spin" />
       </.flash>
     </div>
     """

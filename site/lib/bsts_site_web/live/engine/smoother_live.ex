@@ -51,12 +51,17 @@ defmodule BstsSiteWeb.Engine.SmootherLive do
     <Layouts.app flash={@flash} track={:engine}>
       <div class="mx-auto max-w-4xl">
         <.mantra active={:decompose} />
-        <.section_heading class="mt-4" eyebrow="Engine · chapter 3" title="The power of hindsight">
+        <.section_heading
+          level={1}
+          class="mt-4"
+          eyebrow="Engine · chapter 3"
+          title="The power of hindsight"
+        >
           This is the same wandering level you tuned in chapter 2, with the true Q and R.
-          The filter's estimate at step 40 used only steps 1–40 — it couldn't know the
+          The filter's estimate at step 40 used only steps 1–40; it couldn't know the
           future. But the series is over now; we do know it. The Rauch–Tung–Striebel
           smoother walks backwards through the filter's output, revising every estimate
-          in light of everything that came after. Same data, same model — strictly less
+          in light of everything that came after. Same data, same model; strictly less
           uncertainty.
         </.section_heading>
 
@@ -75,7 +80,7 @@ defmodule BstsSiteWeb.Engine.SmootherLive do
               for="smoothed-toggle"
               class="font-data text-xs uppercase tracking-wider text-(--color-ink-soft)"
             >
-              Turn on hindsight — overlay the RTS smoother
+              Turn on hindsight; overlay the RTS smoother
             </label>
           </form>
 
@@ -104,6 +109,8 @@ defmodule BstsSiteWeb.Engine.SmootherLive do
           </:legend>
           <.line_figure
             id="smoother-chart"
+            title="Filtered and smoothed latent level"
+            desc="Observed values are compared with filtered estimates, smoothed hindsight estimates, optional posterior histories, and the latent truth when revealed."
             height={340}
             y_label="level"
             series={chart_series(@prepared, @draws, @show_smoothed, @revealed)}
@@ -115,7 +122,7 @@ defmodule BstsSiteWeb.Engine.SmootherLive do
             verdict={"Hindsight shrinks the model's own uncertainty by #{fmt1(sd_cut_pct(@prepared))}%."}
             tone={:neutral}
           >
-            No new data, no new model — the smoother just refuses to pretend it doesn't
+            No new data, no new model; the smoother just refuses to pretend it doesn't
             know the future. Each thin blue line is one complete history drawn from the
             posterior; the smoothed line is their mean, not "the" answer.
             <:stat label="Filtered avg ±sd" value={"±#{fmt2(@prepared.avg_sd_filt)}"} />
@@ -134,14 +141,14 @@ defmodule BstsSiteWeb.Engine.SmootherLive do
 
           <.reveal_truth
             revealed={@revealed}
-            truth="The green line is the latent level we generated — the exact path hidden under the noise."
+            truth="The green line is the latent level we generated; the exact path hidden under the noise."
             grade={grade_line(@prepared)}
           />
         </div>
 
         <p class="report-prose mt-6 text-sm text-(--color-ink-soft)">
           Keep pressing the draw button. Every trajectory is a history that is fully
-          consistent with the observations and the model — the posterior is a
+          consistent with the observations and the model; the posterior is a
           distribution over pasts, and the spread of those lines is honest uncertainty
           you'd never see from a single smoothed curve. This is the machinery MCMC runs
           thousands of times: the next chapter's Gibbs sampler draws a history like
@@ -156,7 +163,7 @@ defmodule BstsSiteWeb.Engine.SmootherLive do
             eyebrow="Engine · chapter 2"
             title="Tracking a signal through noise"
           >
-            The forward pass this chapter revises — tune Q and R yourself.
+            The forward pass this chapter revises; tune Q and R yourself.
           </.cross_link>
           <.cross_link
             navigate={~p"/engine/noise"}
@@ -170,8 +177,7 @@ defmodule BstsSiteWeb.Engine.SmootherLive do
             eyebrow="Engine · chapter 4"
             title="Learning the noise"
           >
-            We handed the smoother the true Q and R. The Gibbs sampler earns them —
-            watch it converge.
+            We handed the smoother the true Q and R. The Gibbs sampler earns them; watch it converge.
           </.cross_link>
         </div>
       </div>
@@ -211,7 +217,7 @@ defmodule BstsSiteWeb.Engine.SmootherLive do
       if show_smoothed do
         "; solid: the RTS smoother's backward revision."
       else
-        " — toggle above to overlay the smoother's backward revision."
+        "; toggle above to overlay the smoother's backward revision."
       end
 
     draws_part =
@@ -234,7 +240,7 @@ defmodule BstsSiteWeb.Engine.SmootherLive do
   defp grade_line(prepared) do
     cut = (1.0 - prepared.rmse_smooth / prepared.rmse_filt) * 100.0
 
-    "Graded against it: filtered RMSE #{fmt2(prepared.rmse_filt)}, smoothed RMSE #{fmt2(prepared.rmse_smooth)} — hindsight cut the error by #{fmt1(cut)}%."
+    "Graded against it: filtered RMSE #{fmt2(prepared.rmse_filt)}, smoothed RMSE #{fmt2(prepared.rmse_smooth)}; hindsight cut the error by #{fmt1(cut)}%."
   end
 
   defp fmt1(v) when is_number(v), do: :erlang.float_to_binary(v * 1.0, decimals: 1)

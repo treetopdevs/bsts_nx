@@ -38,10 +38,10 @@ defmodule BstsSiteWeb.HubLive do
         </p>
         <h1 class="font-display mt-3 text-4xl font-bold leading-tight sm:text-5xl">
           The numbers changed.<br />
-          <em>Was it you — or was it noise?</em>
+          <em>Was it you; or was it noise?</em>
         </h1>
         <p class="report-prose mx-auto mt-5 text-(--color-ink-soft)">
-          A campaign launches, a policy lands, a server gets upgraded — and the line moves.
+          A campaign launches, a policy lands, a server gets upgraded; and the line moves.
           BstsNx tells you whether it moved <em>because of you</em>, with honest uncertainty.
           You're watching it work right now: the figure below is computed by this server
           on every drag of a slider.
@@ -54,8 +54,9 @@ defmodule BstsSiteWeb.HubLive do
           a campaign effect after 96 untreated hours, ramping in the way real carry-over
           effects do.
           The model is never shown the truth: it learns the pre-campaign baseline and its
-          noise, projects what <em>should</em> have happened, and measures the gap. Make
-          the effect smaller and the world noisier — and watch the model honestly refuse
+          noise, projects what <em>should</em>
+          have happened, and measures the gap. Make
+          the effect smaller and the world noisier; and watch the model honestly refuse
           to be sure when the signal drowns.
         </div>
 
@@ -90,6 +91,8 @@ defmodule BstsSiteWeb.HubLive do
           </:legend>
           <.line_figure
             id="hero-chart"
+            title="Traffic and projected counterfactual"
+            desc="Observed hourly traffic is compared with the model's post-campaign counterfactual; shaded regions show uncertainty and estimated lift."
             height={320}
             y_label="visits/hour"
             series={[
@@ -136,7 +139,7 @@ defmodule BstsSiteWeb.HubLive do
 
           <.reveal_truth
             revealed={@revealed}
-            truth={"Planted: ramps to +#{trunc(@demo.scenario.truth.lift_per_hour)} visits/hour — #{signed(@demo.scenario.truth.cumulative_lift)} cumulative."}
+            truth={"Planted: ramps to +#{trunc(@demo.scenario.truth.lift_per_hour)} visits/hour; #{signed(@demo.scenario.truth.cumulative_lift)} cumulative."}
             grade={grade_line(@demo)}
           />
         </div>
@@ -148,9 +151,11 @@ defmodule BstsSiteWeb.HubLive do
         <div class="text-center">
           <.mantra class="justify-center" />
           <p class="report-prose mx-auto mt-3 text-sm text-(--color-ink-soft)">
-            One method underneath everything here: <strong>decompose</strong> the series into
-            structure and noise, <strong>project</strong> the structure forward,
-            <strong>compare</strong> the projection with what actually happened.
+            One method underneath everything here: <strong>decompose</strong>
+            the series into
+            structure and noise, <strong>project</strong>
+            the structure forward, <strong>compare</strong>
+            the projection with what actually happened.
             Every page on this site is that sentence, asked a different way.
           </p>
         </div>
@@ -165,8 +170,7 @@ defmodule BstsSiteWeb.HubLive do
             Is this spike real? Did the policy do anything?
           </.door>
           <.door navigate={~p"/engine"} eyebrow="How does it work?" title="Open the engine">
-            Six short chapters from "noise lies to you" to the world that didn't happen —
-            with a Gibbs sampler you can watch converge along the way. Every figure is alive.
+            Six short chapters from "noise lies to you" to the world that didn't happen; with a Gibbs sampler you can watch converge along the way. Every figure is alive.
           </.door>
           <.door navigate={~p"/trust"} eyebrow="Should I trust it?" title="Grade the homework">
             We plant truths and grade the model against them, run placebo tests, and say
@@ -177,15 +181,18 @@ defmodule BstsSiteWeb.HubLive do
 
       <section class="mx-auto mt-16 max-w-3xl">
         <.section_heading eyebrow="For Elixir engineers" title="It's a library, not a service.">
-          Everything on this site is <code>BstsNx</code> running inside a Phoenix app —
-          the same calls you'd make from your own code.
+          Everything on this site is <code>BstsNx</code>
+          running inside a Phoenix app; the same calls you'd make from your own code.
         </.section_heading>
         <.under_the_hood
           code={quick_start_code()}
           title="The sixty-second version"
         />
         <div class="mt-2">
-          <.link navigate={~p"/start"} class="font-data text-sm text-(--color-model) hover:text-(--color-ink) underline underline-offset-4">
+          <.link
+            navigate={~p"/start"}
+            class="font-data text-sm text-(--color-model) hover:text-(--color-ink) underline underline-offset-4"
+          >
             Install &amp; full quick start →
           </.link>
         </div>
@@ -194,16 +201,16 @@ defmodule BstsSiteWeb.HubLive do
     """
   end
 
-  attr :navigate, :string, required: true
-  attr :eyebrow, :string, required: true
-  attr :title, :string, required: true
-  slot :inner_block, required: true
+  attr(:navigate, :string, required: true)
+  attr(:eyebrow, :string, required: true)
+  attr(:title, :string, required: true)
+  slot(:inner_block, required: true)
 
   defp door(assigns) do
     ~H"""
     <.link
       navigate={@navigate}
-      class="group block rounded-md border border-(--color-grid) bg-(--color-paper-raised) p-5 transition-all hover:border-(--color-ink) hover:shadow-sm"
+      class="group block rounded-md border border-(--color-grid) bg-(--color-paper-raised) p-5 transition-colors hover:border-(--color-ink) hover:shadow-sm"
     >
       <div class="font-data text-[0.65rem] uppercase tracking-widest text-(--color-lift)">
         {@eyebrow}
@@ -219,11 +226,11 @@ defmodule BstsSiteWeb.HubLive do
   end
 
   defp verdict_line(%{significant?: true, cumulative: cum}) do
-    "Yes — the campaign shows: #{signed(cum.mean)} visits."
+    "Yes; the campaign shows: #{signed(cum.mean)} visits."
   end
 
   defp verdict_line(%{significant?: false}) do
-    "Honestly? Can't tell — the interval straddles zero."
+    "Honestly? Can't tell; the interval straddles zero."
   end
 
   defp grade_line(demo) do
@@ -233,7 +240,7 @@ defmodule BstsSiteWeb.HubLive do
     if truth >= lo and truth <= hi do
       "The planted truth sits inside the model's 95% interval. Recovered."
     else
-      "The planted truth fell outside the 95% interval this time — that should be rare. Intervals are promises about the long run, not every draw; see the calibration page."
+      "The planted truth fell outside the 95% interval this time; that should be rare. Intervals are promises about the long run, not every draw; see the calibration page."
     end
   end
 

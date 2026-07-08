@@ -3,12 +3,12 @@ defmodule BstsSiteWeb.Charts do
   Server-rendered SVG chart components.
 
   Every chart on the site is drawn here, in pure Elixir, from plain lists of
-  numbers — no JS chart library. Semantic colors are fixed site-wide:
+  numbers; no JS chart library. Semantic colors are fixed site-wide:
 
-    * ink        — observed data
-    * model blue — model estimates / counterfactuals (bands at low alpha)
-    * lift       — effects, and nothing else
-    * truth      — planted ground truth, and nothing else
+    * ink       ; observed data
+    * model blue; model estimates / counterfactuals (bands at low alpha)
+    * lift      ; effects, and nothing else
+    * truth     ; planted ground truth, and nothing else
 
   Series and bands accept an `:x_offset` so post-period overlays (e.g. a
   counterfactual that only exists after the intervention) line up with the
@@ -29,17 +29,24 @@ defmodule BstsSiteWeb.Charts do
   def color(:truth), do: @truth
   def color(other) when is_binary(other), do: other
 
-  attr :id, :string, required: true
-  attr :series, :list, default: [], doc: "[%{points: [num], color:, dash:, width:, x_offset:, draw:, opacity:}]"
-  attr :bands, :list, default: [], doc: "[%{lower: [num], upper: [num], x_offset:, fill:}]"
-  attr :vlines, :list, default: [], doc: "[%{x: num, label: str}]"
-  attr :hlines, :list, default: [], doc: "[%{y: num, label: str, color:}]"
-  attr :y_label, :string, default: nil
-  attr :height, :integer, default: 300
-  attr :y_domain, :any, default: :auto
-  attr :x_domain, :any, default: :auto
-  attr :class, :string, default: nil
-  attr :markers, :list, default: [], doc: "[%{x:, y:, color:, label:, shape: :dot|:x}]"
+  attr(:id, :string, required: true)
+
+  attr(:series, :list,
+    default: [],
+    doc: "[%{points: [num], color:, dash:, width:, x_offset:, draw:, opacity:}]"
+  )
+
+  attr(:bands, :list, default: [], doc: "[%{lower: [num], upper: [num], x_offset:, fill:}]")
+  attr(:vlines, :list, default: [], doc: "[%{x: num, label: str}]")
+  attr(:hlines, :list, default: [], doc: "[%{y: num, label: str, color:}]")
+  attr(:y_label, :string, default: nil)
+  attr(:height, :integer, default: 300)
+  attr(:y_domain, :any, default: :auto)
+  attr(:x_domain, :any, default: :auto)
+  attr(:class, :string, default: nil)
+  attr(:markers, :list, default: [], doc: "[%{x:, y:, color:, label:, shape: :dot|:x}]")
+  attr(:title, :string, default: nil, doc: "accessible SVG title")
+  attr(:desc, :string, default: nil, doc: "accessible SVG description")
 
   def line_figure(assigns) do
     w = 720
@@ -98,8 +105,12 @@ defmodule BstsSiteWeb.Charts do
       viewBox={"0 0 #{@w} #{@h}"}
       class={["w-full", @class]}
       role="img"
+      aria-labelledby={chart_labelledby(@id)}
+      focusable="false"
       preserveAspectRatio="xMidYMid meet"
     >
+      <title id={chart_title_id(@id)}>{chart_title(@id, @title, "Line chart")}</title>
+      <desc id={chart_desc_id(@id)}>{chart_desc(@desc)}</desc>
       <defs>
         <pattern id={"#{@id}-grid"} width="18" height="18" patternUnits="userSpaceOnUse">
           <path d="M 18 0 L 0 0 0 18" fill="none" stroke="var(--color-grid)" stroke-width="0.5" />
@@ -254,11 +265,13 @@ defmodule BstsSiteWeb.Charts do
     """
   end
 
-  attr :id, :string, required: true
-  attr :items, :list, required: true, doc: "[%{label:, value:, lower:, upper:, color:}]"
-  attr :height, :integer, default: 220
-  attr :unit, :string, default: ""
-  attr :class, :string, default: nil
+  attr(:id, :string, required: true)
+  attr(:items, :list, required: true, doc: "[%{label:, value:, lower:, upper:, color:}]")
+  attr(:height, :integer, default: 220)
+  attr(:unit, :string, default: "")
+  attr(:class, :string, default: nil)
+  attr(:title, :string, default: nil, doc: "accessible SVG title")
+  attr(:desc, :string, default: nil, doc: "accessible SVG description")
 
   def bar_figure(assigns) do
     w = 720
@@ -279,7 +292,16 @@ defmodule BstsSiteWeb.Charts do
       assign(assigns, w: w, h: h, pad: pad, row_h: row_h, xscale: xscale, zero: xscale.(0.0))
 
     ~H"""
-    <svg id={@id} viewBox={"0 0 #{@w} #{@h}"} class={["w-full", @class]} role="img">
+    <svg
+      id={@id}
+      viewBox={"0 0 #{@w} #{@h}"}
+      class={["w-full", @class]}
+      role="img"
+      aria-labelledby={chart_labelledby(@id)}
+      focusable="false"
+    >
+      <title id={chart_title_id(@id)}>{chart_title(@id, @title, "Bar chart")}</title>
+      <desc id={chart_desc_id(@id)}>{chart_desc(@desc)}</desc>
       <line
         x1={@zero}
         x2={@zero}
@@ -351,11 +373,13 @@ defmodule BstsSiteWeb.Charts do
     """
   end
 
-  attr :id, :string, required: true
-  attr :rows, :list, required: true, doc: "[%{id:, start:, stop:, color:}] half-open windows"
-  attr :domain, :any, required: true, doc: "{min, max}"
-  attr :height, :integer, default: 140
-  attr :class, :string, default: nil
+  attr(:id, :string, required: true)
+  attr(:rows, :list, required: true, doc: "[%{id:, start:, stop:, color:}] half-open windows")
+  attr(:domain, :any, required: true, doc: "{min, max}")
+  attr(:height, :integer, default: 140)
+  attr(:class, :string, default: nil)
+  attr(:title, :string, default: nil, doc: "accessible SVG title")
+  attr(:desc, :string, default: nil, doc: "accessible SVG description")
 
   def gantt(assigns) do
     w = 720
@@ -370,7 +394,16 @@ defmodule BstsSiteWeb.Charts do
     assigns = assign(assigns, w: w, h: h, pad: pad, row_h: row_h, xscale: xscale, ticks: ticks)
 
     ~H"""
-    <svg id={@id} viewBox={"0 0 #{@w} #{@h}"} class={["w-full", @class]} role="img">
+    <svg
+      id={@id}
+      viewBox={"0 0 #{@w} #{@h}"}
+      class={["w-full", @class]}
+      role="img"
+      aria-labelledby={chart_labelledby(@id)}
+      focusable="false"
+    >
+      <title id={chart_title_id(@id)}>{chart_title(@id, @title, "Timeline chart")}</title>
+      <desc id={chart_desc_id(@id)}>{chart_desc(@desc)}</desc>
       <g :for={t <- @ticks} class="font-data">
         <line
           x1={@xscale.(t)}
@@ -416,10 +449,12 @@ defmodule BstsSiteWeb.Charts do
     """
   end
 
-  attr :id, :string, required: true
-  attr :matrix, :list, required: true, doc: "list of rows of numbers"
-  attr :blocks, :list, default: [], doc: "[%{from:, size:, label:}] diagonal block annotations"
-  attr :class, :string, default: nil
+  attr(:id, :string, required: true)
+  attr(:matrix, :list, required: true, doc: "list of rows of numbers")
+  attr(:blocks, :list, default: [], doc: "[%{from:, size:, label:}] diagonal block annotations")
+  attr(:class, :string, default: nil)
+  attr(:title, :string, default: nil, doc: "accessible SVG title")
+  attr(:desc, :string, default: nil, doc: "accessible SVG description")
 
   def matrix_grid(assigns) do
     n = length(assigns.matrix)
@@ -436,7 +471,11 @@ defmodule BstsSiteWeb.Charts do
       class={["mx-auto", @class]}
       style={"max-width: #{@size + 8}px"}
       role="img"
+      aria-labelledby={chart_labelledby(@id)}
+      focusable="false"
     >
+      <title id={chart_title_id(@id)}>{chart_title(@id, @title, "Matrix chart")}</title>
+      <desc id={chart_desc_id(@id)}>{chart_desc(@desc)}</desc>
       <g :for={{row, i} <- Enum.with_index(@matrix)}>
         <g :for={{val, j} <- Enum.with_index(row)}>
           <rect
@@ -476,12 +515,14 @@ defmodule BstsSiteWeb.Charts do
     """
   end
 
-  attr :id, :string, required: true
-  attr :values, :list, required: true
-  attr :bins, :integer, default: 24
-  attr :height, :integer, default: 170
-  attr :vlines, :list, default: [], doc: "[%{x:, label:, color:}]"
-  attr :class, :string, default: nil
+  attr(:id, :string, required: true)
+  attr(:values, :list, required: true)
+  attr(:bins, :integer, default: 24)
+  attr(:height, :integer, default: 170)
+  attr(:vlines, :list, default: [], doc: "[%{x:, label:, color:}]")
+  attr(:class, :string, default: nil)
+  attr(:title, :string, default: nil, doc: "accessible SVG title")
+  attr(:desc, :string, default: nil, doc: "accessible SVG description")
 
   def histogram(assigns) do
     w = 720
@@ -519,7 +560,16 @@ defmodule BstsSiteWeb.Charts do
       )
 
     ~H"""
-    <svg id={@id} viewBox={"0 0 #{@w} #{@h}"} class={["w-full", @class]} role="img">
+    <svg
+      id={@id}
+      viewBox={"0 0 #{@w} #{@h}"}
+      class={["w-full", @class]}
+      role="img"
+      aria-labelledby={chart_labelledby(@id)}
+      focusable="false"
+    >
+      <title id={chart_title_id(@id)}>{chart_title(@id, @title, "Histogram")}</title>
+      <desc id={chart_desc_id(@id)}>{chart_desc(@desc)}</desc>
       <g :for={i <- 0..(@nbins - 1)}>
         <% count = Map.get(@counts, i, 0) %>
         <% bar_h = count / @max_count * (@h - @pad.t - @pad.b) %>
@@ -689,5 +739,23 @@ defmodule BstsSiteWeb.Charts do
   defp cell_opacity(val) do
     v = min(abs(val * 1.0), 1.0)
     Float.round(0.45 + 0.55 * v, 2)
+  end
+
+  defp chart_labelledby(id), do: "#{chart_title_id(id)} #{chart_desc_id(id)}"
+  defp chart_title_id(id), do: "#{id}-title"
+  defp chart_desc_id(id), do: "#{id}-desc"
+
+  defp chart_title(_id, title, _kind) when is_binary(title) and title != "", do: title
+
+  defp chart_title(id, _title, kind), do: "#{kind}: #{humanize_id(id)}"
+
+  defp chart_desc(desc) when is_binary(desc) and desc != "", do: desc
+
+  defp chart_desc(_desc), do: "The surrounding figure caption summarizes this chart."
+
+  defp humanize_id(id) do
+    id
+    |> String.replace(~r/[-_]+/, " ")
+    |> String.trim()
   end
 end

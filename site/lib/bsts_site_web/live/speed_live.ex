@@ -56,11 +56,11 @@ defmodule BstsSiteWeb.SpeedLive do
     ~H"""
     <Layouts.app flash={@flash} track={:speed}>
       <div class="mx-auto max-w-4xl">
-        <.section_heading eyebrow="The performance argument" title="The two lanes">
+        <.section_heading level={1} eyebrow="The performance argument" title="The two lanes">
           Everything on this site runs in one of two lanes. The <strong>milliseconds lane</strong>
-          is Kalman filtering with fixed variances —
-          fast enough to run per event, per request, per slider drag. The <strong>MCMC lane</strong>
-          is Gibbs sampling — it learns the variances instead
+          is Kalman filtering with fixed variances; fast enough to run per event, per request, per slider drag. The
+          <strong>MCMC lane</strong>
+          is Gibbs sampling; it learns the variances instead
           of assuming them and hands you a full posterior, at a price measured in seconds.
           This page makes the trade concrete: same data, three estimators, one wall clock.
         </.section_heading>
@@ -73,15 +73,15 @@ defmodule BstsSiteWeb.SpeedLive do
             <div class="font-display mt-1 text-lg font-bold">Per-event safe</div>
             <ul class="report-prose mt-2 list-disc space-y-1 pl-4 text-sm text-(--color-ink-soft)">
               <li>
-                <code>Operational.prepare</code> + <code>run</code> — the forecast-first
+                <code>Operational.prepare</code> + <code>run</code>; the forecast-first
                 counterfactual behind the hub, the TV demo, and the marketing fast pass
               </li>
               <li>
-                <code>CausalImpact.estimate_from_filter</code> — one compiled filter +
+                <code>CausalImpact.estimate_from_filter</code>; one compiled filter +
                 smoother pass over the whole series
               </li>
               <li>
-                <code>AnomalyDetector</code> fit and score — a filter pass per window
+                <code>AnomalyDetector</code> fit and score; a filter pass per window
               </li>
             </ul>
             <p class="report-prose mt-2 text-sm text-(--color-ink-soft)">
@@ -96,12 +96,12 @@ defmodule BstsSiteWeb.SpeedLive do
             <div class="font-display mt-1 text-lg font-bold">The full posterior</div>
             <ul class="report-prose mt-2 list-disc space-y-1 pl-4 text-sm text-(--color-ink-soft)">
               <li>
-                Scalar <code>CausalImpact.estimate</code> and <code>GibbsSampler.sample</code> —
-                under a second at the {Speed.mcmc_samples()} samples raced here, seconds at
+                Scalar <code>CausalImpact.estimate</code>
+                and <code>GibbsSampler.sample</code>; under a second at the {Speed.mcmc_samples()} samples raced here, seconds at
                 the hundreds you'd use for real work
               </li>
               <li>
-                Structured or seasonal <code>ModelSpec</code>s through MCMC — <em>minutes</em>
+                Structured or seasonal <code>ModelSpec</code>s through MCMC; <em>minutes</em>
                 on CPU. Bluntly: precompute or background-job territory, never a request path
               </li>
             </ul>
@@ -115,13 +115,13 @@ defmodule BstsSiteWeb.SpeedLive do
         <p class="report-prose mt-6 text-sm text-(--color-ink-soft)">
           The racetrack: {Speed.total()} days of orders around a level of 100, with a lift
           planted at day {Speed.pre_end() + 1} and left on. The figure below is the
-          milliseconds lane's opening move, computed on page load — a counterfactual
+          milliseconds lane's opening move, computed on page load; a counterfactual
           projected from the pre-period alone.
         </p>
 
         <.figure
           no="1"
-          caption={"The #{Speed.total()}-day series and the Operational forecast-first counterfactual — projected from days 1–#{Speed.pre_end()} without seeing a single post-period observation."}
+          caption={"The #{Speed.total()}-day series and the Operational forecast-first counterfactual; projected from days 1–#{Speed.pre_end()} without seeing a single post-period observation."}
           execution={@demo.execution}
         >
           <:legend>
@@ -130,6 +130,8 @@ defmodule BstsSiteWeb.SpeedLive do
           </:legend>
           <.line_figure
             id="speed-scenario"
+            title="Speed benchmark scenario"
+            desc="Observed order volume is compared with the Operational forecast-first counterfactual over the post-period."
             height={300}
             y_label="orders/day"
             series={[
@@ -171,7 +173,9 @@ defmodule BstsSiteWeb.SpeedLive do
 
         <.verdict_card
           :if={@busy}
-          verdict="Another visitor is sampling — try again in a moment."
+          role="status"
+          aria-live="polite"
+          verdict="Another visitor is sampling, try again in a moment."
           tone={:warning}
           class="mt-4"
         >
@@ -181,13 +185,15 @@ defmodule BstsSiteWeb.SpeedLive do
         <%= if @race do %>
           <.figure
             no="2"
-            caption={"Wall-clock time for each estimator on the identical #{Speed.total()}-point series, measured with :timer.tc during this race. The fast lanes are the barely-visible bars — that is the argument."}
+            caption={"Wall-clock time for each estimator on the identical #{Speed.total()}-point series, measured with :timer.tc during this race. The fast lanes are the barely-visible bars; that is the argument."}
           >
             <:legend>
               <.swatch color={:ink} label="measured on this server" />
             </:legend>
             <.bar_figure
               id="race-latency"
+              title="Estimator latency race"
+              desc="Wall-clock runtime for each estimator lane on the same series, measured on this server in milliseconds."
               unit=" ms"
               height={180}
               items={
@@ -208,6 +214,8 @@ defmodule BstsSiteWeb.SpeedLive do
             </:legend>
             <.bar_figure
               id="race-answers"
+              title="Estimator answer comparison"
+              desc="Each estimator lane's cumulative-effect estimate is shown with interval bounds and the planted answer when revealed."
               unit=" orders"
               height={200}
               items={answer_items(@race, @demo, @revealed)}
@@ -216,13 +224,13 @@ defmodule BstsSiteWeb.SpeedLive do
 
           <p class="report-prose text-sm text-(--color-ink-soft)">
             The honest footnotes. <code>estimate_from_filter</code> masks the effect window
-            and smooths — its baseline may use observations from <em>after</em> the window,
+            and smooths; its baseline may use observations from <em>after</em> the window,
             which makes it an interpolation, not a forecast. In this race the window runs to
-            the end of the series, so there was nothing later to peek at — that's why its
+            the end of the series, so there was nothing later to peek at; that's why its
             mean lands within {fmt1(fast_lane_gap(@race))} orders of the forecast-first lane.
             Point the window at the middle of a series and the two part ways. <code>Operational</code>'s forecast-first baseline never sees post-period data,
             by construction. And the MCMC lane isn't just a slower way to the same number:
-            its interval carries parameter uncertainty — the sampler learned the variances
+            its interval carries parameter uncertainty; the sampler learned the variances
             the fast lanes were handed for free.
           </p>
 
@@ -247,7 +255,7 @@ defmodule BstsSiteWeb.SpeedLive do
 
             <.reveal_truth
               revealed={@revealed}
-              truth={"Planted: +#{fmt(@demo.scenario.truth.lift_per_day)} orders/day for #{@demo.scenario.truth.post_days} days — +#{fmt(@demo.scenario.truth.cumulative_lift)} cumulative."}
+              truth={"Planted: +#{fmt(@demo.scenario.truth.lift_per_day)} orders/day for #{@demo.scenario.truth.post_days} days; +#{fmt(@demo.scenario.truth.cumulative_lift)} cumulative."}
               grade={grade_line(@race, @demo.scenario.truth)}
             />
           </div>
@@ -255,11 +263,11 @@ defmodule BstsSiteWeb.SpeedLive do
 
         <p class="report-prose mt-6 text-sm text-(--color-ink-soft)">
           A note on the machine: this server runs Nx's <code>{backend_name(@demo.execution)}</code>
-          — pure Elixir, no native acceleration.
+          ; pure Elixir, no native acceleration.
           In your own deployment, EXLA can JIT-compile the <code>defn</code>
           paths the fast
           lanes are built on. Every number on this page is measured live when you click, so
-          it is machine-dependent by nature — that's a feature, not a caveat.
+          it is machine-dependent by nature; that's a feature, not a caveat.
         </p>
 
         <.under_the_hood code={Speed.code_snippet()} />
@@ -278,7 +286,7 @@ defmodule BstsSiteWeb.SpeedLive do
             eyebrow="What the slow lane buys"
             title="The world that didn't happen"
           >
-            Watch what {Speed.mcmc_samples()} posterior draws actually look like — the
+            Watch what {Speed.mcmc_samples()} posterior draws actually look like; the
             spaghetti the fast lanes summarize away.
           </.cross_link>
           <.cross_link
@@ -328,7 +336,7 @@ defmodule BstsSiteWeb.SpeedLive do
   end
 
   defp verdict_line(race) do
-    "Three lanes, roughly one answer — means within #{fmt(race.mean_spread)} orders of each other."
+    "Three lanes, roughly one answer; means within #{fmt(race.mean_spread)} orders of each other."
   end
 
   defp grade_line(race, truth) do
@@ -339,10 +347,10 @@ defmodule BstsSiteWeb.SpeedLive do
         "The planted truth sits inside all #{of_n} intervals. The lanes disagree on cost, not on the answer."
 
       0 ->
-        "The planted truth fell outside every interval this race — rare, and worth a visit to the calibration page."
+        "The planted truth fell outside every interval this race; rare, and worth a visit to the calibration page."
 
       _ ->
-        "The planted truth sits inside #{n} of #{of_n} intervals. Interval widths differ by lane — the MCMC interval also carries parameter uncertainty."
+        "The planted truth sits inside #{n} of #{of_n} intervals. Interval widths differ by lane; the MCMC interval also carries parameter uncertainty."
     end
   end
 

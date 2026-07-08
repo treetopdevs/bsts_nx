@@ -1,6 +1,6 @@
 defmodule BstsSiteWeb.Demos.PolicyLive do
   @moduledoc """
-  /demos/policy — "Did the policy change anything?"
+  /demos/policy; "Did the policy change anything?"
 
   An interrupted time series: the same estimator the marketing page uses,
   pointed at a planted *reduction*. The MCMC run sits behind the limiter.
@@ -77,13 +77,14 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
     <Layouts.app flash={@flash} track={:questions}>
       <section class="mx-auto max-w-4xl">
         <.section_heading
+          level={1}
           eyebrow="Did the policy change anything?"
           title="A speed limit changes. Do the accident counts?"
         >
           We generated 48 months of accident counts around a steady 120/month and planted a
           speed-limit change at month 37. You choose how many accidents the change truly
           prevents each month, and how noisy the counts are. This is an interrupted time
-          series — the same estimator the marketing demo runs, except here the interesting
+          series; the same estimator the marketing demo runs, except here the interesting
           effect is negative.
         </.section_heading>
         <.mantra active={:compare} class="mb-4" />
@@ -119,6 +120,8 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
           </:legend>
           <.line_figure
             id="policy-series"
+            title="Policy intervention series"
+            desc="Monthly accident counts are shown before and after the policy, with model counterfactual and effect overlays after fitting."
             height={300}
             y_label="accidents/month"
             series={series_lines(@scenario, @mcmc)}
@@ -129,7 +132,7 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
 
         <p :if={!@mcmc} class="report-prose text-sm text-(--color-ink-soft)">
           Before any analysis, all you can honestly say is that the line looks different
-          after month 37 — or doesn't, depending on your sliders. Whether that difference
+          after month 37; or doesn't, depending on your sliders. Whether that difference
           is the policy or just noise is exactly the question the model answers.
         </p>
       </section>
@@ -137,7 +140,7 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
       <section class="mx-auto mt-12 max-w-4xl">
         <.section_heading eyebrow="Interrupted time series" title="Run the evaluation">
           <code>PolicyEvaluator.evaluate</code> fits the 36 pre-change months by Gibbs
-          sampling — {Policy.num_samples()} posterior draws — projects the counterfactual
+          sampling; {Policy.num_samples()} posterior draws; projects the counterfactual
           "no policy change" world across the last 12 months, and measures the gap. About
           a second on this server.
         </.section_heading>
@@ -151,7 +154,13 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
           >
             Run the interrupted time series analysis
           </button>
-          <span :if={@running} class="font-data animate-pulse text-sm text-(--color-ink-soft)">
+          <span
+            :if={@running}
+            role="status"
+            aria-live="polite"
+            aria-busy="true"
+            class="font-data motion-safe:animate-pulse text-sm text-(--color-ink-soft)"
+          >
             Sampling {Policy.num_samples()} posterior draws on this server…
           </span>
           <span :if={@mcmc && !@running} class="font-data text-xs text-(--color-ink-faint)">
@@ -162,8 +171,10 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
         <.verdict_card
           :if={@busy}
           class="mt-4"
+          role="status"
+          aria-live="polite"
           tone={:warning}
-          verdict="Another visitor is sampling — try again in a moment."
+          verdict="Another visitor is sampling, try again in a moment."
         >
           <p>MCMC runs are limited to a few at a time so the demo stays responsive.</p>
         </.verdict_card>
@@ -171,7 +182,7 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
         <div :if={@mcmc}>
           <.figure
             no="2"
-            caption={"The posterior distribution of the cumulative effect — #{@mcmc.num_samples} draws. Mass below zero is evidence the policy prevented accidents."}
+            caption={"The posterior distribution of the cumulative effect; #{@mcmc.num_samples} draws. Mass below zero is evidence the policy prevented accidents."}
             execution={@mcmc.execution}
           >
             <:legend>
@@ -180,6 +191,8 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
             </:legend>
             <.histogram
               id="policy-posterior"
+              title="Policy effect posterior"
+              desc="Posterior draws of the cumulative policy effect, with interval and planted-truth markers when revealed."
               values={@mcmc.cumulative_draws}
               bins={24}
               vlines={histogram_vlines(@mcmc, @revealed)}
@@ -225,7 +238,7 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
             eyebrow="Same estimator, opposite sign"
             title="Did the campaign actually work?"
           >
-            The identical machinery pointed at a positive effect — conversions gained
+            The identical machinery pointed at a positive effect; conversions gained
             instead of accidents prevented.
           </.cross_link>
           <.cross_link
@@ -283,22 +296,22 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
 
   defp series_caption(mcmc) do
     "Monthly accident counts vs. the posterior counterfactual (mean and 95% band across " <>
-      "#{mcmc.num_samples} draws) — the world where the speed limit never changed. " <>
+      "#{mcmc.num_samples} draws); the world where the speed limit never changed. " <>
       "The magenta shading is the estimated effect."
   end
 
   defp mcmc_verdict(%{significant?: true, effect: %{cumulative: cum} = effect})
        when cum < 0 do
-    "Yes — the change prevented ~#{fmt(-cum)} accidents " <>
+    "Yes; the change prevented ~#{fmt(-cum)} accidents " <>
       "(95% CI #{fmt(-effect.cumulative_upper)} to #{fmt(-effect.cumulative_lower)} fewer)."
   end
 
   defp mcmc_verdict(%{significant?: true, effect: %{cumulative: cum}}) do
-    "The model sees ~#{fmt(cum)} more accidents — an increase, not a reduction."
+    "The model sees ~#{fmt(cum)} more accidents; an increase, not a reduction."
   end
 
   defp mcmc_verdict(_mcmc) do
-    "Honestly? Can't tell — the interval straddles zero."
+    "Honestly? Can't tell; the interval straddles zero."
   end
 
   # Prevented accidents are the good outcome here, so a significant
@@ -315,11 +328,11 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
   end
 
   defp truth_line(%{truth: %{change_per_month: change}}) when change == 0.0 do
-    "Planted: nothing. The speed-limit change has zero true effect — any change the model reports is noise."
+    "Planted: nothing. The speed-limit change has zero true effect; any change the model reports is noise."
   end
 
   defp truth_line(%{truth: truth}) do
-    "Planted: #{trunc(truth.change_per_month)} accidents/month from month 37 — " <>
+    "Planted: #{trunc(truth.change_per_month)} accidents/month from month 37; " <>
       "#{fmt(truth.cumulative_change)} over #{truth.post_months} months " <>
       "(#{fmt(-truth.cumulative_change)} accidents prevented)."
   end
@@ -331,7 +344,7 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
     if truth >= lo and truth <= hi do
       "The planted truth sits inside the model's 95% interval. Recovered."
     else
-      "The planted truth fell outside the 95% interval this time — that should be rare. " <>
+      "The planted truth fell outside the 95% interval this time; that should be rare. " <>
         "Intervals are promises about the long run, not every draw; see the calibration page."
     end
   end

@@ -2,7 +2,7 @@ defmodule BstsSiteWeb.Demos.AnomalyLive do
   @moduledoc """
   The ops-monitoring demo: plant latency spikes in a 36-hour monitoring
   window and watch `BstsNx.Applications.AnomalyDetector` grade them
-  against a streaming Kalman baseline — refit and rescored inline on
+  against a streaming Kalman baseline; refit and rescored inline on
   every interaction.
   """
   use BstsSiteWeb, :live_view
@@ -60,9 +60,9 @@ defmodule BstsSiteWeb.Demos.AnomalyLive do
     ~H"""
     <Layouts.app flash={@flash} track={:questions}>
       <div class="mx-auto max-w-4xl">
-        <.section_heading eyebrow="Ops monitoring" title="Is this spike an anomaly?">
+        <.section_heading level={1} eyebrow="Ops monitoring" title="Is this spike an anomaly?">
           A service hums along at roughly {fmt(hd(@demo.predicted))} ms.
-          Lines like this one never hold still — the question is never "did it move?"
+          Lines like this one never hold still; the question is never "did it move?"
           but "did it move more than its own noise says it should?". Below are {Anomaly.history_hours()} hours of normal latency the detector trained on, then a {Anomaly.window_hours()}-hour monitoring window it scores one hour at a time.
           You plant the spikes; the model decides which ones deserve a page.
         </.section_heading>
@@ -71,8 +71,7 @@ defmodule BstsSiteWeb.Demos.AnomalyLive do
         <p class="report-prose mt-4 text-sm text-(--color-ink-soft)">
           Two spikes are planted to start: an obvious +{obvious_default().magnitude}&nbsp;ms
           and a subtle +{subtle_default().magnitude}&nbsp;ms.
-          Every slider drag and click refits the baseline and rescores the window —
-          the whole round trip is a single Kalman filter pass, measured live in the
+          Every slider drag and click refits the baseline and rescores the window; the whole round trip is a single Kalman filter pass, measured live in the
           figure captions. Alpha is the false-alarm budget: the fraction of quiet
           hours you're willing to page someone for.
         </p>
@@ -97,16 +96,16 @@ defmodule BstsSiteWeb.Demos.AnomalyLive do
           <label class="block">
             <div class="flex items-baseline justify-between gap-2">
               <span class="font-data text-[0.7rem] uppercase tracking-wider text-(--color-ink-soft)">
-                Alpha — false-alarm budget
+                Alpha; false-alarm budget
               </span>
               <span class="font-data text-xs tabular-nums text-(--color-ink)">
                 |z| &gt; {fmt2(@demo.threshold)}
               </span>
             </div>
             <select name="alpha" class="select select-sm mt-1 w-full font-data text-sm">
-              <option value="0.01" selected={@alpha == 0.01}>0.01 — strict (99% band)</option>
-              <option value="0.05" selected={@alpha == 0.05}>0.05 — standard (95% band)</option>
-              <option value="0.10" selected={@alpha == 0.10}>0.10 — loose (90% band)</option>
+              <option value="0.01" selected={@alpha == 0.01}>0.01; strict (99% band)</option>
+              <option value="0.05" selected={@alpha == 0.05}>0.05; standard (95% band)</option>
+              <option value="0.10" selected={@alpha == 0.10}>0.10; loose (90% band)</option>
             </select>
           </label>
         </form>
@@ -128,7 +127,7 @@ defmodule BstsSiteWeb.Demos.AnomalyLive do
               type="button"
               phx-click="remove_anomaly"
               phx-value-hour={a.hour}
-              class="text-(--color-ink-faint) hover:text-(--color-lift)"
+              class="touch-target rounded-full text-(--color-ink-faint) hover:text-(--color-lift)"
               aria-label={"remove the spike at hour #{a.hour}"}
             >
               ×
@@ -146,7 +145,7 @@ defmodule BstsSiteWeb.Demos.AnomalyLive do
 
         <.figure
           no="1"
-          caption={"#{Anomaly.history_hours() + Anomaly.window_hours()} hours of server latency — the detector trains on the first #{Anomaly.history_hours()}, then checks each monitoring hour against a one-step-ahead prediction; the shaded band is its ±#{fmt1(@demo.tolerance_ms)} ms tolerance at alpha #{fmt_alpha(@alpha)}."}
+          caption={"#{Anomaly.history_hours() + Anomaly.window_hours()} hours of server latency; the detector trains on the first #{Anomaly.history_hours()}, then checks each monitoring hour against a one-step-ahead prediction; the shaded band is its ±#{fmt1(@demo.tolerance_ms)} ms tolerance at alpha #{fmt_alpha(@alpha)}."}
           execution={@demo.execution}
         >
           <:legend>
@@ -157,6 +156,8 @@ defmodule BstsSiteWeb.Demos.AnomalyLive do
           </:legend>
           <.line_figure
             id="anomaly-stream"
+            title="Latency stream with anomaly flags"
+            desc="Observed latency is compared with the detector's one-step predictions; flagged and planted spike markers appear in the monitoring window."
             height={320}
             y_label="latency (ms)"
             series={[
@@ -184,7 +185,7 @@ defmodule BstsSiteWeb.Demos.AnomalyLive do
 
         <.figure
           no="2"
-          caption={"The anomaly score for each monitoring hour — the one-step prediction error divided by the sd the filter reports for it; hours beyond the dashed ±#{fmt2(@demo.threshold)} lines are flagged."}
+          caption={"The anomaly score for each monitoring hour; the one-step prediction error divided by the sd the filter reports for it; hours beyond the dashed ±#{fmt2(@demo.threshold)} lines are flagged."}
           execution={@demo.execution}
         >
           <:legend>
@@ -195,6 +196,8 @@ defmodule BstsSiteWeb.Demos.AnomalyLive do
           </:legend>
           <.line_figure
             id="anomaly-zscores"
+            title="Anomaly z-scores"
+            desc="Monitoring-hour z-scores are plotted against positive and negative threshold lines; flagged and planted spike markers appear when present."
             height={240}
             y_label="z-score"
             series={[%{points: @demo.z_scores, color: :model, width: 1.75}]}
@@ -210,7 +213,7 @@ defmodule BstsSiteWeb.Demos.AnomalyLive do
           )} times per clean {Anomaly.window_hours()}-hour window.
           Tighten alpha and small spikes slip inside the band; loosen it and quiet hours start
           paging you. One more honest detail: the detector is streaming, so each observation it
-          scores gets absorbed into its level estimate — plant a big spike and watch the
+          scores gets absorbed into its level estimate; plant a big spike and watch the
           prediction get dragged upward for the next few hours.
         </p>
 
@@ -249,7 +252,7 @@ defmodule BstsSiteWeb.Demos.AnomalyLive do
             eyebrow="The engine underneath"
             title="The Kalman filter chapter"
           >
-            The anomaly score is nothing exotic — it's the filter's one-step prediction
+            The anomaly score is nothing exotic; it's the filter's one-step prediction
             error, divided by the sd the filter itself reports. That chapter shows the
             same machinery in slow motion.
           </.cross_link>
@@ -258,7 +261,7 @@ defmodule BstsSiteWeb.Demos.AnomalyLive do
             eyebrow="Why this page never spins"
             title="The speed lane"
           >
-            Fit and score is a single filter pass — {@demo.execution.elapsed_ms} ms on this
+            Fit and score is a single filter pass; {@demo.execution.elapsed_ms} ms on this
             server just now, no MCMC anywhere. That's why it reruns on every slider drag.
           </.cross_link>
         </div>
@@ -310,23 +313,23 @@ defmodule BstsSiteWeb.Demos.AnomalyLive do
   # -- Verdict ---------------------------------------------------------------
 
   defp verdict_line(%{anomalies: [], flagged_hours: []}) do
-    "All quiet — nothing flagged in the monitoring window."
+    "All quiet; nothing flagged in the monitoring window."
   end
 
   defp verdict_line(%{anomalies: [], flagged_hours: flagged}) do
-    "#{length(flagged)} #{plural(length(flagged), "false alarm", "false alarms")} — noise alone crossed the threshold."
+    "#{length(flagged)} #{plural(length(flagged), "false alarm", "false alarms")}; noise alone crossed the threshold."
   end
 
   defp verdict_line(%{anomalies: planted, hits: hits, misses: [], false_alarms: []}) do
-    "Caught #{length(hits)} of #{length(planted)} planted spikes — zero false alarms."
+    "Caught #{length(hits)} of #{length(planted)} planted spikes; zero false alarms."
   end
 
   defp verdict_line(%{anomalies: planted, hits: hits, misses: misses}) when misses != [] do
-    "Caught #{length(hits)} of #{length(planted)} — #{length(misses)} slipped inside the tolerance band."
+    "Caught #{length(hits)} of #{length(planted)}; #{length(misses)} slipped inside the tolerance band."
   end
 
   defp verdict_line(%{anomalies: planted, hits: hits, false_alarms: fa}) do
-    "Caught all #{length(hits)} of #{length(planted)} — but cried wolf on #{length(fa)} quiet #{plural(length(fa), "hour", "hours")}."
+    "Caught all #{length(hits)} of #{length(planted)}; but cried wolf on #{length(fa)} quiet #{plural(length(fa), "hour", "hours")}."
   end
 
   defp verdict_tone(%{anomalies: [], flagged_hours: []}), do: :neutral
@@ -339,7 +342,7 @@ defmodule BstsSiteWeb.Demos.AnomalyLive do
   # -- Reveal ----------------------------------------------------------------
 
   defp truth_line(%{anomalies: []}) do
-    "Nothing planted — every flag in this window is a false alarm."
+    "Nothing planted; every flag in this window is a false alarm."
   end
 
   defp truth_line(%{anomalies: anomalies}) do
@@ -369,7 +372,7 @@ defmodule BstsSiteWeb.Demos.AnomalyLive do
         "+#{a.magnitude} ms at hour #{h} scored |z| = #{fmt2(abs(z))}, under the #{fmt2(demo.threshold)} bar"
       end)
 
-    "Missed: #{detail}. A spike smaller than the tolerance band is, to this model, indistinguishable from noise — loosen alpha and the bar drops."
+    "Missed: #{detail}. A spike smaller than the tolerance band is, to this model, indistinguishable from noise; loosen alpha and the bar drops."
   end
 
   defp false_alarm_sentence(%{false_alarms: []}), do: nil
@@ -377,17 +380,17 @@ defmodule BstsSiteWeb.Demos.AnomalyLive do
   defp false_alarm_sentence(%{anomalies: []} = demo) do
     hours = Enum.map_join(demo.false_alarms, ", ", &"#{&1}")
 
-    "False #{plural(length(demo.false_alarms), "alarm", "alarms")} at #{plural(length(demo.false_alarms), "hour", "hours")} #{hours} — quiet #{plural(length(demo.false_alarms), "hour", "hours")} whose noise crossed the bar; expect about #{fmt1(demo.expected_false_alarms)} per clean window at alpha #{fmt_alpha(demo.alpha)}."
+    "False #{plural(length(demo.false_alarms), "alarm", "alarms")} at #{plural(length(demo.false_alarms), "hour", "hours")} #{hours}; quiet #{plural(length(demo.false_alarms), "hour", "hours")} whose noise crossed the bar; expect about #{fmt1(demo.expected_false_alarms)} per clean window at alpha #{fmt_alpha(demo.alpha)}."
   end
 
   defp false_alarm_sentence(demo) do
     hours = Enum.map_join(demo.false_alarms, ", ", &"#{&1}")
 
-    "Also flagged: #{plural(length(demo.false_alarms), "hour", "hours")} #{hours} — #{plural(length(demo.false_alarms), "an hour", "hours")} we didn't plant; noise, or the aftershock of a real spike being absorbed into the level estimate."
+    "Also flagged: #{plural(length(demo.false_alarms), "hour", "hours")} #{hours}; #{plural(length(demo.false_alarms), "an hour", "hours")} we didn't plant; noise, or the aftershock of a real spike being absorbed into the level estimate."
   end
 
   defp clean_sentence(%{misses: [], false_alarms: [], hits: hits}) when hits != [] do
-    "Every planted spike crossed the threshold and nothing else did — a clean scorecard at this alpha."
+    "Every planted spike crossed the threshold and nothing else did; a clean scorecard at this alpha."
   end
 
   defp clean_sentence(_demo), do: nil
