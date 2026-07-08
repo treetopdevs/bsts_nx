@@ -52,12 +52,17 @@ tight numerical assertion (which would flake), so it is safe for CI.
   `result.cumulative_effects` (list, length == `num_samples`),
   `result.actual` (list, length == post-period length).
 
-`CausalImpact.summary/1` contract — from `test/causal_impact_test.exs:38-62`:
+`CausalImpact.summary/1` contract — from `lib/bsts_nx/causal_impact.ex:304-385`:
 
-- `summary(result)` returns a map with at least `:cumulative_effect` and
-  `:average_effect`, each a map with `:mean`, `:sd`, `:lower`, `:upper`.
-- With `num_samples: 1` the spread fields are the atom `:nan`
-  (`test/causal_impact_test.exs:60-62`). With several samples they are floats.
+- `summary(result)` returns
+  `%{point_effects: [...], cumulative_effect: %{...}, relative_effect: %{...}}`.
+  `cumulative_effect` and `relative_effect` are each `%{mean, sd, lower, upper}`;
+  `point_effects` is a LIST of such maps (one per post-period step). **There is NO
+  `average_effect` field** — assert on `cumulative_effect`, `relative_effect`, or
+  the per-step `point_effects`.
+- With `num_samples: 1` the spread fields (`sd`, `lower`, `upper`) are the atom
+  `:nan` (`test/causal_impact_test.exs:60-62`); `mean` is the single value. With
+  several samples they are floats.
 
 The existing external "detects positive effect" test to model the data shape on
 (`test/causal_impact_test.exs:65-87`):
@@ -159,17 +164,24 @@ defmodule BstsNxCausalImpactEstimateSmokeTest do
 
     # Finite summary (regression guard: a NaN init/posterior would poison these).
     assert finite?(summary.cumulative_effect.mean)
-    assert finite?(summary.average_effect.mean)
     assert finite?(summary.cumulative_effect.lower)
     assert finite?(summary.cumulative_effect.upper)
+    assert finite?(summary.relative_effect.mean)
 
     # Credible interval is ordered.
     assert summary.cumulative_effect.lower <= summary.cumulative_effect.mean
     assert summary.cumulative_effect.mean <= summary.cumulative_effect.upper
 
-    # A large positive intervention is detected as positive.
+    # A large positive intervention is detected as positive — both the cumulative
+    # effect and the average pointwise effect are above zero.
     assert summary.cumulative_effect.mean > 0
-    assert summary.average_effect.mean > 0
+
+    avg_point_mean =
+      summary.point_effects
+      |> Enum.map(& &1.mean)
+      |> then(fn means -> Enum.sum(means) / length(means) end)
+
+    assert avg_point_mean > 0
   end
 
   test "estimate/4 is deterministic for a fixed seed" do
@@ -196,9 +208,11 @@ end
 ### Step 2: Confirm field names against the live code
 
 The test reads `result.actual`, `result.cumulative_effects`,
-`summary.cumulative_effect.{mean,lower,upper}`, and `summary.average_effect.mean`.
+`summary.cumulative_effect.{mean,lower,upper}`, `summary.relative_effect.mean`, and
+the per-step `summary.point_effects` means.
 Confirm these exist: open `lib/bsts_nx/causal_impact.ex` and search for
-`cumulative_effect`, `average_effect`, and the result builder (`build_impact_result`).
+`cumulative_effect`, `relative_effect`, `point_effects`, and the result builder
+(`build_impact_result`).
 If any asserted key does not exist, adjust the test to read the equivalent existing
 field (do NOT change library code). If `summary/1` exposes no per-field map, STOP
 and report.

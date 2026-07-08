@@ -2,11 +2,11 @@ defmodule BstsSiteWeb.StartLive do
   @moduledoc """
   Get started: install, a sixty-second quick start, the which-question →
   which-module decision table, and where to go deeper. Static and
-  terminal-quiet — no demos run here.
+  terminal-quiet; no demos run here.
   """
   use BstsSiteWeb, :live_view
 
-  # Every row verified against lib/bsts_nx/ — modules and arities exist.
+  # Every row verified against lib/bsts_nx/; modules and arities exist.
   @decision_table [
     {"Did this intervention have a causal effect?", "CausalImpact",
      "estimate/4 or estimate_structured/5"},
@@ -40,8 +40,8 @@ defmodule BstsSiteWeb.StartLive do
     ~H"""
     <Layouts.app flash={@flash} track={:start}>
       <div class="mx-auto max-w-3xl">
-        <.section_heading eyebrow="Get started" title="From install to a causal claim">
-          BstsNx is a library, not a service — everything you've watched on this site is a
+        <.section_heading level={1} eyebrow="Get started" title="From install to a causal claim">
+          BstsNx is a library, not a service; everything you've watched on this site is a
           function call you can make from your own code. This page is the practical part:
           install it, run the sixty-second version, and find the right entry point for your
           question.
@@ -58,7 +58,7 @@ defmodule BstsSiteWeb.StartLive do
             </div>
           <% else %>
             <p class="report-prose mt-2 text-sm text-(--color-ink-soft)">
-              Hex publishing is in progress — until it lands, use the git dependency form in
+              Hex publishing is in progress; until it lands, use the git dependency form in
               your <code>mix.exs</code>:
             </p>
             <div class="code-block mt-3">
@@ -68,7 +68,7 @@ defmodule BstsSiteWeb.StartLive do
               :if={is_nil(@github_url)}
               class="mt-2 font-data text-xs text-(--color-ink-faint)"
             >
-              The public source link is coming — swap in the repository URL when it's
+              The public source link is coming; swap in the repository URL when it's
               announced.
             </p>
           <% end %>
@@ -78,7 +78,7 @@ defmodule BstsSiteWeb.StartLive do
           </h4>
           <ul class="report-prose mt-2 list-disc space-y-1 pl-4 text-sm text-(--color-ink-soft)">
             <li>Elixir <code>~> 1.19</code></li>
-            <li><code>nx ~> 0.12.0</code> — the core numerical dependency</li>
+            <li><code>nx ~> 0.12.0</code>; the core numerical dependency</li>
             <li>
               Optional accelerators: <code>exla ~> 0.12.0</code>
               (JIT compilation) and <code>emlx ~> 0.3.0</code>
@@ -98,7 +98,7 @@ defmodule BstsSiteWeb.StartLive do
           <h3 class="font-display text-xl font-bold">2 · The sixty-second quick start</h3>
           <p class="report-prose mt-2 text-sm text-(--color-ink-soft)">
             The lowest floor of the library: a Kalman filter over a local-level model.
-            Seven arguments — observations, then F, H, Q, R, and the initial state and
+            Seven arguments; observations, then F, H, Q, R, and the initial state and
             covariance. It returns one <code>{"{state, covariance}"}</code> pair per
             observation.
           </p>
@@ -107,7 +107,7 @@ defmodule BstsSiteWeb.StartLive do
           </div>
           <p class="report-prose mt-4 text-sm text-(--color-ink-soft)">
             And the highest floor: hand <code>CausalImpact.estimate/4</code> a series and
-            two 1-based inclusive periods — pre for fitting, post for judging — and it fits
+            two 1-based inclusive periods; pre for fitting, post for judging; and it fits
             the pre-period by Gibbs sampling, projects the counterfactual, and measures the
             gap. Seed it and the answer is reproducible.
           </p>
@@ -119,7 +119,7 @@ defmodule BstsSiteWeb.StartLive do
         <section class="mt-10">
           <h3 class="font-display text-xl font-bold">3 · Which question → which module</h3>
           <p class="report-prose mt-2 text-sm text-(--color-ink-soft)">
-            Every high-level API is the same engine — decompose, project, compare — wearing
+            Every high-level API is the same engine; decompose, project, compare; wearing
             different domain clothes. Start from your question; all modules live under the
             <code>BstsNx.</code>
             namespace.
@@ -169,12 +169,12 @@ defmodule BstsSiteWeb.StartLive do
             <ul class="list-disc space-y-2 pl-4">
               <li>
                 <strong>From noisy data to causal claims</strong>
-                (<code>livebooks/bsts_nx_guide.livemd</code>) — the full arc: synthetic data,
+                (<code>livebooks/bsts_nx_guide.livemd</code>); the full arc: synthetic data,
                 Kalman filtering, Gibbs sampling, causal impact, attribution, validation.
               </li>
               <li>
                 <strong>BSTS for web engineers</strong>
-                (<code>livebooks/bsts_nx_statistical_journey.livemd</code>) — the same
+                (<code>livebooks/bsts_nx_statistical_journey.livemd</code>); the same
                 machinery built up from intuition, for readers who think in requests and
                 latencies rather than posteriors.
               </li>
@@ -208,7 +208,7 @@ defmodule BstsSiteWeb.StartLive do
             Six chapters from "noise lies to you" to the world that didn't happen.
           </.cross_link>
           <.cross_link navigate={~p"/speed"} eyebrow="Plan your deployment" title="The two lanes">
-            Which calls are request-path safe and which belong in a background job — timed
+            Which calls are request-path safe and which belong in a background job; timed
             live.
           </.cross_link>
         </div>

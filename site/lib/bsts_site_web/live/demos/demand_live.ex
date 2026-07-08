@@ -86,14 +86,15 @@ defmodule BstsSiteWeb.Demos.DemandLive do
     <Layouts.app flash={@flash} track={:questions}>
       <div class="mx-auto max-w-4xl">
         <.section_heading
+          level={1}
           eyebrow="How much should we stock?"
           title="A forecast is not a number. It's a distribution."
         >
-          We generated {Demand.history_days()} days of daily demand for one product — a level
-          that meanders gently around {fmt(@scenario.history_mean)} units a day — and generated {Demand.horizon()} more days the same way, then sealed them. One purchase order has to
-          cover those three weeks. The model fits the history, simulates {Demand.num_samples()} possible three-week futures — {Demand.num_samples() *
+          We generated {Demand.history_days()} days of daily demand for one product; a level
+          that meanders gently around {fmt(@scenario.history_mean)} units a day; and generated {Demand.horizon()} more days the same way, then sealed them. One purchase order has to
+          cover those three weeks. The model fits the history, simulates {Demand.num_samples()} possible three-week futures; {Demand.num_samples() *
             Demand.horizon()} simulated
-          unit-days — and the order quantity falls out of a quantile.
+          unit-days; and the order quantity falls out of a quantile.
         </.section_heading>
 
         <.mantra active={:project} />
@@ -107,11 +108,17 @@ defmodule BstsSiteWeb.Demos.DemandLive do
           >
             {if @forecast, do: "Refit and forecast", else: "Fit and forecast"}
           </button>
-          <span :if={@running} class="animate-pulse font-data text-xs text-(--color-ink-soft)">
+          <span
+            :if={@running}
+            role="status"
+            aria-live="polite"
+            aria-busy="true"
+            class="motion-safe:animate-pulse font-data text-xs text-(--color-ink-soft)"
+          >
             sampling {Demand.num_samples()} posterior draws on this server…
           </span>
           <span :if={@forecast && !@running} class="font-data text-xs text-(--color-ink-faint)">
-            fitted in {@forecast.execution.elapsed_ms} ms — the slider below never refits
+            fitted in {@forecast.execution.elapsed_ms} ms; the slider below never refits
           </span>
         </div>
 
@@ -133,7 +140,7 @@ defmodule BstsSiteWeb.Demos.DemandLive do
               do:
                 "Daily demand history and the #{Demand.horizon()}-day forecast fan: nested 50% and 95% bands around the posterior mean, drawn from #{@forecast.n_draws} simulated futures.",
               else:
-                "#{Demand.history_days()} days of daily demand history — the blank space right of the line is the question."
+                "#{Demand.history_days()} days of daily demand history; the blank space right of the line is the question."
           }
           execution={@forecast && @forecast.execution}
         >
@@ -144,6 +151,8 @@ defmodule BstsSiteWeb.Demos.DemandLive do
           </:legend>
           <.line_figure
             id="demand-fan"
+            title="Demand forecast distribution"
+            desc="Historical demand appears before the order point; forecast and held-back actual demand appear after it when available."
             height={320}
             y_label="units/day"
             x_domain={{0, Demand.history_days() + Demand.horizon() - 1}}
@@ -155,7 +164,9 @@ defmodule BstsSiteWeb.Demos.DemandLive do
 
         <div :if={@busy} class="my-6">
           <.verdict_card
-            verdict="Another visitor is sampling — try again in a moment."
+            role="status"
+            aria-live="polite"
+            verdict="Another visitor is sampling, try again in a moment."
             tone={:warning}
           >
             The MCMC demos share a small worker pool so this machine stays honest about its
@@ -166,7 +177,7 @@ defmodule BstsSiteWeb.Demos.DemandLive do
         <section :if={@forecast}>
           <.figure
             no="2"
-            caption={"Total demand over the next #{Demand.horizon()} days, once per posterior draw — the distribution the order decision is actually made on."}
+            caption={"Total demand over the next #{Demand.horizon()} days, once per posterior draw; the distribution the order decision is actually made on."}
             execution={@forecast.execution}
           >
             <:legend>
@@ -175,6 +186,8 @@ defmodule BstsSiteWeb.Demos.DemandLive do
             </:legend>
             <.histogram
               id="demand-totals"
+              title="Posterior total demand"
+              desc="Posterior draws of total demand over the planning horizon, with order quantity and actual total markers when available."
               values={@forecast.totals}
               bins={16}
               height={190}
@@ -190,7 +203,7 @@ defmodule BstsSiteWeb.Demos.DemandLive do
               That's expected demand plus {fmt(@decision.safety_stock)} units of safety stock.
               A textbook formula that treats each day's error as independent would hold only {fmt(
                 @decision.naive_safety_stock
-              )} — but when the level itself wanders, a high day
+              )}; but when the level itself wanders, a high day
               tends to be followed by more high days, so {Demand.horizon()}-day totals spread
               wider than independent errors suggest. The trajectories carry that correlation;
               the formula throws it away.
@@ -235,8 +248,8 @@ defmodule BstsSiteWeb.Demos.DemandLive do
             eyebrow="Do the bands keep their promise?"
             title="Calibration, graded"
           >
-            A 95% band should cover about 95% of held-back futures — over many worlds, not
-            just this one. That page grades five planted lifts on one seeded series — a live
+            A 95% band should cover about 95% of held-back futures; over many worlds, not
+            just this one. That page grades five planted lifts on one seeded series; a live
             spot-check; the library ships the many-runs version offline
             (<code>BstsNx.Validation.known_lift_injection/3</code>).
           </.cross_link>
@@ -321,9 +334,9 @@ defmodule BstsSiteWeb.Demos.DemandLive do
 
     outcome =
       if order >= actual do
-        "ordering #{fmt(order)} units would have covered demand with #{fmt(order - actual)} left on the shelf — that spare is the price of a #{decision.service_level}% promise."
+        "ordering #{fmt(order)} units would have covered demand with #{fmt(order - actual)} left on the shelf; that spare is the price of a #{decision.service_level}% promise."
       else
-        "ordering #{fmt(order)} units would have run out #{fmt(actual - order)} units short — inside the #{100 - decision.service_level}% of futures the promise deliberately leaves uncovered."
+        "ordering #{fmt(order)} units would have run out #{fmt(actual - order)} units short; inside the #{100 - decision.service_level}% of futures the promise deliberately leaves uncovered."
       end
 
     "The 95% band covered #{coverage} of #{Demand.horizon()} actual days. At your #{decision.service_level}% service level, " <>

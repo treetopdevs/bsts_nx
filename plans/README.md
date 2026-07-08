@@ -41,8 +41,8 @@ conditions, and update your row in the table when done.
 
 | Plan | Title | Priority | Effort | Risk | Depends on | Status |
 |------|-------|----------|--------|------|------------|--------|
-| 007 | Stop `.formatter.exs` from importing optional/dev-only deps (`:exla`, `:ex_doc`) | P2 | S | LOW | — | TODO |
-| 008 | Add a CI-runnable correctness test for `CausalImpact.estimate/4` | P2 | M | LOW | — | TODO |
+| 007 | Stop `.formatter.exs` from importing optional/dev-only deps (`:exla`, `:ex_doc`) | P2 | S | LOW | — | DONE¹ |
+| 008 | Add a CI-runnable correctness test for `CausalImpact.estimate/4` | P2 | M | LOW | — | DONE² |
 | 009 | Consolidate the duplicated positive-integer validation into `Utils` | P3 | S | LOW | — | TODO |
 | 010 | Add a scalar-vs-multi agreement test for the compiled Kalman filter | P3 | S | LOW | — | TODO |
 | 011 | Align the EXLA CI job's compile flags with the main test job | P3 | S | MED | — | TODO |
@@ -51,6 +51,19 @@ conditions, and update your row in the table when done.
 | 014 | (SPIKE) Design a public backcast / missing-data imputation API | P3 | M | LOW | — | TODO |
 
 Status values: TODO | IN PROGRESS | DONE | BLOCKED (one-line reason) | REJECTED (one-line rationale)
+
+¹ **007** executed by an executor subagent and reviewed (verdict **APPROVE**, 2026-06-30) on
+branch `advisor/007-formatter-drop-optional-deps` @ `5f2ffdd` — diff is exactly `.formatter.exs`
+(`import_deps: [:nx]`), all done-criteria re-verified. **Not yet integrated** into `execute-plans`;
+integrate with `git cherry-pick 5f2ffdd`. The branch is based on `e4654c5` (session-start HEAD), but
+the 3-dot diff confirms a cherry-pick/merge brings only `.formatter.exs`.
+
+² **008** executed and reviewed (verdict **APPROVE**, 2026-06-30) on branch
+`advisor/008-ci-runnable-estimate-correctness-test` @ `ced793a` — adds only
+`test/causal_impact_estimate_smoke_test.exs` (2 tests). Re-verified passing against BOTH `e4654c5`
+(worktree base) and the live HEAD `96a8f22` (cherry-picked). The plan's original `summary.average_effect`
+assertions were corrected to the real `cumulative_effect`/`relative_effect`/`point_effects` fields before
+dispatch. **Not yet integrated** into `execute-plans`; integrate with `git cherry-pick ced793a`.
 
 ## Recommended sequencing (Batch 2)
 

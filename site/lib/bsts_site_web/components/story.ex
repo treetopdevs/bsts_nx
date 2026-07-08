@@ -4,15 +4,15 @@ defmodule BstsSiteWeb.Story do
 
   The recurring devices:
 
-    * `figure/1` — every chart is a numbered Figure with a journal-style
+    * `figure/1`: every chart is a numbered Figure with a journal-style
       caption; the caption carries the live execution readout.
-    * `exec_badge/1` — the library's own `execution` metadata as an
+    * `exec_badge/1`: the library's own `execution` metadata as an
       instrument readout: "method: :scalar_forecast_filter · 6 ms · live".
-    * `reveal_truth/1` — planted ground truth behind a redaction bar.
-    * `under_the_hood/1` — the actual Elixir the demo just ran, highlighted
+    * `reveal_truth/1`: planted ground truth behind a redaction bar.
+    * `under_the_hood/1`: the actual Elixir the demo just ran, highlighted
       server-side with Makeup.
-    * `verdict_card/1` — the plain-language answer with its interval.
-    * `mantra/1` — decompose → project → compare, with the current stage lit.
+    * `verdict_card/1`: the plain-language answer with its interval.
+    * `mantra/1`: decompose → project → compare, with the current stage lit.
   """
 
   use Phoenix.Component
@@ -21,12 +21,12 @@ defmodule BstsSiteWeb.Story do
   A numbered figure. The body slot holds the chart; `caption` is the
   journal-style caption; optional `execution` renders the live readout.
   """
-  attr :no, :string, required: true, doc: ~s(figure number, e.g. "1" or "3.2")
-  attr :caption, :string, required: true
-  attr :execution, :map, default: nil, doc: "the library's execution metadata map"
-  attr :class, :string, default: nil
-  slot :inner_block, required: true
-  slot :legend
+  attr(:no, :string, required: true, doc: ~s(figure number, e.g. "1" or "3.2"))
+  attr(:caption, :string, required: true)
+  attr(:execution, :map, default: nil, doc: "the library's execution metadata map")
+  attr(:class, :string, default: nil)
+  slot(:inner_block, required: true)
+  slot(:legend)
 
   def figure(assigns) do
     ~H"""
@@ -36,8 +36,7 @@ defmodule BstsSiteWeb.Story do
       </div>
       <figcaption class="figure-caption mt-2 flex flex-wrap items-baseline gap-x-3 gap-y-1 px-1">
         <span>
-          <span class="fig-no">Fig. {@no}</span>
-          — {@caption}
+          <span class="fig-no">Fig. {@no}</span>: {@caption}
         </span>
         <span :if={@legend != []} class="inline-flex flex-wrap items-center gap-x-3">
           {render_slot(@legend)}
@@ -49,14 +48,14 @@ defmodule BstsSiteWeb.Story do
   end
 
   @doc "A legend swatch for figure captions."
-  attr :color, :atom, required: true, values: [:ink, :model, :lift, :truth]
-  attr :label, :string, required: true
-  attr :dash, :boolean, default: false
+  attr(:color, :atom, required: true, values: [:ink, :model, :lift, :truth])
+  attr(:label, :string, required: true)
+  attr(:dash, :boolean, default: false)
 
   def swatch(assigns) do
     ~H"""
     <span class="inline-flex items-center gap-1.5 whitespace-nowrap">
-      <svg viewBox="0 0 20 6" class="w-5 h-1.5">
+      <svg viewBox="0 0 20 6" class="w-5 h-1.5" aria-hidden="true">
         <line
           x1="0"
           y1="3"
@@ -76,8 +75,8 @@ defmodule BstsSiteWeb.Story do
   Instrument readout of the library's self-reported execution metadata.
   Nothing on this site is a screenshot: the badge proves the demo ran here.
   """
-  attr :execution, :map, required: true
-  attr :class, :string, default: nil
+  attr(:execution, :map, required: true)
+  attr(:class, :string, default: nil)
 
   def exec_badge(assigns) do
     ~H"""
@@ -96,33 +95,38 @@ defmodule BstsSiteWeb.Story do
   The plain-language answer. `tone` colors the leading verdict word:
   :lift for effects, :truth for recovered truths, :neutral otherwise.
   """
-  attr :verdict, :string, required: true, doc: ~s(e.g. "Yes — the campaign worked.")
-  attr :tone, :atom, default: :lift, values: [:lift, :truth, :neutral, :warning]
-  attr :class, :string, default: nil
-  slot :inner_block
+  attr(:verdict, :string, required: true, doc: ~s(e.g. "Yes, the campaign worked."))
+  attr(:tone, :atom, default: :lift, values: [:lift, :truth, :neutral, :warning])
+  attr(:class, :string, default: nil)
+  attr(:rest, :global, include: ~w(role aria-live aria-busy))
+  slot(:inner_block)
+
   slot :stat, doc: "key numbers" do
-    attr :label, :string, required: true
-    attr :value, :string, required: true
-    attr :hint, :string
+    attr(:label, :string, required: true)
+    attr(:value, :string, required: true)
+    attr(:hint, :string)
   end
 
   def verdict_card(assigns) do
     ~H"""
-    <div class={[
-      "rounded-md border-l-4 border border-(--color-grid) bg-(--color-paper-raised) p-4 sm:p-5",
-      verdict_border(@tone),
-      @class
-    ]}>
-      <p class="font-display text-lg sm:text-xl font-semibold">{@verdict}</p>
+    <div
+      {@rest}
+      class={[
+        "verdict-card min-w-0 rounded-md p-4 sm:p-5",
+        verdict_class(@tone),
+        @class
+      ]}
+    >
+      <p class="font-display text-lg sm:text-xl font-semibold break-words">{@verdict}</p>
       <div :if={@inner_block != []} class="report-prose mt-1 text-sm text-(--color-ink-soft)">
         {render_slot(@inner_block)}
       </div>
       <dl :if={@stat != []} class="mt-3 flex flex-wrap gap-x-8 gap-y-2">
-        <div :for={stat <- @stat}>
+        <div :for={stat <- @stat} class="min-w-0">
           <dt class="font-data text-[0.65rem] uppercase tracking-wider text-(--color-ink-faint)">
             {stat.label}
           </dt>
-          <dd class="font-data text-base font-medium tabular-nums">
+          <dd class="font-data text-base font-medium tabular-nums break-words">
             {stat.value}
             <span :if={stat[:hint]} class="text-xs font-normal text-(--color-ink-faint)">
               {stat.hint}
@@ -134,10 +138,10 @@ defmodule BstsSiteWeb.Story do
     """
   end
 
-  defp verdict_border(:lift), do: "border-l-(--color-lift)"
-  defp verdict_border(:truth), do: "border-l-(--color-truth)"
-  defp verdict_border(:warning), do: "border-l-(--color-warning)"
-  defp verdict_border(:neutral), do: "border-l-(--color-ink-faint)"
+  defp verdict_class(:lift), do: "verdict-card-lift"
+  defp verdict_class(:truth), do: "verdict-card-truth"
+  defp verdict_class(:warning), do: "verdict-card-warning"
+  defp verdict_class(:neutral), do: "verdict-card-neutral"
 
   @doc """
   The planted-truth reveal. We generated the data, so we know the answer;
@@ -146,12 +150,12 @@ defmodule BstsSiteWeb.Story do
   The parent LiveView owns the `revealed` flag and handles the event
   (default: "reveal_truth").
   """
-  attr :revealed, :boolean, required: true
-  attr :event, :string, default: "reveal_truth"
-  attr :label, :string, default: "Reveal the planted truth"
-  attr :truth, :string, required: true, doc: "the ground-truth statement"
-  attr :grade, :string, default: nil, doc: "how the estimate did against it"
-  attr :class, :string, default: nil
+  attr(:revealed, :boolean, required: true)
+  attr(:event, :string, default: "reveal_truth")
+  attr(:label, :string, default: "Reveal the planted truth")
+  attr(:truth, :string, required: true, doc: "the ground-truth statement")
+  attr(:grade, :string, default: nil, doc: "how the estimate did against it")
+  attr(:class, :string, default: nil)
 
   def reveal_truth(assigns) do
     ~H"""
@@ -163,7 +167,7 @@ defmodule BstsSiteWeb.Story do
     ]}>
       <div class="flex flex-wrap items-center justify-between gap-2">
         <span class="font-data text-[0.65rem] uppercase tracking-wider text-(--color-ink-faint)">
-          Answer key — sealed at data generation
+          Answer key: sealed at data generation
         </span>
         <button
           :if={!@revealed}
@@ -191,18 +195,18 @@ defmodule BstsSiteWeb.Story do
 
   @doc """
   Collapsible panel showing the real, copy-pasteable Elixir the demo runs.
-  Highlighted server-side with Makeup — no client JS.
+  Highlighted server-side with Makeup, no client JS.
   """
-  attr :code, :string, required: true
-  attr :title, :string, default: "Under the hood — the code this demo just ran"
-  attr :class, :string, default: nil
+  attr(:code, :string, required: true)
+  attr(:title, :string, default: "Under the hood: the code this demo just ran")
+  attr(:class, :string, default: nil)
 
   def under_the_hood(assigns) do
     assigns = assign(assigns, :highlighted, highlight(assigns.code))
 
     ~H"""
     <details class={["group my-4 rounded-md border border-(--color-grid)", @class]}>
-      <summary class="cursor-pointer select-none px-4 py-2.5 font-data text-xs text-(--color-ink-soft) hover:text-(--color-ink) flex items-center gap-2">
+      <summary class="flex min-h-11 cursor-pointer select-none items-center gap-2 px-4 py-2.5 font-data text-xs text-(--color-ink-soft) hover:text-(--color-ink)">
         <span class="transition-transform group-open:rotate-90" aria-hidden="true">▸</span>
         {@title}
       </summary>
@@ -223,8 +227,8 @@ defmodule BstsSiteWeb.Story do
   The site's conceptual compass: decompose → project → compare.
   `active` lights the stage the current page teaches.
   """
-  attr :active, :atom, default: nil, values: [nil, :decompose, :project, :compare]
-  attr :class, :string, default: nil
+  attr(:active, :atom, default: nil, values: [nil, :decompose, :project, :compare])
+  attr(:class, :string, default: nil)
 
   def mantra(assigns) do
     ~H"""
@@ -239,11 +243,11 @@ defmodule BstsSiteWeb.Story do
   end
 
   @doc "Cross-link card: 'this demo ran the same engine as → the Kalman chapter'."
-  attr :navigate, :string, required: true
-  attr :eyebrow, :string, required: true
-  attr :title, :string, required: true
-  attr :class, :string, default: nil
-  slot :inner_block
+  attr(:navigate, :string, required: true)
+  attr(:eyebrow, :string, required: true)
+  attr(:title, :string, required: true)
+  attr(:class, :string, default: nil)
+  slot(:inner_block)
 
   def cross_link(assigns) do
     ~H"""
@@ -267,10 +271,11 @@ defmodule BstsSiteWeb.Story do
   end
 
   @doc "Section eyebrow + display heading for report sections."
-  attr :eyebrow, :string, default: nil
-  attr :title, :string, required: true
-  attr :class, :string, default: nil
-  slot :inner_block
+  attr(:eyebrow, :string, default: nil)
+  attr(:title, :string, required: true)
+  attr(:level, :integer, default: 2, values: [1, 2])
+  attr(:class, :string, default: nil)
+  slot(:inner_block)
 
   def section_heading(assigns) do
     ~H"""
@@ -278,7 +283,12 @@ defmodule BstsSiteWeb.Story do
       <div :if={@eyebrow} class="font-data text-xs uppercase tracking-[0.15em] text-(--color-lift)">
         {@eyebrow}
       </div>
-      <h2 class="font-display text-2xl sm:text-3xl font-bold mt-1">{@title}</h2>
+      <h1 :if={@level == 1} class="font-display mt-1 text-3xl font-bold sm:text-4xl">
+        {@title}
+      </h1>
+      <h2 :if={@level == 2} class="font-display mt-1 text-2xl font-bold sm:text-3xl">
+        {@title}
+      </h2>
       <div :if={@inner_block != []} class="report-prose mt-2 text-(--color-ink-soft)">
         {render_slot(@inner_block)}
       </div>
@@ -287,14 +297,14 @@ defmodule BstsSiteWeb.Story do
   end
 
   @doc "A labeled range slider that pushes a phx-change event from its form."
-  attr :name, :string, required: true
-  attr :label, :string, required: true
-  attr :min, :any, required: true
-  attr :max, :any, required: true
-  attr :step, :any, default: 1
-  attr :value, :any, required: true
-  attr :display, :string, default: nil, doc: "formatted current value"
-  attr :class, :string, default: nil
+  attr(:name, :string, required: true)
+  attr(:label, :string, required: true)
+  attr(:min, :any, required: true)
+  attr(:max, :any, required: true)
+  attr(:step, :any, default: 1)
+  attr(:value, :any, required: true)
+  attr(:display, :string, default: nil, doc: "formatted current value")
+  attr(:class, :string, default: nil)
 
   def param_slider(assigns) do
     ~H"""

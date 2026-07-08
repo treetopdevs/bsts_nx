@@ -1,7 +1,7 @@
 defmodule BstsSiteWeb.Engine.CounterfactualLive do
   @moduledoc """
   Engine chapter: the counterfactual. One MCMC fit, all posterior draws kept,
-  drawn as spaghetti — the spread IS the uncertainty. An alpha slider
+  drawn as spaghetti; the spread IS the uncertainty. An alpha slider
   recomputes intervals from the stored draws without refitting.
   """
   use BstsSiteWeb, :live_view
@@ -85,7 +85,7 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
       stats = Demo.stats(fit.result, socket.assigns.alpha)
       {:noreply, assign(socket, running: false, busy: false, fit: fit, stats: stats)}
     else
-      # The effect slider moved while the sampler ran — this result answers
+      # The effect slider moved while the sampler ran; this result answers
       # a question the page is no longer asking. Drop it.
       {:noreply, assign(socket, running: false)}
     end
@@ -102,12 +102,13 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
       <div class="mx-auto max-w-4xl">
         <.mantra active={:compare} class="mb-4" />
         <.section_heading
+          level={1}
           eyebrow="Engine · chapter 6"
           title="The world that didn't happen"
         >
           A causal effect is a comparison against a world we never observed. The model can't
           show us that world, but it can show us its honest guesses: fit on the pre-period
-          only, then forward-simulate what should have happened — once per posterior draw.
+          only, then forward-simulate what should have happened; once per posterior draw.
           Below, {Demo.n_post()} days follow a planted step. Fit the model and every thin
           blue line is one complete answer to "what if we had done nothing?" The spread of
           the spaghetti is the uncertainty; no band is drawn because none is needed.
@@ -142,6 +143,8 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
           </:legend>
           <.line_figure
             id="cf-spaghetti"
+            title="Counterfactual trajectory draws"
+            desc="Observed data is shown with posterior counterfactual trajectories and the posterior mean after fitting."
             height={320}
             y_label="units/day"
             series={
@@ -153,7 +156,9 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
 
         <div :if={@busy} class="my-4">
           <.verdict_card
-            verdict="Another visitor is sampling — try again in a moment."
+            role="status"
+            aria-live="polite"
+            verdict="Another visitor is sampling, try again in a moment."
             tone={:warning}
           >
             MCMC slots on this server are limited so everyone's demo stays responsive.
@@ -174,7 +179,7 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
           </form>
           <p class="report-prose mt-2 text-sm text-(--color-ink-soft)">
             Drag it: nothing refits. The {@fit.num_draws} draws are already stored, so a new
-            interval is just new percentiles — recomputed in about a millisecond.
+            interval is just new percentiles; recomputed in about a millisecond.
           </p>
 
           <.figure
@@ -187,6 +192,8 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
             </:legend>
             <.histogram
               id="cf-cumulative-hist"
+              title="Cumulative-effect draw distribution"
+              desc="Posterior cumulative-effect draws are shown with interval markers and planted truth when revealed."
               values={@fit.cumulative_draws}
               bins={18}
               vlines={hist_vlines(@stats, @scenario, @revealed)}
@@ -209,14 +216,14 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
 
             <.reveal_truth
               revealed={@revealed}
-              truth={"Planted: a +#{@scenario.effect}/day step from day 91 — #{signed(@scenario.truth.cumulative)} cumulative over #{@scenario.truth.post_days} days."}
+              truth={"Planted: a +#{@scenario.effect}/day step from day 91; #{signed(@scenario.truth.cumulative)} cumulative over #{@scenario.truth.post_days} days."}
               grade={grade_line(@stats, @scenario)}
             />
           </div>
         </div>
 
         <div :if={is_nil(@fit) and not @busy} class="my-4">
-          <.verdict_card verdict="No verdict yet — the model hasn't looked." tone={:neutral}>
+          <.verdict_card verdict="No verdict yet; the model hasn't looked." tone={:neutral}>
             Press "Fit the model" above. The sampler sees only days 1–{Demo.pre_end()}; the
             planted step stays hidden from it.
           </.verdict_card>
@@ -289,7 +296,7 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
   end
 
   defp figure_caption(fit) do
-    "#{length(fit.spaghetti)} of the #{fit.num_draws} posterior counterfactual trajectories over days 91–120 — " <>
+    "#{length(fit.spaghetti)} of the #{fit.num_draws} posterior counterfactual trajectories over days 91–120; " <>
       "each thin line is one possible what-would-have-happened. The dashed line is their mean."
   end
 
@@ -311,7 +318,7 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
   end
 
   defp verdict_line(%{significant?: false} = stats) do
-    "Honestly? Can't tell — the #{stats.coverage_pct}% interval straddles zero."
+    "Honestly? Can't tell; the #{stats.coverage_pct}% interval straddles zero."
   end
 
   defp grade_line(stats, scenario) do
@@ -326,7 +333,7 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
         "The planted truth sits inside the #{stats.coverage_pct}% interval. Recovered."
 
       true ->
-        "The planted truth fell outside the #{stats.coverage_pct}% interval. Narrow intervals miss more often — that's the trade the slider is making; see the calibration page."
+        "The planted truth fell outside the #{stats.coverage_pct}% interval. Narrow intervals miss more often; that's the trade the slider is making; see the calibration page."
     end
   end
 

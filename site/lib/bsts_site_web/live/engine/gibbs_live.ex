@@ -4,7 +4,7 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
 
   The MCMC runs for real in a `start_async` (guarded by the Limiter), then
   the finished chains are replayed a few iterations per tick so visitors see
-  the trace grow and R-hat settle — exactly as the draws happened, at a pace
+  the trace grow and R-hat settle; exactly as the draws happened, at a pace
   a human can follow. The caption says so.
   """
   use BstsSiteWeb, :live_view
@@ -93,9 +93,9 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
     ~H"""
     <Layouts.app flash={@flash} track={:engine}>
       <div class="mx-auto max-w-4xl">
-        <.section_heading eyebrow="Engine · chapter 4" title="Honest about the unknown">
+        <.section_heading level={1} eyebrow="Engine · chapter 4" title="Honest about the unknown">
           The filter and smoother chapters assumed we knew how noisy the world is.
-          Real data doesn't come with its variances printed on the label — how much
+          Real data doesn't come with its variances printed on the label; how much
           the level truly drifts, and how much is just measurement noise, are exactly
           the things you don't know. This chapter runs the machinery that learns them:
           a Gibbs sampler, alternating between two easy questions because it can't
@@ -105,13 +105,15 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
 
         <.figure
           no="1"
-          caption={"#{@scenario.n} simulated observations: a level that drifts as a random walk, seen through observation noise — the sampler is told neither variance."}
+          caption={"#{@scenario.n} simulated observations: a level that drifts as a random walk, seen through observation noise; the sampler is told neither variance."}
         >
           <:legend>
             <.swatch color={:ink} label="observed" />
           </:legend>
           <.line_figure
             id="gibbs-data"
+            title="Gibbs sampler observations"
+            desc="Simulated observations from a drifting level are shown before the sampler learns the hidden variances."
             height={260}
             y_label="observed value"
             series={[%{points: @scenario.observations, color: :ink, width: 1.5}]}
@@ -123,11 +125,11 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
             The sampler can't estimate the level path and the variances at once, so it
             alternates. <strong>Draw states given variances:</strong>
             hold both variances
-            fixed and draw one plausible level path through the data — the simulation
+            fixed and draw one plausible level path through the data; the simulation
             smoother from the previous chapter, hindsight with luck thrown in.
             <strong>Draw variances given states:</strong>
             hold that path fixed, and each
-            variance becomes a textbook update — draw those too. Repeat. The draws never
+            variance becomes a textbook update; draw those too. Repeat. The draws never
             settle on one answer; they wander around it, and after enough round trips
             that wandering <em>is</em>
             the posterior distribution.
@@ -139,7 +141,7 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
             each chain: while the
             chains disagree about where they live it sits above 1, and when they become
             indistinguishable it settles to 1.0. Convention says distrust anything above
-            1.05. A healthy trace looks like a hairy caterpillar — rapid wiggle around a
+            1.05. A healthy trace looks like a hairy caterpillar; rapid wiggle around a
             stable center, no drift, no chain off on its own.
           </p>
         </div>
@@ -151,18 +153,26 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
             disabled={@running or @replaying}
             class="btn btn-primary font-data"
           >
-            {if @run || @running, do: "Run it again — same seed, same chains", else: "Watch it think"}
+            {if @run || @running, do: "Run it again; same seed, same chains", else: "Watch it think"}
           </button>
-          <span :if={@running} class="font-data text-xs text-(--color-ink-soft) animate-pulse">
-            sampling — {Gibbs.num_chains()} chains × {Gibbs.burn_in() + Gibbs.num_samples()} iterations each…
+          <span
+            :if={@running}
+            role="status"
+            aria-live="polite"
+            aria-busy="true"
+            class="font-data text-xs text-(--color-ink-soft) motion-safe:animate-pulse"
+          >
+            sampling: {Gibbs.num_chains()} chains x {Gibbs.burn_in() + Gibbs.num_samples()} iterations each…
           </span>
         </div>
 
         <.verdict_card
           :if={@busy}
           class="mt-4"
+          role="status"
+          aria-live="polite"
           tone={:warning}
-          verdict="Another visitor is sampling — try again in a moment."
+          verdict="Another visitor is sampling, try again in a moment."
         >
           This demo runs real MCMC on a small shared server, so concurrent runs are
           capped. The button will work again in a few seconds.
@@ -182,17 +192,19 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
 
           <.figure
             no="2"
-            caption={"The observation-variance draw per iteration, one line per chain — replaying the #{Gibbs.num_chains()} chains exactly as they were drawn; total compute: #{@run.elapsed_ms} ms on this server."}
+            caption={"The observation-variance draw per iteration, one line per chain; replaying the #{Gibbs.num_chains()} chains exactly as they were drawn; total compute: #{@run.elapsed_ms} ms on this server."}
             execution={@run.execution}
           >
             <:legend>
               <.swatch
                 color={:model}
-                label={"σ²_obs draws — one line per chain (#{Gibbs.num_chains()} shades)"}
+                label={"σ²_obs draws; one line per chain (#{Gibbs.num_chains()} shades)"}
               />
             </:legend>
             <.line_figure
               id="gibbs-trace"
+              title="Gibbs observation-variance trace"
+              desc="Retained observation-variance draws are plotted by iteration for each chain."
               height={280}
               y_label="sampled observation variance σ²_obs"
               x_domain={{0, @run.total - 1}}
@@ -202,8 +214,8 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
           </.figure>
 
           <div :if={!@replaying} class="report-prose text-sm text-(--color-ink-soft)">
-            The {Gibbs.burn_in()} burn-in iterations per chain — the walk in from the
-            wrong starting guesses — were discarded before you saw anything, as is
+            The {Gibbs.burn_in()} burn-in iterations per chain; the walk in from the
+            wrong starting guesses; were discarded before you saw anything, as is
             standard. What remains is the sampler's actual answer: not two numbers,
             but two piles of draws.
           </div>
@@ -220,6 +232,8 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
               </:legend>
               <.histogram
                 id="gibbs-hist-obs"
+                title="Observation-variance posterior"
+                desc="Pooled posterior draws of observation variance are shown with planted-truth markers when revealed."
                 values={List.flatten(@run.obs_var_traces)}
                 bins={24}
                 vlines={truth_vlines(@revealed, @scenario.truth.obs_var)}
@@ -237,6 +251,8 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
               </:legend>
               <.histogram
                 id="gibbs-hist-process"
+                title="Level-drift variance posterior"
+                desc="Pooled posterior draws of level-drift variance are shown with planted-truth markers when revealed."
                 values={List.flatten(@run.process_var_traces)}
                 bins={24}
                 vlines={truth_vlines(@revealed, @scenario.truth.process_var)}
@@ -286,8 +302,7 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
             eyebrow="The state-draw step"
             title="The power of hindsight"
           >
-            Each iteration begins by drawing a plausible level path through the data —
-            that's the simulation smoother from the previous chapter.
+            Each iteration begins by drawing a plausible level path through the data; that's the simulation smoother from the previous chapter.
           </.cross_link>
           <.cross_link
             navigate={~p"/trust/diagnostics"}
@@ -295,7 +310,7 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
             title="Break your own results"
           >
             R-hat and ESS caught this chain converging; the diagnostics page attacks the
-            finished fit five more ways — prediction-error, coverage, residual, placebo,
+            finished fit five more ways; prediction-error, coverage, residual, placebo,
             and stability checks.
           </.cross_link>
           <.cross_link navigate={~p"/speed"} eyebrow="What sampling costs" title="The speed ledger">
@@ -335,21 +350,21 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
       else: "border-(--color-warning) text-(--color-warning)"
   end
 
-  defp rhat_note(:nan, _shown, _total), do: "warming up — too few draws to compare chains"
+  defp rhat_note(:nan, _shown, _total), do: "warming up; too few draws to compare chains"
 
   defp rhat_note(r_hat, shown, total) do
     cond do
-      converged?(r_hat) and shown >= total -> "below 1.05 — the chains agree"
-      converged?(r_hat) -> "below 1.05 — converging"
-      true -> "above 1.05 — the chains still disagree"
+      converged?(r_hat) and shown >= total -> "below 1.05; the chains agree"
+      converged?(r_hat) -> "below 1.05; converging"
+      true -> "above 1.05; the chains still disagree"
     end
   end
 
   defp verdict_line(r_hat) do
     if converged?(r_hat) do
-      "The chains agree — and the answer is a distribution, not a number."
+      "The chains agree; and the answer is a distribution, not a number."
     else
-      "The chains haven't fully agreed — treat these intervals with suspicion."
+      "The chains haven't fully agreed; treat these intervals with suspicion."
     end
   end
 
@@ -359,12 +374,12 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
 
     case {obs_in, process_in} do
       {true, true} ->
-        "Both planted variances sit inside the sampler's 95% intervals — recovered, " <>
+        "Both planted variances sit inside the sampler's 95% intervals; recovered, " <>
           "with the level-drift variance the harder of the two."
 
       {true, false} ->
         "The observation variance was recovered; the planted level-drift variance " <>
-          "fell outside its 95% interval this run — separating drift from noise in " <>
+          "fell outside its 95% interval this run; separating drift from noise in " <>
           "#{length(hd(run.obs_var_traces))} draws per chain is genuinely hard."
 
       {false, true} ->
@@ -373,17 +388,17 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
           "long run, not every draw."
 
       {false, false} ->
-        "Neither planted variance landed inside its 95% interval this run — that " <>
+        "Neither planted variance landed inside its 95% interval this run; that " <>
           "should be rare. See the calibration page for how often it happens."
     end
   end
 
   # ── formatting ──────────────────────────────────────────────────────
 
-  defp fmt_rhat(:nan), do: "—"
+  defp fmt_rhat(:nan), do: "n/a"
   defp fmt_rhat(v) when is_number(v), do: :erlang.float_to_binary(v * 1.0, decimals: 3)
 
-  defp fmt_ess(:nan), do: "—"
+  defp fmt_ess(:nan), do: "n/a"
   defp fmt_ess(v), do: Integer.to_string(v)
 
   defp fmt1(v) when is_number(v), do: :erlang.float_to_binary(v * 1.0, decimals: 1)

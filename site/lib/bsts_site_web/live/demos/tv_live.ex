@@ -39,12 +39,13 @@ defmodule BstsSiteWeb.Demos.TvLive do
     <Layouts.app flash={@flash} track={:questions}>
       <div class="mx-auto max-w-4xl">
         <.section_heading
-          eyebrow="I have a question — attribution"
+          level={1}
+          eyebrow="I have a question; attribution"
           title="Which TV spots earned their airtime?"
         >
           Three TV spots air over the last two days of a six-day traffic series, and each
           leaves a carry-over bump that decays across the hours after it runs. We planted
-          those bumps ourselves, so the fair answer is known — the model just isn't told.
+          those bumps ourselves, so the fair answer is known; the model just isn't told.
           It forecasts what traffic would have done with no TV at all, measures the gap,
           and splits credit between the spots. Drag two windows into each other and watch
           the split stay fair where the spots share hours.
@@ -72,7 +73,7 @@ defmodule BstsSiteWeb.Demos.TvLive do
 
         <.figure
           no="1"
-          caption={"The three #{Tv.window_hours()}-hour spot windows inside the #{Tv.post_hours()}-hour post period — 0-based and half-open, so [18, 26) covers hours 18 through 25, and windows are free to overlap."}
+          caption={"The three #{Tv.window_hours()}-hour spot windows inside the #{Tv.post_hours()}-hour post period; 0-based and half-open, so [18, 26) covers hours 18 through 25, and windows are free to overlap."}
           execution={@demo.execution}
         >
           <:legend>
@@ -80,6 +81,8 @@ defmodule BstsSiteWeb.Demos.TvLive do
           </:legend>
           <.gantt
             id="tv-windows"
+            title="TV spot windows"
+            desc="Each horizontal bar shows a half-open TV spot attribution window inside the post-period; overlapping bars share credit."
             domain={{0, Tv.post_hours()}}
             height={130}
             rows={
@@ -96,7 +99,7 @@ defmodule BstsSiteWeb.Demos.TvLive do
 
         <.figure
           no="2"
-          caption="Hourly traffic against the counterfactual forecast from pre-period data alone — the model never sees post-period outcomes when projecting. Shaded magenta is the measured gap; dashed vertical lines mark where each spot's window opens."
+          caption="Hourly traffic against the counterfactual forecast from pre-period data alone; the model never sees post-period outcomes when projecting. Shaded magenta is the measured gap; dashed vertical lines mark where each spot's window opens."
           execution={@demo.execution}
         >
           <:legend>
@@ -107,6 +110,8 @@ defmodule BstsSiteWeb.Demos.TvLive do
           </:legend>
           <.line_figure
             id="tv-traffic"
+            title="TV traffic counterfactual"
+            desc="Hourly traffic is compared with a counterfactual forecast; shaded lift and spot-window markers show where TV could have contributed."
             height={320}
             y_label="visits/hour"
             series={
@@ -151,7 +156,7 @@ defmodule BstsSiteWeb.Demos.TvLive do
 
         <.figure
           no="3"
-          caption={"Per-spot attributed lift with 95% intervals. The three attributions sum to #{signed1(@demo.attributed_sum)} visits — reconciling exactly with the #{signed1(@demo.union_lift)} visits of lift measured across the union of the windows, no hour counted twice."}
+          caption={"Per-spot attributed lift with 95% intervals. The three attributions sum to #{signed1(@demo.attributed_sum)} visits; reconciling exactly with the #{signed1(@demo.union_lift)} visits of lift measured across the union of the windows, no hour counted twice."}
           execution={@demo.execution}
         >
           <:legend>
@@ -160,6 +165,8 @@ defmodule BstsSiteWeb.Demos.TvLive do
           </:legend>
           <.bar_figure
             id="tv-attribution"
+            title="Per-spot attributed lift"
+            desc="Each TV spot's attributed lift is shown with uncertainty, and planted contributions appear when the answer key is revealed."
             height={if @revealed, do: 300, else: 200}
             items={
               Enum.flat_map(@demo.spots, fn spot ->
@@ -228,7 +235,7 @@ defmodule BstsSiteWeb.Demos.TvLive do
             title="Where the no-TV world comes from"
           >
             The counterfactual here is a projection of what traffic would have done with
-            no spots at all — this chapter shows how it's built.
+            no spots at all; this chapter shows how it's built.
           </.cross_link>
           <.cross_link
             navigate={~p"/speed"}
@@ -253,10 +260,10 @@ defmodule BstsSiteWeb.Demos.TvLive do
         "All three spots earned their airtime."
 
       {[], _} ->
-        "Honestly? Can't call a single spot — every interval straddles zero."
+        "Honestly? Can't call a single spot; every interval straddles zero."
 
       _ ->
-        "#{join_names(names(earned))} earned it — #{join_names(names(missed))} #{verb(missed)} inside the noise."
+        "#{join_names(names(earned))} earned it; #{join_names(names(missed))} #{verb(missed)} inside the noise."
     end
   end
 
@@ -266,7 +273,7 @@ defmodule BstsSiteWeb.Demos.TvLive do
       |> Enum.map(fn spot -> "#{spot.id} #{signed1(spot.truth)}" end)
       |> Enum.join(", ")
 
-    "Planted: #{planted} visits — each an 8-hour decaying pulse starting with its window."
+    "Planted: #{planted} visits; each an 8-hour decaying pulse starting with its window."
   end
 
   defp grade_line(spots) do
@@ -284,7 +291,7 @@ defmodule BstsSiteWeb.Demos.TvLive do
   end
 
   defp overlap_note([]) do
-    "No windows overlap right now — each spot keeps its own hours and takes full credit " <>
+    "No windows overlap right now; each spot keeps its own hours and takes full credit " <>
       "for them. Drag two starts within 8 hours of each other to force a collision."
   end
 
@@ -292,7 +299,7 @@ defmodule BstsSiteWeb.Demos.TvLive do
     listed = groups |> Enum.map(&join_names/1) |> Enum.join("; ")
 
     "#{listed} share hours right now. Inside shared hours the model sees one combined " <>
-      "bump, so the group's lift is split by exact Shapley values — each spot's average " <>
+      "bump, so the group's lift is split by exact Shapley values; each spot's average " <>
       "marginal contribution over every order it could have arrived in. The split is " <>
       "exact for the means; per-spot intervals inside shared hours are approximate."
   end

@@ -2,7 +2,7 @@ defmodule BstsSiteWeb.Engine.ComposeLive do
   @moduledoc """
   Engine chapter: models as Lego bricks. Toggle components on and off and
   watch `Components.compose_specs/2` assemble the block-diagonal transition
-  matrix live. No sampling runs on this page — composition is instant.
+  matrix live. No sampling runs on this page; composition is instant.
   """
   use BstsSiteWeb, :live_view
 
@@ -39,9 +39,9 @@ defmodule BstsSiteWeb.Engine.ComposeLive do
     <Layouts.app flash={@flash} track={:engine}>
       <div class="mx-auto max-w-4xl">
         <.mantra active={:decompose} class="mb-4" />
-        <.section_heading eyebrow="Engine · chapter 5" title="Snap a model together">
+        <.section_heading level={1} eyebrow="Engine · chapter 5" title="Snap a model together">
           Real series are rarely just a level: they trend, they cycle weekly, they lean on
-          control series. BstsNx builds all of that from small bricks — each component is a
+          control series. BstsNx builds all of that from small bricks; each component is a
           tiny state-space model, and <code>compose_specs/2</code> snaps them together by
           placing their transition matrices on a block diagonal. Toggle the bricks below and
           watch the composed matrix take shape. Nothing is sampled on this page; composition
@@ -101,7 +101,13 @@ defmodule BstsSiteWeb.Engine.ComposeLive do
             <.swatch color={:model} label="nonzero entry" />
             <.swatch color={:lift} label="component block" />
           </:legend>
-          <.matrix_grid id="compose-f" matrix={@demo.f_matrix} blocks={@demo.blocks} />
+          <.matrix_grid
+            id="compose-f"
+            title="Composed transition matrix"
+            desc="Nonzero transition-matrix entries are shown with component blocks outlined."
+            matrix={@demo.f_matrix}
+            blocks={@demo.blocks}
+          />
         </.figure>
 
         <div class="grid gap-4 sm:grid-cols-[1fr_minmax(240px,0.9fr)]">
@@ -109,7 +115,7 @@ defmodule BstsSiteWeb.Engine.ComposeLive do
             The sampler would learn {@demo.q_count + 1} variances for this spec: {Enum.join(
               @demo.variance_labels,
               ", "
-            )} — plus one observation noise
+            )}; plus one observation noise
             variance shared by the whole model. Everything else in the matrix is fixed
             structure. <:stat label="State dimension" value={"#{@demo.state_dim}"} />
             <:stat label="Process variances" value={"#{@demo.q_count}"} hint="one per q_spec" />
@@ -157,7 +163,7 @@ defmodule BstsSiteWeb.Engine.ComposeLive do
           <p class="report-prose mt-4 text-sm text-(--color-ink-soft)">
             One honest caveat before wiring this spec into MCMC: the structured Gibbs sampler
             resamples every one of those {@demo.q_count + 1} variances each iteration, and on
-            CPU that is minutes-per-fit territory for seasonal specs — which is why this page
+            CPU that is minutes-per-fit territory for seasonal specs; which is why this page
             composes but does not sample. The speed page maps which paths are milliseconds
             and which are minutes.
           </p>
@@ -169,7 +175,7 @@ defmodule BstsSiteWeb.Engine.ComposeLive do
             eyebrow="Engine · chapter 4"
             title="Feed it to the sampler"
           >
-            The Gibbs chapter shows what "learning the variances" actually looks like — a
+            The Gibbs chapter shows what "learning the variances" actually looks like; a
             chain you can watch converge.
           </.cross_link>
           <.cross_link
@@ -194,8 +200,8 @@ defmodule BstsSiteWeb.Engine.ComposeLive do
     """
   end
 
-  attr :label, :string, required: true
-  slot :inner_block, required: true
+  attr(:label, :string, required: true)
+  slot(:inner_block, required: true)
 
   defp chip_group(assigns) do
     ~H"""
@@ -210,11 +216,11 @@ defmodule BstsSiteWeb.Engine.ComposeLive do
     """
   end
 
-  attr :group, :string, required: true
-  attr :choice, :string, required: true
-  attr :active, :boolean, required: true
-  attr :label, :string, required: true
-  attr :hint, :string, default: nil
+  attr(:group, :string, required: true)
+  attr(:choice, :string, required: true)
+  attr(:active, :boolean, required: true)
+  attr(:label, :string, required: true)
+  attr(:hint, :string, default: nil)
 
   defp chip(assigns) do
     ~H"""
@@ -225,7 +231,7 @@ defmodule BstsSiteWeb.Engine.ComposeLive do
       phx-value-choice={@choice}
       aria-pressed={to_string(@active)}
       class={[
-        "rounded-full border px-3 py-1 font-data text-xs transition-colors",
+        "touch-target rounded-full border px-3 py-1 font-data text-xs transition-colors",
         @active && "border-(--color-ink) bg-(--color-ink) text-(--color-paper)",
         !@active &&
           "border-(--color-grid) bg-(--color-paper-raised) text-(--color-ink-soft) hover:border-(--color-ink)"
@@ -247,7 +253,7 @@ defmodule BstsSiteWeb.Engine.ComposeLive do
   defp verdict_line(demo) do
     case length(demo.blocks) do
       1 ->
-        "One brick, #{demo.state_dim} latent state#{plural(demo.state_dim)} — the simplest honest model."
+        "One brick, #{demo.state_dim} latent state#{plural(demo.state_dim)}; the simplest honest model."
 
       parts ->
         "#{parts} bricks snap into one spec with #{demo.state_dim} latent states."

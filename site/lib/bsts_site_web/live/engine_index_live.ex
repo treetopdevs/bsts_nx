@@ -1,7 +1,7 @@
 defmodule BstsSiteWeb.EngineIndexLive do
   @moduledoc """
-  The Engine track index: six chapters, one method — decompose, project,
-  compare — each chapter a live instrument, not a diagram.
+  The Engine track index: six chapters, one method; decompose, project,
+  compare; each chapter a live instrument, not a diagram.
   """
   use BstsSiteWeb, :live_view
 
@@ -15,13 +15,13 @@ defmodule BstsSiteWeb.EngineIndexLive do
     ~H"""
     <Layouts.app flash={@flash} track={:engine}>
       <div class="mx-auto max-w-4xl">
-        <.section_heading eyebrow="Track two · The engine" title="Open the engine">
+        <.section_heading level={1} eyebrow="Track two · The engine" title="Open the engine">
           One method underneath everything on this site: <strong>decompose</strong>
           the
           series into structure and noise, <strong>project</strong>
           the structure forward, <strong>compare</strong>
           the projection with what actually happened. Six chapters
-          teach it one moving part at a time — every figure is computed live, and most of
+          teach it one moving part at a time; every figure is computed live, and most of
           them let you turn the knobs yourself.
         </.section_heading>
 
@@ -36,7 +36,7 @@ defmodule BstsSiteWeb.EngineIndexLive do
             title="Why raw data lies"
           >
             Random walks with and without a planted shift. Guess by eye, then watch the
-            filter find what you couldn't — the case for decomposing at all.
+            filter find what you couldn't; the case for decomposing at all.
           </.cross_link>
           <.cross_link
             navigate={~p"/engine/kalman"}
@@ -51,7 +51,7 @@ defmodule BstsSiteWeb.EngineIndexLive do
             eyebrow="Chapter 3 · decompose"
             title="The power of hindsight"
           >
-            The RTS smoother re-reads the past with the whole series in hand — the backward
+            The RTS smoother re-reads the past with the whole series in hand; the backward
             pass that quietly sharpens every estimate the filter made.
           </.cross_link>
           <.cross_link
@@ -60,7 +60,7 @@ defmodule BstsSiteWeb.EngineIndexLive do
             title="Honest about the unknown"
           >
             Real data doesn't print its variances on the label. Watch MCMC chains learn
-            them — and get graded against each other with R-hat.
+            them; and get graded against each other with R-hat.
           </.cross_link>
           <.cross_link
             navigate={~p"/engine/compose"}
@@ -68,7 +68,7 @@ defmodule BstsSiteWeb.EngineIndexLive do
             title="Models as Lego bricks"
           >
             Snap level, trend, seasonality and regression specs into one block-diagonal
-            model. Pure matrix assembly — you can see the blocks.
+            model. Pure matrix assembly; you can see the blocks.
           </.cross_link>
           <.cross_link
             navigate={~p"/engine/counterfactual"}
@@ -82,7 +82,7 @@ defmodule BstsSiteWeb.EngineIndexLive do
 
         <div class="mt-14 text-center">
           <p class="font-data text-xs uppercase tracking-widest text-(--color-ink-faint)">
-            Non-linear by design — start anywhere
+            Non-linear by design; start anywhere
           </p>
           <div class="mt-4 grid gap-4 md:grid-cols-2">
             <.cross_link

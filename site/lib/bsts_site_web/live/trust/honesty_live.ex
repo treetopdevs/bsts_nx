@@ -1,6 +1,6 @@
 defmodule BstsSiteWeb.Trust.HonestyLive do
   @moduledoc """
-  Trust: what this is and isn't. The page with no demo — just the facts about
+  Trust: what this is and isn't. The page with no demo; just the facts about
   the library's maturity, lineage, license, conventions, and gaps.
   """
   use BstsSiteWeb, :live_view
@@ -15,9 +15,9 @@ defmodule BstsSiteWeb.Trust.HonestyLive do
     ~H"""
     <Layouts.app flash={@flash} track={:trust}>
       <div class="mx-auto max-w-3xl">
-        <.section_heading eyebrow="Trust · the fine print" title="What this is and isn't">
+        <.section_heading level={1} eyebrow="Trust · the fine print" title="What this is and isn't">
           Every other page on this site tries to convince you with live computation.
-          This one just states facts. If you are deciding whether to build on <code>BstsNx</code>, read this page last — it is the honest edge of everything
+          This one just states facts. If you are deciding whether to build on <code>BstsNx</code>, read this page last; it is the honest edge of everything
           you saw before it.
         </.section_heading>
 
@@ -25,20 +25,20 @@ defmodule BstsSiteWeb.Trust.HonestyLive do
         <div class="report-prose mt-2 text-(--color-ink-soft)">
           <p>
             BstsNx is an early-stage library, version 0.1.0. It reimplements the ideas of
-            Bayesian structural time series and counterfactual causal impact — the
-            approach of Brodersen et al. — in pure Elixir on Nx. The R packages <code>bsts</code>
+            Bayesian structural time series and counterfactual causal impact; the
+            approach of Brodersen et al.; in pure Elixir on Nx. The R packages <code>bsts</code>
             and <code>CausalImpact</code>
             are used as reference
             implementations: the library's test suite includes an optional, offline
             R-parity lane that runs the same analyses through CRAN's stack via
             <code>BstsNx.RSidecar</code>
             and compares results. That sidecar is validation
-            tooling — it requires a local R installation, is opt-in, and is not part of
+            tooling; it requires a local R installation, is opt-in, and is not part of
             anything running on this site. No claim is made of parity with or superiority
             to the R stack; R is the yardstick, not the competition.
           </p>
           <p>
-            The license is LGPL-2.1-only. The library is not yet published on Hex — you
+            The license is LGPL-2.1-only. The library is not yet published on Hex; you
             install it as a git dependency; the
             <.link
               navigate={~p"/start"}
@@ -54,7 +54,7 @@ defmodule BstsSiteWeb.Trust.HonestyLive do
             Index semantics cause the quietest bugs, so the library's top-level moduledoc
             states them explicitly. Quoting it verbatim:
           </p>
-          <blockquote class="border-l-2 border-(--color-grid) pl-4">
+          <blockquote class="rounded-sm border border-(--color-grid) bg-(--color-paper-raised) px-4 py-3">
             <p>Be explicit with index semantics:</p>
             <ul>
               <li>
@@ -88,11 +88,11 @@ defmodule BstsSiteWeb.Trust.HonestyLive do
             <li>
               The structured Gibbs samplers currently learn a diagonal <code>Q</code> and
               a scalar observation variance <code>R</code>, and structured MCMC targets
-              scalar observations per time step — full multivariate-observation support
+              scalar observations per time step; full multivariate-observation support
               is roadmap, not release.
             </li>
             <li>
-              Structured MCMC on CPU is slow — minutes per run for composed seasonal
+              Structured MCMC on CPU is slow; minutes per run for composed seasonal
               models. That is why this site never runs it live: pages that sample use the
               scalar path, and pages that need structure use the filter lane. No figure
               here fakes a structured posterior.
@@ -118,7 +118,7 @@ defmodule BstsSiteWeb.Trust.HonestyLive do
             is different, and its
             own docstring says so plainly:
           </p>
-          <blockquote class="border-l-2 border-(--color-grid) pl-4">
+          <blockquote class="rounded-sm border border-(--color-grid) bg-(--color-paper-raised) px-4 py-3">
             "RTS smoothing uses all non-masked observations, including those after the
             intervention period. The baseline is therefore an interpolation rather than a
             pure counterfactual forecast. This is acceptable when post-intervention
@@ -136,19 +136,19 @@ defmodule BstsSiteWeb.Trust.HonestyLive do
 
         <.under_the_hood
           code={two_lanes_code()}
-          title="The two fast paths — one never peeks, one does"
+          title="The two fast paths; one never peeks, one does"
         />
 
         <h3 class="font-display mt-8 text-xl font-bold">About the figures on this site</h3>
         <div class="report-prose mt-2 text-(--color-ink-soft)">
           <p>
             Every figure is computed server-side by the library at the moment you load or
-            interact with the page — there are no screenshots, no cached results, no
+            interact with the page; there are no screenshots, no cached results, no
             JavaScript chart library. The small badge under each figure
             ("<span class="font-data">method · elapsed · computed live on this server</span>")
             is not site copy: it renders the <code>execution</code>
             metadata map that the
-            library itself returns — <code>method_used</code>
+            library itself returns; <code>method_used</code>
             and <code>elapsed_ms</code>
             as reported by <code>BstsNx.Execution</code>. Where a page runs MCMC, the
             elapsed time is the measured wall time of the sampling you just triggered.
@@ -189,7 +189,7 @@ defmodule BstsSiteWeb.Trust.HonestyLive do
     #=> :scalar_forecast_filter
 
     # Mask-and-smooth: masks the window, then RTS-smooths across it using
-    # data from BOTH sides. Fast, useful — and an interpolation, not a
+    # data from BOTH sides. Fast, useful; and an interpolation, not a
     # counterfactual forecast. The docstring says so; so do we.
     BstsNx.CausalImpact.estimate_from_filter(
       observations,
