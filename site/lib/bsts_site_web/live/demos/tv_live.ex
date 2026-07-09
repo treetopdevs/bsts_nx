@@ -5,13 +5,17 @@ defmodule BstsSiteWeb.Demos.TvLive do
   """
   use BstsSiteWeb, :live_view
 
+  alias BstsSite.Demos.DefaultCache
   alias BstsSite.Demos.Tv
 
   @impl true
   def mount(_params, _session, socket) do
-    prepared = Tv.prepare()
-    d = Tv.defaults()
-    demo = Tv.run(prepared, d.start_a, d.start_b, d.start_c, d.strength)
+    %{prepared: prepared, demo: demo} =
+      DefaultCache.get(:tv, fn ->
+        prepared = Tv.prepare()
+        d = Tv.defaults()
+        %{prepared: prepared, demo: Tv.run(prepared, d.start_a, d.start_b, d.start_c, d.strength)}
+      end)
 
     {:ok,
      socket

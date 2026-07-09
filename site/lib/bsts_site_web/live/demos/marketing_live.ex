@@ -7,14 +7,18 @@ defmodule BstsSiteWeb.Demos.MarketingLive do
   """
   use BstsSiteWeb, :live_view
 
+  alias BstsSite.Demos.DefaultCache
   alias BstsSite.Demos.Limiter
   alias BstsSite.Demos.Marketing
 
   @impl true
   def mount(_params, _session, socket) do
-    defaults = Marketing.defaults()
-    scenario = Marketing.scenario(defaults.lift, defaults.noise_sd)
-    fast = Marketing.fast_lane(scenario)
+    %{scenario: scenario, fast: fast} =
+      DefaultCache.get(:marketing, fn ->
+        defaults = Marketing.defaults()
+        scenario = Marketing.scenario(defaults.lift, defaults.noise_sd)
+        %{scenario: scenario, fast: Marketing.fast_lane(scenario)}
+      end)
 
     {:ok,
      socket

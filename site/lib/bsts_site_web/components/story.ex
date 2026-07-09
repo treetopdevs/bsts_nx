@@ -324,6 +324,7 @@ defmodule BstsSiteWeb.Story do
         max={@max}
         step={@step}
         value={@value}
+        phx-debounce="150"
         class="range range-xs range-primary mt-1 w-full"
       />
     </label>

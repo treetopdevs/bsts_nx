@@ -6,11 +6,12 @@ defmodule BstsSiteWeb.Engine.SmootherLive do
   """
   use BstsSiteWeb, :live_view
 
+  alias BstsSite.Demos.DefaultCache
   alias BstsSite.Demos.Hindsight
 
   @impl true
   def mount(_params, _session, socket) do
-    prepared = Hindsight.prepare()
+    prepared = DefaultCache.get(:smoother, fn -> Hindsight.prepare() end)
 
     {:ok,
      socket

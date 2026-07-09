@@ -5,11 +5,12 @@ defmodule BstsSiteWeb.SpeedLive do
   """
   use BstsSiteWeb, :live_view
 
+  alias BstsSite.Demos.DefaultCache
   alias BstsSite.Demos.Speed
 
   @impl true
   def mount(_params, _session, socket) do
-    demo = Speed.prepare()
+    demo = DefaultCache.get(:speed, fn -> Speed.prepare() end)
 
     {:ok,
      socket

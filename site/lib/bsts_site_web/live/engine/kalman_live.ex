@@ -5,11 +5,15 @@ defmodule BstsSiteWeb.Engine.KalmanLive do
   """
   use BstsSiteWeb, :live_view
 
+  alias BstsSite.Demos.DefaultCache
   alias BstsSite.Demos.KalmanTuner
 
   @impl true
   def mount(_params, _session, socket) do
-    demo = KalmanTuner.run(KalmanTuner.default_q_idx(), KalmanTuner.default_r_idx())
+    demo =
+      DefaultCache.get(:kalman, fn ->
+        KalmanTuner.run(KalmanTuner.default_q_idx(), KalmanTuner.default_r_idx())
+      end)
 
     {:ok,
      socket

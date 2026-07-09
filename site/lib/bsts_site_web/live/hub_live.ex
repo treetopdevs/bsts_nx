@@ -5,12 +5,16 @@ defmodule BstsSiteWeb.HubLive do
   """
   use BstsSiteWeb, :live_view
 
+  alias BstsSite.Demos.DefaultCache
   alias BstsSite.Demos.Hero
 
   @impl true
   def mount(_params, _session, socket) do
-    prepared = Hero.prepare()
-    demo = Hero.run(prepared, 12, 4)
+    %{prepared: prepared, demo: demo} =
+      DefaultCache.get(:hub, fn ->
+        prepared = Hero.prepare()
+        %{prepared: prepared, demo: Hero.run(prepared, 12, 4)}
+      end)
 
     {:ok,
      socket

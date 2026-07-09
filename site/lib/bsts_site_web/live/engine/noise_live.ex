@@ -6,14 +6,17 @@ defmodule BstsSiteWeb.Engine.NoiseLive do
   """
   use BstsSiteWeb, :live_view
 
+  alias BstsSite.Demos.DefaultCache
   alias BstsSite.Demos.NoiseQuiz
 
   @impl true
   def mount(_params, _session, socket) do
+    batch = DefaultCache.get({:noise_batch, 0}, fn -> NoiseQuiz.batch(0) end)
+
     {:ok,
      socket
      |> assign(page_title: "Why raw data lies")
-     |> assign(batch: NoiseQuiz.batch(0), counter: 0, guess: nil, revealed: false)}
+     |> assign(batch: batch, counter: 0, guess: nil, revealed: false)}
   end
 
   @impl true

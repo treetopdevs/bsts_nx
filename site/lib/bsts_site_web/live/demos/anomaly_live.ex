@@ -8,17 +8,22 @@ defmodule BstsSiteWeb.Demos.AnomalyLive do
   use BstsSiteWeb, :live_view
 
   alias BstsSite.Demos.Anomaly
+  alias BstsSite.Demos.DefaultCache
 
   @impl true
   def mount(_params, _session, socket) do
-    anomalies = Anomaly.default_anomalies()
-    alpha = Anomaly.default_alpha()
+    %{anomalies: anomalies, alpha: alpha, demo: demo} =
+      DefaultCache.get(:anomaly, fn ->
+        anomalies = Anomaly.default_anomalies()
+        alpha = Anomaly.default_alpha()
+        %{anomalies: anomalies, alpha: alpha, demo: Anomaly.run(anomalies, alpha)}
+      end)
 
     {:ok,
      socket
      |> assign(page_title: "Is this spike an anomaly?")
      |> assign(anomalies: anomalies, alpha: alpha, hour: 15, magnitude: 20, revealed: false)
-     |> assign(demo: Anomaly.run(anomalies, alpha))}
+     |> assign(demo: demo)}
   end
 
   @impl true

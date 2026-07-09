@@ -49,8 +49,9 @@ defmodule BstsSite.Demos.Scenarios do
     noise = noise(total, noise_sd, seed)
 
     {observations, truth_effect} =
-      0..(total - 1)
-      |> Enum.map(fn t ->
+      noise
+      |> Enum.with_index()
+      |> Enum.map(fn {noise_t, t} ->
         baseline = 84.0
 
         effect =
@@ -60,7 +61,7 @@ defmodule BstsSite.Demos.Scenarios do
             0.0
           end
 
-        {baseline + effect + Enum.at(noise, t), effect}
+        {baseline + effect + noise_t, effect}
       end)
       |> Enum.unzip()
 
