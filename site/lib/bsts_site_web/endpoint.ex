@@ -8,7 +8,8 @@ defmodule BstsSiteWeb.Endpoint do
     store: :cookie,
     key: "_bsts_site_key",
     signing_salt: "ITO8FmJV",
-    same_site: "Lax"
+    same_site: "Lax",
+    secure: Application.compile_env(:bsts_site, :secure_session_cookie, false)
   ]
 
   socket "/live", Phoenix.LiveView.Socket,

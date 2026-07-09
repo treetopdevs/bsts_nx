@@ -7,7 +7,19 @@ defmodule BstsSiteWeb.Router do
     plug :fetch_live_flash
     plug :put_root_layout, html: {BstsSiteWeb.Layouts, :root}
     plug :protect_from_forgery
-    plug :put_secure_browser_headers
+
+    plug :put_secure_browser_headers, %{
+      "content-security-policy" =>
+        "default-src 'self'; " <>
+          "script-src 'self'; " <>
+          "style-src 'self' 'unsafe-inline'; " <>
+          "img-src 'self' data:; " <>
+          "font-src 'self'; " <>
+          "connect-src 'self' ws: wss:; " <>
+          "object-src 'none'; " <>
+          "frame-ancestors 'none'; " <>
+          "base-uri 'self'"
+    }
   end
 
   pipeline :api do

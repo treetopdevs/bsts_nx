@@ -7,16 +7,23 @@ import Config
 # before starting your production server.
 config :bsts_site, BstsSiteWeb.Endpoint, cache_static_manifest: "priv/static/cache_manifest.json"
 
+# Session cookie gets the `Secure` attribute in production only (dev keeps
+# plain http://localhost working for session/CSRF).
+config :bsts_site, secure_session_cookie: true
+
 # Force using SSL in production. This also sets the "strict-security-transport" header,
-# known as HSTS. If you have a health check endpoint, you may want to exclude it below.
+# known as HSTS. `rewrite_on: [:x_forwarded_proto]` trusts the Fly edge's
+# x-forwarded-proto header, so requests that arrived via the edge (which
+# terminates TLS and sets that header) count as HTTPS already and are not
+# redirected. No host/path exclude is needed for that path. Fly's HTTP health
+# check hits the app directly on the internal port; if that turns out to
+# require an exclude, add a dedicated `/healthz` route and exclude it by path
+# (do not exclude by host — that's a Host-header-spoofable bypass).
 # Note `:force_ssl` is required to be set at compile-time.
 config :bsts_site, BstsSiteWeb.Endpoint,
   force_ssl: [
     rewrite_on: [:x_forwarded_proto],
-    exclude: [
-      # paths: ["/health"],
-      hosts: ["localhost", "127.0.0.1"]
-    ]
+    exclude: []
   ]
 
 # Do not print debug messages in production
