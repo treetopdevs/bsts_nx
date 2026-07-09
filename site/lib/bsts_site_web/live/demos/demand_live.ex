@@ -76,8 +76,10 @@ defmodule BstsSiteWeb.Demos.DemandLive do
      )}
   end
 
-  def handle_async(:fit, {:exit, _reason}, socket) do
-    {:noreply, assign(socket, running: false, busy: true)}
+  def handle_async(:fit, {:exit, reason}, socket) do
+    require Logger
+    Logger.error("DemandLive async :fit crashed: #{inspect(reason)}")
+    {:noreply, assign(socket, running: false, forecast: nil, decision: nil, coverage: nil)}
   end
 
   @impl true

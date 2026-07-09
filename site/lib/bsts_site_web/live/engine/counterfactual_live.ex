@@ -91,8 +91,10 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
     end
   end
 
-  def handle_async(:fit, {:exit, _reason}, socket) do
-    {:noreply, assign(socket, running: false, busy: true)}
+  def handle_async(:fit, {:exit, reason}, socket) do
+    require Logger
+    Logger.error("CounterfactualLive async :fit crashed: #{inspect(reason)}")
+    {:noreply, assign(socket, running: false, fit: nil, stats: nil)}
   end
 
   @impl true
@@ -114,7 +116,7 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
           the spaghetti is the uncertainty; no band is drawn because none is needed.
         </.section_heading>
 
-        <form phx-change="adjust" class="mt-5 grid gap-x-10 gap-y-3 sm:grid-cols-2">
+        <form id="counterfactual-adjust-form" phx-change="adjust" class="mt-5 grid gap-x-10 gap-y-3 sm:grid-cols-2">
           <.param_slider
             name="effect"
             label="Planted step at day 91"
@@ -126,6 +128,7 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
           <div class="flex items-end">
             <button
               type="button"
+              id="counterfactual-run"
               phx-click="run"
               disabled={@running}
               class="btn btn-sm btn-outline font-data text-xs"

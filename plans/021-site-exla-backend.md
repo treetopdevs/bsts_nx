@@ -201,12 +201,13 @@ First-visitor latency must not pay JIT compilation. In
 of `start/2`, before returning), fire a non-blocking warmup:
 
 ```elixir
-if Application.get_env(:nx, :default_defn_options)[:compiler] do
+defn_opts = Application.get_env(:nx, :default_defn_options)
+if defn_opts && defn_opts[:compiler] do
   Task.start(fn -> BstsSite.Demos.Warmup.run() end)
 end
 ```
 
-Create the tiny warmup (in the same file or `site/lib/bsts_site/demos/warmup.ex`):
+Create the tiny warmup helper as a private function in `site/lib/bsts_site/application.ex` (keep it private — warmup is an app-internal concern, not a public demo API):
 if plan 019 has landed, call the `DefaultCache`-wrapped mount computations for
 the hub and speed pages (they populate the cache AND compile the kernels); if
 019 has NOT landed, call the underlying demo functions directly and discard

@@ -51,7 +51,7 @@ defmodule BstsSiteWeb.Demos.TvLive do
           the split stay fair where the spots share hours.
         </.section_heading>
 
-        <form phx-change="adjust" class="mt-5 grid gap-x-10 gap-y-3 sm:grid-cols-2">
+        <form id="tv-adjust-form" phx-change="adjust" class="mt-5 grid gap-x-10 gap-y-3 sm:grid-cols-2">
           <.param_slider
             :for={{spot, name} <- Enum.zip(@demo.spots, ~w(start_a start_b start_c))}
             name={name}

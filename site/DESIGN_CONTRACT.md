@@ -191,9 +191,9 @@ Accuracy guardrails (site-wide law):
   READ-ONLY). If a component is missing an ability, work within what exists:
   compose SVG-bearing components you already have; do not invent new shared ones.
 - Replace your assigned stub LiveViews entirely (keep module names/routes).
-- Verify: `cd /Users/nicholas/develop/bsts_nx/site && mix compile --warnings-as-errors`
-  must pass, then `mix format <your files>` only on your files. Do NOT start
-  the phx server (ports collide with other agents); to sanity-check runtime
-  behavior of your demo module, use `mix run -e '...'` one-liners.
+- Verify: from the repo root, run `cd site && mix compile --warnings-as-errors`
+  to confirm compilation, then `mix format <your files>` only on your files.
+  Do NOT start the phx server (ports collide with other agents); to sanity-check
+  runtime behavior of your demo module, use `mix run -e '...'` one-liners.
 - Compile lock is shared across agents. If mix appears to hang briefly, it's
   waiting on the lock; let it finish.

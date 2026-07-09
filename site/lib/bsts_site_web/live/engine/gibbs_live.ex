@@ -67,8 +67,10 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
     {:noreply, assign(socket, running: false, run: run, replaying: true, shown: 0)}
   end
 
-  def handle_async(:sample, {:exit, _reason}, socket) do
-    {:noreply, assign(socket, running: false, busy: true)}
+  def handle_async(:sample, {:exit, reason}, socket) do
+    require Logger
+    Logger.error("GibbsLive async :sample crashed: #{inspect(reason)}")
+    {:noreply, assign(socket, running: false, run: nil)}
   end
 
   @impl true
@@ -149,6 +151,7 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
         <div class="mt-6 flex flex-wrap items-center gap-4">
           <button
             type="button"
+            id="gibbs-run"
             phx-click="run"
             disabled={@running or @replaying}
             class="btn btn-primary font-data"
@@ -401,6 +404,6 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
   defp fmt_ess(:nan), do: "n/a"
   defp fmt_ess(v), do: Integer.to_string(v)
 
-  defp fmt1(v) when is_number(v), do: :erlang.float_to_binary(v * 1.0, decimals: 1)
-  defp fmt2(v) when is_number(v), do: :erlang.float_to_binary(v * 1.0, decimals: 2)
+  defp fmt1(v), do: BstsSiteWeb.CoreComponents.fmt1(v)
+  defp fmt2(v), do: BstsSiteWeb.CoreComponents.fmt2(v)
 end

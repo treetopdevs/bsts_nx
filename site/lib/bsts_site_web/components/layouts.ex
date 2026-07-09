@@ -71,9 +71,10 @@ defmodule BstsSiteWeb.Layouts do
           <.link navigate={~p"/start"} class="block hover:text-(--color-ink)">
             Install &amp; quick start
           </.link>
+          <% github_link = github_url() %>
           <a
-            :if={github_url()}
-            href={github_url()}
+            :if={github_link}
+            href={github_link}
             class="block hover:text-(--color-ink)"
           >
             Source on GitHub

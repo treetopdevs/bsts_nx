@@ -503,4 +503,34 @@ defmodule BstsSiteWeb.CoreComponents do
   def translate_errors(errors, field) when is_list(errors) do
     for {^field, {msg, opts}} <- errors, do: translate_error({msg, opts})
   end
+
+  @doc """
+  Formats a numeric value to 1 decimal place.
+
+  Used for displaying numeric data in the UI with consistent precision.
+
+  ## Examples
+
+      iex> BstsSiteWeb.CoreComponents.fmt1(3.456)
+      "3.5"
+
+      iex> BstsSiteWeb.CoreComponents.fmt1(10)
+      "10.0"
+  """
+  def fmt1(v) when is_number(v), do: :erlang.float_to_binary(v * 1.0, decimals: 1)
+
+  @doc """
+  Formats a numeric value to 2 decimal places.
+
+  Used for displaying numeric data in the UI with consistent precision.
+
+  ## Examples
+
+      iex> BstsSiteWeb.CoreComponents.fmt2(3.456)
+      "3.46"
+
+      iex> BstsSiteWeb.CoreComponents.fmt2(10)
+      "10.00"
+  """
+  def fmt2(v) when is_number(v), do: :erlang.float_to_binary(v * 1.0, decimals: 2)
 end

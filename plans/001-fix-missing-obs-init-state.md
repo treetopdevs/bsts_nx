@@ -26,18 +26,12 @@ Commit `5035d69` ("fix: preserve observation inputs across wrappers") introduced
 `BstsNx.ModelBuilder.first_obs/1`, which returns the first **finite** observation
 (skipping leading `nil` / `:nan` / `NaN`), and swept the old
 `List.first(obs) || 0.0` idiom out of `forecaster.ex`, `anomaly_detector.ex`,
-`demand_forecaster.ex`, and `model_builder.ex`. Two sites were missed:
+`demand_forecaster.ex`, and `model_builder.ex`.
 
-- `lib/bsts_nx/causal_impact.ex:83` — initial state for the pre-period Gibbs chain.
-- `lib/bsts_nx/intervention_analysis.ex:393` — initial state for the operational filter spec.
-
-The old idiom is subtly wrong when the first observation is missing. In Elixir
-`NaN` is **truthy**, so `List.first([NaN, ...]) || 0.0` returns `NaN`, not `0.0`.
-At `causal_impact.ex:83` this seeds the Gibbs sampler with a `NaN` initial state,
-which propagates through the Kalman filter and corrupts the entire posterior
-(every effect/credible-interval becomes `NaN`). Replacing both with
-`ModelBuilder.first_obs/1` makes these two public entry points consistent with the
-rest of the codebase and removes the corruption path.
+**INTEGRATION STATUS (2026-07-09)**: This fix has been integrated into the
+codebase. Both `CausalImpact.estimate/4` (line 84) and `InterventionAnalysis`
+already use `ModelBuilder.first_obs/1` for initial state setup, consistent with
+the rest of the codebase. The `NaN` initial-state corruption path has been removed.
 
 ## Current state
 

@@ -47,7 +47,7 @@ defmodule BstsSiteWeb.Engine.KalmanLive do
           the filter change character.
         </.section_heading>
 
-        <form phx-change="tune" class="mt-5 grid gap-x-10 gap-y-3 sm:grid-cols-2">
+        <form id="kalman-tune-form" phx-change="tune" class="mt-5 grid gap-x-10 gap-y-3 sm:grid-cols-2">
           <.param_slider
             name="q_idx"
             label="Process variance Q; how much the level may drift"
@@ -181,7 +181,7 @@ defmodule BstsSiteWeb.Engine.KalmanLive do
     end
   end
 
-  defp fmt2(v) when is_number(v), do: :erlang.float_to_binary(v * 1.0, decimals: 2)
+  defp fmt2(v), do: BstsSiteWeb.CoreComponents.fmt2(v)
 
   defp fmt_ratio(v) when is_number(v) do
     # Guard the formatting boundary: 0.3 / 3.0 = 0.09999999999999999, which

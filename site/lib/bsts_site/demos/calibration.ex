@@ -65,30 +65,35 @@ defmodule BstsSite.Demos.Calibration do
       Execution.measure(fn ->
         series.cases
         |> Enum.with_index()
-        |> Enum.map(fn {c, i} ->
-          result =
-            CausalImpact.estimate(c.observations, {1, @pre_end}, {@pre_end + 1, @total},
-              num_samples: @num_samples,
-              burn_in: @burn_in,
-              seed: 4242 + i,
-              process_var: 0.01,
-              obs_var: @noise_sd * @noise_sd,
-              prior_shape: 2.0,
-              prior_scale: 0.1
-            )
+        |> Task.async_stream(
+          fn {c, i} ->
+            result =
+              CausalImpact.estimate(c.observations, {1, @pre_end}, {@pre_end + 1, @total},
+                num_samples: @num_samples,
+                burn_in: @burn_in,
+                seed: 4242 + i,
+                process_var: 0.01,
+                obs_var: @noise_sd * @noise_sd,
+                prior_shape: 2.0,
+                prior_scale: 0.1
+              )
 
-          ce = CausalImpact.summary(result).cumulative_effect
-          truth = c.lift * 1.0
+            ce = CausalImpact.summary(result).cumulative_effect
+            truth = c.lift * 1.0
 
-          %{
-            lift: c.lift,
-            truth: truth,
-            mean: ce.mean,
-            lower: ce.lower,
-            upper: ce.upper,
-            covered?: truth >= ce.lower and truth <= ce.upper
-          }
-        end)
+            %{
+              lift: c.lift,
+              truth: truth,
+              mean: ce.mean,
+              lower: ce.lower,
+              upper: ce.upper,
+              covered?: truth >= ce.lower and truth <= ce.upper
+            }
+          end,
+          timeout: :infinity,
+          ordered: true
+        )
+        |> Enum.map(fn {:ok, result} -> result end)
       end)
 
     placebo = hd(cases)

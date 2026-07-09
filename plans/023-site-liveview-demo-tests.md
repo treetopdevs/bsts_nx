@@ -82,10 +82,10 @@ the site and the library (they fail in CI when the library drifts), and
 
 | Purpose | Command | Expected on success |
 |---------|---------|---------------------|
-| Site tests | `cd site && mix test` | 0 failures (fast: <15 s) |
-| Incl. slow demo tests | `cd site && mix test --include slow` | 0 failures |
 | Compile | `cd site && mix compile --warnings-as-errors` | exit 0 |
 | Format | `cd site && mix format` | exit 0 |
+| Site tests | `cd site && mix test` | 0 failures (fast: <15 s) |
+| Incl. slow demo tests | `cd site && mix test --include slow` | 0 failures |
 
 Tooling note: `mix` is a `mise` shim; prefix `mise exec -- ` if needed.
 
@@ -113,7 +113,14 @@ Tooling note: `mix` is a `mise` shim; prefix `mise exec -- ` if needed.
 
 ## Steps
 
-### Step 1: Route smoke tests
+### Step 1: Configure slow-tag exclusion
+
+In `site/test/test_helper.exs`, ensure `:slow` tests are excluded by default.
+If it's a bare `ExUnit.start()`, change it to `ExUnit.start(exclude: [:slow])`.
+
+**Verify**: `cat site/test/test_helper.exs` shows the exclusion config.
+
+### Step 2: Route smoke tests
 
 Create `site/test/bsts_site_web/live/routes_smoke_test.exs`:
 
@@ -148,7 +155,7 @@ from plan 019) makes it flaky — if it does, drop async and note why.
 mount takes >2 s, note which (candidate for a mount that's doing MCMC-tier
 work — report it, that would contradict the audit).
 
-### Step 2: One instant-lane event test per interactive page
+### Step 3: One instant-lane event test per interactive page
 
 Extend the smoke file (or a sibling) with a `render_change`/`render_click`
 test for one representative **instant-lane** event per page that has one —
@@ -164,7 +171,7 @@ Do NOT fire MCMC-button events (`fit`, `race`, `run_mcmc`, `run_checks`,
 
 **Verify**: `cd site && mix test` → 0 failures, total suite still <30 s.
 
-### Step 3: Demo shape-contract tests
+### Step 4: Demo shape-contract tests
 
 Create `site/test/bsts_site/demos/shapes_test.exs` with a test per demo
 module asserting the exact keys and length invariants the templates/chart
@@ -192,16 +199,6 @@ results) if plan 019 hasn't already added it.
 
 **Verify**: `cd site && mix test` (fast lane) and
 `cd site && mix test --include slow` (MCMC shapes) → 0 failures each.
-
-### Step 4: Wire into the verification lane
-
-Nothing to do if plan 015 landed (the site CI job runs `mix test`, which now
-includes these; slow-tagged tests stay opt-in). Confirm
-`site/test/test_helper.exs` excludes `:slow` by default — if it's a bare
-`ExUnit.start()`, change it to `ExUnit.start(exclude: [:slow])`.
-
-**Verify**: `cd site && mix test` output shows `excluded` count > 0 (the slow
-shape tests), and `mix test --include slow` runs them.
 
 ### Step 5: Format + full pass
 

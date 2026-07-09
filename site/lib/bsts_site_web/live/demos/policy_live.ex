@@ -67,8 +67,10 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
     end
   end
 
-  def handle_async(:mcmc, {:exit, _reason}, socket) do
-    {:noreply, assign(socket, running: false, busy: true)}
+  def handle_async(:mcmc, {:exit, reason}, socket) do
+    require Logger
+    Logger.error("PolicyLive async :mcmc crashed: #{inspect(reason)}")
+    {:noreply, assign(socket, running: false, mcmc: nil)}
   end
 
   @impl true
@@ -149,6 +151,7 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
           <button
             :if={!@running}
             type="button"
+            id="policy-run-mcmc"
             phx-click="run_mcmc"
             class="btn btn-primary font-data text-sm"
           >

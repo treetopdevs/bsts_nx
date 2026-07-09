@@ -122,18 +122,7 @@ defmodule BstsSite.Demos.Counterfactual do
     }
   end
 
-  def clamp_effect(value) when is_integer(value) do
-    value |> max(@effect_range.first) |> min(@effect_range.last)
-  end
-
-  def clamp_effect(value) when is_binary(value) do
-    case Integer.parse(value) do
-      {n, _} -> clamp_effect(n)
-      :error -> @effect_range.first
-    end
-  end
-
-  def clamp_effect(_value), do: @effect_range.first
+  def clamp_effect(value), do: BstsSite.Demos.Params.clamp(value, @effect_range)
 
   def clamp_alpha(value) when is_number(value) do
     value |> max(@alpha_min) |> min(@alpha_max) |> Float.round(2)

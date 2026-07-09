@@ -173,18 +173,7 @@ defmodule BstsSite.Demos.Anomaly do
 
   def clamp_alpha(_), do: @default_alpha
 
-  defp clamp_int(value, range) when is_integer(value) do
-    value |> max(range.first) |> min(range.last)
-  end
-
-  defp clamp_int(value, range) when is_binary(value) do
-    case Integer.parse(value) do
-      {n, _} -> clamp_int(n, range)
-      :error -> range.first
-    end
-  end
-
-  defp clamp_int(_value, range), do: range.first
+  defp clamp_int(value, range), do: BstsSite.Demos.Params.clamp(value, range)
 
   @doc "The code this demo runs, shown verbatim in the under-the-hood panel."
   def code_snippet do

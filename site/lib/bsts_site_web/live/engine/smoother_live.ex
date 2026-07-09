@@ -66,7 +66,7 @@ defmodule BstsSiteWeb.Engine.SmootherLive do
         </.section_heading>
 
         <div class="mt-5 flex flex-wrap items-center gap-x-6 gap-y-3">
-          <form phx-change="toggle" class="flex items-center gap-2">
+          <form id="smoother-toggle-form" phx-change="toggle" class="flex items-center gap-2">
             <input type="hidden" name="smoothed" value="false" />
             <input
               type="checkbox"
@@ -85,7 +85,7 @@ defmodule BstsSiteWeb.Engine.SmootherLive do
           </form>
 
           <div class="flex items-center gap-3">
-            <button type="button" phx-click="draw" class="btn btn-sm btn-outline font-data text-xs">
+            <button type="button" id="smoother-draw" phx-click="draw" class="btn btn-sm btn-outline font-data text-xs">
               Draw another possible history
             </button>
             <span :if={@draw_count > 0} class="font-data text-xs text-(--color-ink-faint)">
@@ -243,6 +243,6 @@ defmodule BstsSiteWeb.Engine.SmootherLive do
     "Graded against it: filtered RMSE #{fmt2(prepared.rmse_filt)}, smoothed RMSE #{fmt2(prepared.rmse_smooth)}; hindsight cut the error by #{fmt1(cut)}%."
   end
 
-  defp fmt1(v) when is_number(v), do: :erlang.float_to_binary(v * 1.0, decimals: 1)
-  defp fmt2(v) when is_number(v), do: :erlang.float_to_binary(v * 1.0, decimals: 2)
+  defp fmt1(v), do: BstsSiteWeb.CoreComponents.fmt1(v)
+  defp fmt2(v), do: BstsSiteWeb.CoreComponents.fmt2(v)
 end

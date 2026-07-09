@@ -8,7 +8,7 @@ This is a web application written using the Phoenix web framework.
 ### Phoenix v1.8 guidelines
 
 - **Always** begin your LiveView templates with `<Layouts.app flash={@flash} ...>` which wraps all inner content
-- The `MyAppWeb.Layouts` module is aliased in the `my_app_web.ex` file, so you can use it without needing to alias it again
+- The `BstsSiteWeb.Layouts` module is aliased in the `bsts_site_web.ex` file, so you can use it without needing to alias it again
 - Anytime you run into errors with no `current_scope` assign:
   - You failed to follow the Authenticated Routes guidelines, or you failed to pass `current_scope` to `<Layouts.app>`
   - **Always** fix the `current_scope` error by moving your routes to the proper `live_session` and ensure you pass `current_scope` as needed

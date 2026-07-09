@@ -15,46 +15,6 @@
    The heroicons installation itself is managed by your mix.exs */
 @plugin "../vendor/heroicons";
 
-@plugin "../vendor/daisyui" {
-  themes: false;
-}
-
-/* Single light theme: a technical report is printed on paper. */
-@plugin "../vendor/daisyui-theme" {
-  name: "paper";
-  default: true;
-  prefersdark: false;
-  color-scheme: "light";
-  --color-base-100: oklch(96.5% 0.006 250);
-  --color-base-200: oklch(92.5% 0.009 250);
-  --color-base-300: oklch(87.5% 0.012 250);
-  --color-base-content: oklch(24.5% 0.05 260);
-  --color-primary: oklch(24.5% 0.05 260);
-  --color-primary-content: oklch(96.5% 0.006 250);
-  --color-secondary: oklch(40.5% 0.095 255);
-  --color-secondary-content: oklch(96.5% 0.006 250);
-  --color-accent: oklch(40.5% 0.145 6);
-  --color-accent-content: oklch(96.5% 0.006 250);
-  --color-neutral: oklch(36.5% 0.045 260);
-  --color-neutral-content: oklch(96.5% 0.006 250);
-  --color-info: oklch(40.5% 0.095 255);
-  --color-info-content: oklch(96.5% 0.006 250);
-  --color-success: oklch(38.5% 0.105 150);
-  --color-success-content: oklch(96.5% 0.006 250);
-  --color-warning: oklch(42% 0.105 78);
-  --color-warning-content: oklch(24.5% 0.05 260);
-  --color-error: oklch(42% 0.16 28);
-  --color-error-content: oklch(96.5% 0.006 250);
-  --radius-selector: 0.25rem;
-  --radius-field: 0.25rem;
-  --radius-box: 0.375rem;
-  --size-selector: 0.21875rem;
-  --size-field: 0.21875rem;
-  --border: 1px;
-  --depth: 0;
-  --noise: 0;
-}
-
 @theme {
   /* Semantic chart colors; used by SVG components via CSS vars */
   --color-ink: oklch(24.5% 0.05 260);
@@ -287,20 +247,20 @@ body {
 .code-block .tok-comment { color: var(--color-code-comment); font-style: italic; }
 
 @media (pointer: coarse) {
-  .btn.btn-sm,
-  .select.select-sm,
+  /* Touch target sizing for buttons, nav pills, and form controls */
   .nav-pill,
-  .touch-target {
+  .touch-target,
+  button[type="button"],
+  button[type="submit"],
+  select {
     min-block-size: 2.75rem;
   }
 
-  .btn.btn-sm,
-  .nav-pill {
+  .nav-pill,
+  button[type="button"],
+  button[type="submit"] {
     display: inline-flex;
     align-items: center;
-  }
-
-  .btn.btn-sm {
     padding-inline: 1rem;
   }
 
@@ -309,7 +269,7 @@ body {
     justify-content: center;
   }
 
-  .range.range-xs {
+  input[type="range"] {
     min-block-size: 2.75rem;
   }
 }

@@ -17,15 +17,21 @@ defmodule BstsSite.Demos.Scenarios do
   def noise(n, sd, seed) when is_integer(n) and n >= 0 do
     state = :rand.seed_s(:exsss, {seed, seed + 7919, seed + 104_729})
 
+    # Box-Muller: generate pairs (cosine and sine components), then trim if n is odd
+    pairs_needed = div(n + 1, 2)
+
     {values, _state} =
-      Enum.map_reduce(1..n//1, state, fn _, st ->
+      Enum.flat_map_reduce(1..pairs_needed, state, fn _, st ->
         {u1, st} = :rand.uniform_s(st)
         {u2, st} = :rand.uniform_s(st)
-        z = :math.sqrt(-2.0 * :math.log(max(u1, 1.0e-12))) * :math.cos(2.0 * :math.pi() * u2)
-        {z * sd, st}
+        r = :math.sqrt(-2.0 * :math.log(max(u1, 1.0e-12)))
+        theta = 2.0 * :math.pi() * u2
+        z0 = r * :math.cos(theta) * sd
+        z1 = r * :math.sin(theta) * sd
+        {[z0, z1], st}
       end)
 
-    values
+    Enum.take(values, n)
   end
 
   @doc """
