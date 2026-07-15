@@ -140,7 +140,10 @@ end
 
 def handle_async(:fit, {:ok, :busy}, socket), do: {:noreply, assign(socket, running: false, busy: true)}
 def handle_async(:fit, {:ok, result}, socket), do: {:noreply, assign(socket, running: false, result: result)}
-def handle_async(:fit, {:exit, _reason}, socket), do: {:noreply, assign(socket, running: false, busy: true)}
+def handle_async(:fit, {:exit, reason}, socket) do
+  Logger.error("async fit failed: #{inspect(reason)}")
+  {:noreply, assign(socket, running: false, busy: false, error: "The fit failed. Please try again.")}
+end
 ```
 
 ## Library conventions (get these right or the page crashes/lies)

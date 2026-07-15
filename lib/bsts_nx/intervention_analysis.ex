@@ -386,11 +386,13 @@ defmodule BstsNx.InterventionAnalysis do
 
   defp analyze_filter!(observations, pre_period, post_period, alpha, opts) do
     model_spec = resolve_model_spec(observations, pre_period, opts)
+    {pre_start, pre_end} = pre_period
+    pre_data = Enum.slice(observations, pre_start - 1, pre_end - pre_start + 1)
 
     spec =
       model_spec ||
         Components.local_level_spec(
-          initial_state: Keyword.get(opts, :x0, ModelBuilder.first_obs(observations)),
+          initial_state: Keyword.get(opts, :x0, ModelBuilder.first_obs(pre_data)),
           initial_cov: Keyword.get(opts, :p0, 1.0),
           process_var: Keyword.get(opts, :q, 1.0),
           obs_var: Keyword.get(opts, :r, 1.0)

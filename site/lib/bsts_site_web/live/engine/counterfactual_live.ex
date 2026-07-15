@@ -24,6 +24,7 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
        stats: nil,
        running: false,
        busy: false,
+       error: nil,
        revealed: false
      )}
   end
@@ -39,6 +40,7 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
        fit: nil,
        stats: nil,
        busy: false,
+       error: nil,
        revealed: false
      )}
   end
@@ -48,7 +50,7 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
 
   def handle_event("run", _params, socket) do
     effect = socket.assigns.effect
-    socket = assign(socket, running: true, busy: false)
+    socket = assign(socket, running: true, busy: false, error: nil)
 
     {:noreply,
      start_async(socket, :fit, fn ->
@@ -77,13 +79,13 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
 
   @impl true
   def handle_async(:fit, {:ok, :busy}, socket) do
-    {:noreply, assign(socket, running: false, busy: true)}
+    {:noreply, assign(socket, running: false, busy: true, error: nil)}
   end
 
   def handle_async(:fit, {:ok, fit}, socket) do
     if fit.effect == socket.assigns.effect do
       stats = Demo.stats(fit.result, socket.assigns.alpha)
-      {:noreply, assign(socket, running: false, busy: false, fit: fit, stats: stats)}
+      {:noreply, assign(socket, running: false, busy: false, error: nil, fit: fit, stats: stats)}
     else
       # The effect slider moved while the sampler ran; this result answers
       # a question the page is no longer asking. Drop it.
@@ -94,7 +96,15 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
   def handle_async(:fit, {:exit, reason}, socket) do
     require Logger
     Logger.error("CounterfactualLive async :fit crashed: #{inspect(reason)}")
-    {:noreply, assign(socket, running: false, fit: nil, stats: nil)}
+
+    {:noreply,
+     assign(socket,
+       running: false,
+       busy: false,
+       error: "The counterfactual fit failed. Please try again.",
+       fit: nil,
+       stats: nil
+     )}
   end
 
   @impl true
@@ -116,7 +126,11 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
           the spaghetti is the uncertainty; no band is drawn because none is needed.
         </.section_heading>
 
-        <form id="counterfactual-adjust-form" phx-change="adjust" class="mt-5 grid gap-x-10 gap-y-3 sm:grid-cols-2">
+        <form
+          id="counterfactual-adjust-form"
+          phx-change="adjust"
+          class="mt-5 grid gap-x-10 gap-y-3 sm:grid-cols-2"
+        >
           <.param_slider
             name="effect"
             label="Planted step at day 91"
@@ -167,6 +181,16 @@ defmodule BstsSiteWeb.Engine.CounterfactualLive do
             MCMC slots on this server are limited so everyone's demo stays responsive.
           </.verdict_card>
         </div>
+
+        <.verdict_card
+          :if={@error}
+          class="my-4"
+          role="alert"
+          tone={:warning}
+          verdict={@error}
+        >
+          <p>The failure was logged so it can be investigated.</p>
+        </.verdict_card>
 
         <div :if={@fit} class="mt-8">
           <form phx-change="adjust_alpha" class="max-w-sm">

@@ -154,7 +154,7 @@ clamps) → 0 failures.
 ### Step 3: One timing convention
 
 Create `BstsSite.Demos.Timing.elapsed_ms/1` taking microseconds and using the
-ceil-integer convention (`div(max(us, 0) + 999, 1000)`) — it's the most
+ceil-integer convention (`max(div(max(us, 0) + 999, 1000), 1)`) — it's the most
 common copy and "rounds up to the millisecond you actually waited", which
 suits the honesty badge. Route all five variants through it (for
 `counterfactual.ex`, capture with `:timer.tc` or monotonic µs instead of ms

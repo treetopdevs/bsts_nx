@@ -172,7 +172,7 @@ In `execution.ex`, extract the match fragment:
 ```elixir
 @lu_missing_fragment "Nx.Backend.lu/3 not implemented"
 
-@doc "The Nx error-message fragment identifying a backend without LU support."
+@doc false
 def lu_missing_fragment, do: @lu_missing_fragment
 ```
 

@@ -19,7 +19,7 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
      socket
      |> assign(page_title: "Did the policy change anything?")
      |> assign(scenario: scenario, mcmc: nil)
-     |> assign(running: false, busy: false, revealed: false)}
+     |> assign(running: false, busy: false, error: nil, revealed: false)}
   end
 
   @impl true
@@ -27,7 +27,8 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
     scenario = Policy.scenario(reduction, noise)
 
     # New data invalidates any fitted result and reseals the answer key.
-    {:noreply, assign(socket, scenario: scenario, mcmc: nil, revealed: false, busy: false)}
+    {:noreply,
+     assign(socket, scenario: scenario, mcmc: nil, revealed: false, busy: false, error: nil)}
   end
 
   def handle_event("run_mcmc", _params, %{assigns: %{running: true}} = socket) do
@@ -36,7 +37,7 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
 
   def handle_event("run_mcmc", _params, socket) do
     %{reduction: reduction, noise_sd: noise_sd} = socket.assigns.scenario
-    socket = assign(socket, running: true, busy: false)
+    socket = assign(socket, running: true, busy: false, error: nil)
 
     {:noreply,
      start_async(socket, :mcmc, fn ->
@@ -53,14 +54,14 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
 
   @impl true
   def handle_async(:mcmc, {:ok, :busy}, socket) do
-    {:noreply, assign(socket, running: false, busy: true)}
+    {:noreply, assign(socket, running: false, busy: true, error: nil)}
   end
 
   def handle_async(:mcmc, {:ok, result}, socket) do
     %{reduction: reduction, noise_sd: noise_sd} = socket.assigns.scenario
 
     if result.scenario.reduction == reduction and result.scenario.noise_sd == noise_sd do
-      {:noreply, assign(socket, running: false, mcmc: result)}
+      {:noreply, assign(socket, running: false, busy: false, error: nil, mcmc: result)}
     else
       # The sliders moved while this run was sampling; drop the stale result.
       {:noreply, assign(socket, running: false)}
@@ -70,7 +71,14 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
   def handle_async(:mcmc, {:exit, reason}, socket) do
     require Logger
     Logger.error("PolicyLive async :mcmc crashed: #{inspect(reason)}")
-    {:noreply, assign(socket, running: false, mcmc: nil)}
+
+    {:noreply,
+     assign(socket,
+       running: false,
+       busy: false,
+       error: "The policy analysis failed. Please try again.",
+       mcmc: nil
+     )}
   end
 
   @impl true
@@ -180,6 +188,16 @@ defmodule BstsSiteWeb.Demos.PolicyLive do
           verdict="Another visitor is sampling, try again in a moment."
         >
           <p>MCMC runs are limited to a few at a time so the demo stays responsive.</p>
+        </.verdict_card>
+
+        <.verdict_card
+          :if={@error}
+          class="mt-4"
+          role="alert"
+          tone={:warning}
+          verdict={@error}
+        >
+          <p>The failure was logged so it can be investigated.</p>
         </.verdict_card>
 
         <div :if={@mcmc}>

@@ -22,6 +22,7 @@ defmodule BstsSiteWeb.Demos.DemandLive do
        service_level: 95,
        running: false,
        busy: false,
+       error: nil,
        revealed: false
      )}
   end
@@ -33,7 +34,7 @@ defmodule BstsSiteWeb.Demos.DemandLive do
 
   def handle_event("fit", _params, socket) do
     scenario = socket.assigns.scenario
-    socket = assign(socket, running: true, busy: false)
+    socket = assign(socket, running: true, busy: false, error: nil)
 
     {:noreply,
      start_async(socket, :fit, fn ->
@@ -62,7 +63,7 @@ defmodule BstsSiteWeb.Demos.DemandLive do
 
   @impl true
   def handle_async(:fit, {:ok, :busy}, socket) do
-    {:noreply, assign(socket, running: false, busy: true)}
+    {:noreply, assign(socket, running: false, busy: true, error: nil)}
   end
 
   def handle_async(:fit, {:ok, forecast}, socket) do
@@ -70,6 +71,7 @@ defmodule BstsSiteWeb.Demos.DemandLive do
      assign(socket,
        running: false,
        busy: false,
+       error: nil,
        forecast: forecast,
        decision: Demand.decision(forecast, socket.assigns.service_level),
        coverage: Demand.coverage(forecast, socket.assigns.scenario.future)
@@ -79,7 +81,16 @@ defmodule BstsSiteWeb.Demos.DemandLive do
   def handle_async(:fit, {:exit, reason}, socket) do
     require Logger
     Logger.error("DemandLive async :fit crashed: #{inspect(reason)}")
-    {:noreply, assign(socket, running: false, forecast: nil, decision: nil, coverage: nil)}
+
+    {:noreply,
+     assign(socket,
+       running: false,
+       busy: false,
+       error: "The forecast failed. Please try again.",
+       forecast: nil,
+       decision: nil,
+       coverage: nil
+     )}
   end
 
   @impl true
@@ -175,6 +186,16 @@ defmodule BstsSiteWeb.Demos.DemandLive do
             latencies. Your click wasn't lost; the button works again right now.
           </.verdict_card>
         </div>
+
+        <.verdict_card
+          :if={@error}
+          class="my-6"
+          role="alert"
+          tone={:warning}
+          verdict={@error}
+        >
+          <p>The failure was logged so it can be investigated.</p>
+        </.verdict_card>
 
         <section :if={@forecast}>
           <.figure

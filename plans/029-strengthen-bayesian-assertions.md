@@ -103,11 +103,13 @@ test's own data construction (e.g. TVAttribution: post ≈ 1200 vs pre ≈ 1000
 baseline ⇒ planted per-step lift ≈ 200, total ≈ 200 × 10 = 2000), then add:
 
 1. **Sign**: `assert result.total_lift > 0` (or the planted direction).
-2. **Magnitude bracket**: planted value within a generous factor —
-   `assert result.total_lift > planted * 0.3 and result.total_lift < planted * 3.0`
-   — wide enough for a 10-sample MCMC estimate, tight enough to catch
+2. **Magnitude bracket**: use a sign-safe absolute-error window centered on
+   the planted value — for example,
+   `tolerance = max(abs(planted) * 2.0, 1.0)` followed by
+   `assert_in_delta result.total_lift, planted, tolerance` — wide enough for a
+   10-sample MCMC estimate, valid for positive and negative truths, and tight enough to catch
    zeroing/sign/scale bugs. With fixed seeds, this is deterministic: run the
-   test, confirm the actual value sits comfortably inside the bracket
+   test, confirm the actual value sits comfortably inside the window
    (record actual values in your report), and if it sits near an edge widen
    to the next factor rather than nudging around the observed number (the
    bracket must derive from the planted truth, NOT from the observed output —

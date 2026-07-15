@@ -15,6 +15,14 @@ defmodule BstsSite.Demos.Scenarios do
   Independent of the process dictionary, safe under concurrent LiveViews.
   """
   def noise(n, sd, seed) when is_integer(n) and n >= 0 do
+    if n == 0 do
+      []
+    else
+      noise_samples(n, sd, seed)
+    end
+  end
+
+  defp noise_samples(n, sd, seed) do
     state = :rand.seed_s(:exsss, {seed, seed + 7919, seed + 104_729})
 
     # Box-Muller: generate pairs (cosine and sine components), then trim if n is odd

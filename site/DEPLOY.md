@@ -41,8 +41,7 @@ fly deploy --remote-only
   under load visitors get a polite busy note rather than a pegged machine.
   If the machine feels roomy, bump `@max_concurrent`.
 - Two config switches in `site/config/config.exs` when the time comes:
-  - `:github_url` — set once the public repo URL is confirmed
-    (mix.exs says `Cleveland-Software-LLC/bsts_elixir`, the git remote says
-    `treetopdevs/bsts_nx`; the site hides source links while this is nil).
+  - `:github_url` — the public source URL, kept aligned with the package
+    metadata in the root `mix.exs` (`treetopdevs/bsts_nx`).
   - `:hex_published` — flip to true after `mix hex.publish`; `/start` swaps
     the git-dependency install snippet for the Hex one automatically.

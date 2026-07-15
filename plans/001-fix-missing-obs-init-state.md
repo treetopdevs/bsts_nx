@@ -1,4 +1,4 @@
-# Plan 001: Use `ModelBuilder.first_obs/1` for initial state at the two wrapper sites the 5035d69 sweep missed
+# Plan 001: Use pre-period `ModelBuilder.first_obs/1` initial states in causal wrappers
 
 > **Executor instructions**: Follow this plan step by step. Run every verification
 > command and confirm the expected result before moving to the next step. If
@@ -28,27 +28,26 @@ Commit `5035d69` ("fix: preserve observation inputs across wrappers") introduced
 `List.first(obs) || 0.0` idiom out of `forecaster.ex`, `anomaly_detector.ex`,
 `demand_forecaster.ex`, and `model_builder.ex`.
 
-**INTEGRATION STATUS (2026-07-09)**: This fix has been integrated into the
-codebase. Both `CausalImpact.estimate/4` (line 84) and `InterventionAnalysis`
-already use `ModelBuilder.first_obs/1` for initial state setup, consistent with
-the rest of the codebase. The `NaN` initial-state corruption path has been removed.
+**INTEGRATION STATUS (2026-07-15)**: This fix has been integrated into the
+codebase. `CausalImpact.estimate/4` derives its initial state from
+`period.pre_data`, and `InterventionAnalysis` first slices the configured
+pre-period before calling `ModelBuilder.first_obs/1`. Missing values and data
+outside the pre-period therefore cannot seed either default initial state.
 
 ## Current state
 
 Files and roles:
 
 - `lib/bsts_nx/causal_impact.ex` — `BstsNx.CausalImpact.estimate/4` (MCMC causal
-  impact). The bug is at line 83. This module does **not** currently alias
-  `ModelBuilder`; its alias block is at lines 26-29.
+  impact). It uses `ModelBuilder.first_obs(period.pre_data)`.
 - `lib/bsts_nx/intervention_analysis.ex` — `analyze_filter!/5` (operational filter
-  path). The bug is at line 393. This module **already** aliases `ModelBuilder`
-  (line 55).
+  path). It slices `pre_period` before deriving the default `:x0`.
 - `lib/bsts_nx/model_builder.ex` — defines the fix function (do not modify).
 
-`lib/bsts_nx/causal_impact.ex:83` (inside `estimate/4`):
+`lib/bsts_nx/causal_impact.ex` (inside `estimate/4`):
 
 ```elixir
-    init_state = Keyword.get(opts, :initial_state, List.first(period.pre_data) || 0.0)
+    init_state = Keyword.get(opts, :initial_state, ModelBuilder.first_obs(period.pre_data))
 ```
 
 `lib/bsts_nx/causal_impact.ex:26-29` (current alias/import block):
@@ -60,13 +59,16 @@ Files and roles:
   import BstsNx.Utils, only: [split_key_at: 2]
 ```
 
-`lib/bsts_nx/intervention_analysis.ex:390-397` (inside `analyze_filter!/5`):
+`lib/bsts_nx/intervention_analysis.ex` (inside `analyze_filter!/5`):
 
 ```elixir
+    {pre_start, pre_end} = pre_period
+    pre_data = Enum.slice(observations, pre_start - 1, pre_end - pre_start + 1)
+
     spec =
       model_spec ||
         Components.local_level_spec(
-          initial_state: Keyword.get(opts, :x0, List.first(observations) || 0.0),
+          initial_state: Keyword.get(opts, :x0, ModelBuilder.first_obs(pre_data)),
           initial_cov: Keyword.get(opts, :p0, 1.0),
           process_var: Keyword.get(opts, :q, 1.0),
           obs_var: Keyword.get(opts, :r, 1.0)
@@ -173,21 +175,26 @@ with:
 
 **Verify**: `grep -n "List.first(period.pre_data)" lib/bsts_nx/causal_impact.ex` → no matches.
 
-### Step 3: Fix the initial state in `intervention_analysis.ex:393`
+### Step 3: Fix the initial state in `intervention_analysis.ex`
 
 `ModelBuilder` is already aliased in this module (line 55). Replace:
-
-```elixir
-          initial_state: Keyword.get(opts, :x0, List.first(observations) || 0.0),
-```
-
-with:
 
 ```elixir
           initial_state: Keyword.get(opts, :x0, ModelBuilder.first_obs(observations)),
 ```
 
-**Verify**: `grep -rn "List.first(observations) || 0.0" lib/bsts_nx/intervention_analysis.ex` → no matches.
+with:
+
+```elixir
+          initial_state: Keyword.get(opts, :x0, ModelBuilder.first_obs(pre_data)),
+```
+
+Derive `pre_data` from the 1-based inclusive `pre_period` immediately before
+building the default spec. This prevents observations before or after the
+configured pre-period from influencing `:x0`.
+
+**Verify**: the regression test changes values outside the pre-period and gets
+the same filter summary.
 
 ### Step 4: Add the regression test
 

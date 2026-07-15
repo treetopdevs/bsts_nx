@@ -154,7 +154,7 @@ site/
 
 1. Install: git dependency until Hex publish; never render the bare `{:bsts_nx, "~> 0.1"}` as working today.
 2. License: LGPL-2.1-only, stated plainly. Not "MIT", not "permissive".
-3. Repo link: **confirm** which GitHub URL is public (mix.exs says `Cleveland-Software-LLC/bsts_elixir`; git remote says `treetopdevs/bsts_nx`) before linking.
+3. Repo link: use the confirmed public URL `https://github.com/treetopdevs/bsts_nx` consistently in package metadata and site links.
 4. Maturity: "early-stage, validated against the R reference stack" — never "faster than R", never "feature parity with Google CausalImpact".
 5. Module names: `BstsNx.ShapleyAllocator` (there is no `BstsNx.Shapley`).
 6. Spike-and-slab exists (`regression_spec(mode: :spike_and_slab)`); the stale claim in `docs/bsts_nx_bayesian_review.md` must not leak into copy.

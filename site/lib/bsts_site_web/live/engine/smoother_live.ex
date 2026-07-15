@@ -6,6 +6,8 @@ defmodule BstsSiteWeb.Engine.SmootherLive do
   """
   use BstsSiteWeb, :live_view
 
+  alias BstsSiteWeb.Format
+
   alias BstsSite.Demos.Hindsight
 
   @impl true
@@ -85,7 +87,12 @@ defmodule BstsSiteWeb.Engine.SmootherLive do
           </form>
 
           <div class="flex items-center gap-3">
-            <button type="button" id="smoother-draw" phx-click="draw" class="btn btn-sm btn-outline font-data text-xs">
+            <button
+              type="button"
+              id="smoother-draw"
+              phx-click="draw"
+              class="btn btn-sm btn-outline font-data text-xs"
+            >
               Draw another possible history
             </button>
             <span :if={@draw_count > 0} class="font-data text-xs text-(--color-ink-faint)">
@@ -243,6 +250,6 @@ defmodule BstsSiteWeb.Engine.SmootherLive do
     "Graded against it: filtered RMSE #{fmt2(prepared.rmse_filt)}, smoothed RMSE #{fmt2(prepared.rmse_smooth)}; hindsight cut the error by #{fmt1(cut)}%."
   end
 
-  defp fmt1(v), do: BstsSiteWeb.CoreComponents.fmt1(v)
-  defp fmt2(v), do: BstsSiteWeb.CoreComponents.fmt2(v)
+  defp fmt1(v), do: Format.decimal1(v)
+  defp fmt2(v), do: Format.decimal2(v)
 end

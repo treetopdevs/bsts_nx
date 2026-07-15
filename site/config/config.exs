@@ -10,12 +10,11 @@ import Config
 config :bsts_site,
   generators: [timestamp_type: :utc_datetime]
 
-# Public links. :github_url stays nil until the public repo URL is confirmed
-# (mix.exs and the git remote currently disagree); nil hides the links.
+# Public links. Keep :github_url aligned with the root package metadata.
 # :hex_published flips the /start install snippet from git-dep to hex once
 # the package is actually published.
 config :bsts_site,
-  github_url: nil,
+  github_url: "https://github.com/treetopdevs/bsts_nx",
   hex_published: false
 
 # Configure the endpoint

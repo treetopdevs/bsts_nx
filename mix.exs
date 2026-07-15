@@ -17,8 +17,8 @@ defmodule BstsNx.MixProject do
       name: "BstsNx",
       description: description(),
       package: package(),
-      source_url: "https://github.com/Cleveland-Software-LLC/bsts_elixir",
-      homepage_url: "https://github.com/Cleveland-Software-LLC/bsts_elixir",
+      source_url: "https://github.com/treetopdevs/bsts_nx",
+      homepage_url: "https://github.com/treetopdevs/bsts_nx",
       docs: docs(),
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
@@ -55,7 +55,7 @@ defmodule BstsNx.MixProject do
       licenses: ["LGPL-2.1-only"],
       maintainers: ["Cleveland Software LLC"],
       links: %{
-        "GitHub" => "https://github.com/Cleveland-Software-LLC/bsts_elixir",
+        "GitHub" => "https://github.com/treetopdevs/bsts_nx",
         "Docs" => "https://hexdocs.pm/bsts_nx"
       },
       files: [

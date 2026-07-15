@@ -238,13 +238,11 @@ and the R-sidecar env-passthrough allowlist semantics) — fold them into plan
 
 ## Direction options (maintainer's call)
 
-- **NEW — D-LAUNCH: Resolve the launch triad (repo URL → Hex publish → site
-  deploy).** Everything is staged and blocked on three linked decisions
-  recorded in `site/DEPLOY.md`: (1) canonical public repo — `mix.exs` says
-  `Cleveland-Software-LLC/bsts_elixir`, the actual remote is
-  `treetopdevs/bsts_nx`; ExDoc source links and the Hex sidebar will 404 until
-  fixed; (2) `mix hex.publish` (package name is free; README already assumes
-  it); (3) `fly deploy` + flip `site` config `:github_url`/`:hex_published`.
+- **NEW — D-LAUNCH: Complete the launch triad (repo URL → Hex publish → site
+  deploy).** The canonical public repository is now aligned at
+  `treetopdevs/bsts_nx`; the remaining linked decisions recorded in
+  `site/DEPLOY.md` are (1) `mix hex.publish` (the package name is free; README already assumes
+  it) and (2) `fly deploy` + flip the site config `:hex_published`.
   Mostly S-effort mechanics once the repo decision is made; the README fixes
   (plan 031) ride along. Highest-leverage direction item — the site's whole
   "honesty-as-marketing" thesis is unlaunched inventory.

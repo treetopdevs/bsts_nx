@@ -120,11 +120,10 @@ end
 Once published, this becomes `{:bsts_nx, "~> 0.1"}`.
 ```
 
-For `<REPO_GIT_URL>`: because the canonical public URL is unresolved (mix.exs
-says `Cleveland-Software-LLC/bsts_elixir`, the remote is
-`treetopdevs/bsts_nx`), do NOT choose — write the snippet with the remote URL
-that `git remote get-url origin` reports **minus credentials** (strip any
-`user@` prefix), and add an HTML comment
+For `<REPO_GIT_URL>`, use the confirmed public repository
+`https://github.com/treetopdevs/bsts_nx` and keep it aligned with `mix.exs`.
+If `git remote get-url origin` contains credentials, strip any `user@` prefix
+before copying it. Add an HTML comment
 `<!-- TODO(D-LAUNCH): confirm canonical repo URL and Hex publish; then simplify this section -->`.
 Apply the same treatment to the `Mix.install/2` example (README ~30–37) and
 `docs/getting-started.md:9-15`.
@@ -212,6 +211,6 @@ Stop and report back (do not improvise) if:
 - The two `TODO(D-LAUNCH)` comments are the cleanup hooks: when the repo URL
   is settled + package published + site deployed, a follow-up simplifies both
   sections (and plan 032's dependabot won't touch docs — this stays manual).
-- The site's `/start` page has its own install snippet driven by the
-  `:hex_published` config flag — it flips independently; no coordination
-  needed here.
+- The site's `/start` page has its own install snippet driven by the same
+  `:hex_published` release decision. Flip the README and that config flag
+  together so both public install paths remain consistent.

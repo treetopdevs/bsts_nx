@@ -201,9 +201,9 @@ First-visitor latency must not pay JIT compilation. In
 of `start/2`, before returning), fire a non-blocking warmup:
 
 ```elixir
-defn_opts = Application.get_env(:nx, :default_defn_options)
-if defn_opts && defn_opts[:compiler] do
-  Task.start(fn -> BstsSite.Demos.Warmup.run() end)
+defn_opts = Application.get_env(:nx, :default_defn_options, [])
+if Keyword.get(defn_opts, :compiler) do
+  Task.start(fn -> warmup() end)
 end
 ```
 

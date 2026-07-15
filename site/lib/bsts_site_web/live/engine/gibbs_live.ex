@@ -10,6 +10,7 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
   use BstsSiteWeb, :live_view
 
   alias BstsSite.Demos.Gibbs
+  alias BstsSiteWeb.Format
 
   @reveal_per_tick 3
   @tick_ms 100
@@ -20,7 +21,7 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
      socket
      |> assign(page_title: "Honest about the unknown")
      |> assign(scenario: Gibbs.scenario())
-     |> assign(run: nil, running: false, busy: false, replaying: false)
+     |> assign(run: nil, running: false, busy: false, error: nil, replaying: false)
      |> assign(shown: 0, r_hat_shown: :nan, revealed: false)}
   end
 
@@ -38,6 +39,7 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
       assign(socket,
         running: true,
         busy: false,
+        error: nil,
         run: nil,
         shown: 0,
         r_hat_shown: :nan,
@@ -59,18 +61,34 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
 
   @impl true
   def handle_async(:sample, {:ok, :busy}, socket) do
-    {:noreply, assign(socket, running: false, busy: true)}
+    {:noreply, assign(socket, running: false, busy: true, error: nil)}
   end
 
   def handle_async(:sample, {:ok, run}, socket) do
     Process.send_after(self(), :tick, @tick_ms)
-    {:noreply, assign(socket, running: false, run: run, replaying: true, shown: 0)}
+
+    {:noreply,
+     assign(socket,
+       running: false,
+       busy: false,
+       error: nil,
+       run: run,
+       replaying: true,
+       shown: 0
+     )}
   end
 
   def handle_async(:sample, {:exit, reason}, socket) do
     require Logger
     Logger.error("GibbsLive async :sample crashed: #{inspect(reason)}")
-    {:noreply, assign(socket, running: false, run: nil)}
+
+    {:noreply,
+     assign(socket,
+       running: false,
+       busy: false,
+       error: "The sampler failed. Please try again.",
+       run: nil
+     )}
   end
 
   @impl true
@@ -179,6 +197,16 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
         >
           This demo runs real MCMC on a small shared server, so concurrent runs are
           capped. The button will work again in a few seconds.
+        </.verdict_card>
+
+        <.verdict_card
+          :if={@error}
+          class="mt-4"
+          role="alert"
+          tone={:warning}
+          verdict={@error}
+        >
+          <p>The failure was logged so it can be investigated.</p>
         </.verdict_card>
 
         <section :if={@run}>
@@ -404,6 +432,6 @@ defmodule BstsSiteWeb.Engine.GibbsLive do
   defp fmt_ess(:nan), do: "n/a"
   defp fmt_ess(v), do: Integer.to_string(v)
 
-  defp fmt1(v), do: BstsSiteWeb.CoreComponents.fmt1(v)
-  defp fmt2(v), do: BstsSiteWeb.CoreComponents.fmt2(v)
+  defp fmt1(v), do: Format.decimal1(v)
+  defp fmt2(v), do: Format.decimal2(v)
 end
