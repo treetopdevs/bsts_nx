@@ -128,7 +128,7 @@ Async pattern:
 def handle_event("run", _p, %{assigns: %{running: true}} = socket), do: {:noreply, socket}
 
 def handle_event("run", _p, socket) do
-  socket = assign(socket, running: true, busy: false)
+  socket = assign(socket, running: true, busy: false, error: nil)
   {:noreply,
    start_async(socket, :fit, fn ->
      case BstsSite.Demos.Limiter.run(fn -> Demo.fit(...) end) do
@@ -138,8 +138,11 @@ def handle_event("run", _p, socket) do
    end)}
 end
 
-def handle_async(:fit, {:ok, :busy}, socket), do: {:noreply, assign(socket, running: false, busy: true)}
-def handle_async(:fit, {:ok, result}, socket), do: {:noreply, assign(socket, running: false, result: result)}
+def handle_async(:fit, {:ok, :busy}, socket),
+  do: {:noreply, assign(socket, running: false, busy: true, error: nil)}
+
+def handle_async(:fit, {:ok, result}, socket),
+  do: {:noreply, assign(socket, running: false, busy: false, error: nil, result: result)}
 def handle_async(:fit, {:exit, reason}, socket) do
   Logger.error("async fit failed: #{inspect(reason)}")
   {:noreply, assign(socket, running: false, busy: false, error: "The fit failed. Please try again.")}

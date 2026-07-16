@@ -16,12 +16,13 @@ defmodule BstsSiteWeb.Engine.KalmanLive do
     {:ok,
      socket
      |> assign(page_title: "Tracking a signal through noise")
-     |> assign(demo: demo, revealed: false)}
+     |> assign(demo: demo, form: tuning_form(demo), revealed: false)}
   end
 
   @impl true
   def handle_event("tune", %{"q_idx" => q_idx, "r_idx" => r_idx}, socket) do
-    {:noreply, assign(socket, demo: KalmanTuner.run(q_idx, r_idx))}
+    demo = KalmanTuner.run(q_idx, r_idx)
+    {:noreply, assign(socket, demo: demo, form: tuning_form(demo))}
   end
 
   def handle_event("reveal_truth", _params, socket) do
@@ -49,7 +50,8 @@ defmodule BstsSiteWeb.Engine.KalmanLive do
           the filter change character.
         </.section_heading>
 
-        <form
+        <.form
+          for={@form}
           id="kalman-tune-form"
           phx-change="tune"
           class="mt-5 grid gap-x-10 gap-y-3 sm:grid-cols-2"
@@ -70,7 +72,7 @@ defmodule BstsSiteWeb.Engine.KalmanLive do
             value={@demo.r_idx}
             display={"R = #{fmt_g(@demo.r)}"}
           />
-        </form>
+        </.form>
 
         <.figure
           no="1"
@@ -188,6 +190,10 @@ defmodule BstsSiteWeb.Engine.KalmanLive do
   end
 
   defp fmt2(v), do: Format.decimal2(v)
+
+  defp tuning_form(demo) do
+    to_form(%{"q_idx" => demo.q_idx, "r_idx" => demo.r_idx}, as: :tune)
+  end
 
   defp fmt_ratio(v) when is_number(v) do
     # Guard the formatting boundary: 0.3 / 3.0 = 0.09999999999999999, which

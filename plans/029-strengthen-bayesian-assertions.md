@@ -105,10 +105,10 @@ baseline ⇒ planted per-step lift ≈ 200, total ≈ 200 × 10 = 2000), then ad
 1. **Sign**: `assert result.total_lift > 0` (or the planted direction).
 2. **Magnitude bracket**: use a sign-safe absolute-error window centered on
    the planted value — for example,
-   `tolerance = max(abs(planted) * 2.0, 1.0)` followed by
+   `tolerance = max(abs(planted) * 0.7, 1.0)` followed by
    `assert_in_delta result.total_lift, planted, tolerance` — wide enough for a
-   10-sample MCMC estimate, valid for positive and negative truths, and tight enough to catch
-   zeroing/sign/scale bugs. With fixed seeds, this is deterministic: run the
+   10-sample MCMC estimate, valid for positive and negative truths, and tight
+   enough to fail on an order-of-magnitude scale bug. With fixed seeds, this is deterministic: run the
    test, confirm the actual value sits comfortably inside the window
    (record actual values in your report), and if it sits near an edge widen
    to the next factor rather than nudging around the observed number (the
@@ -189,8 +189,8 @@ Stop and report back (do not improvise) if:
 
 ## Maintenance notes
 
-- The brackets are wide by design (0.3×–3×); they are bug-catchers, not
-  calibration checks — calibration lives in the `:slow`/`:external`
+- The additive windows are wide by design (±70% of the planted magnitude);
+  they are bug-catchers, not calibration checks — calibration lives in the `:slow`/`:external`
   statistical lane (plan 020). Reviewers should reject tightening these into
   flaky precision tests.
 - When sampler defaults change (e.g. after plan 021/022 performance work

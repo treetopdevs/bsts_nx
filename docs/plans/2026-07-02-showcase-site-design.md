@@ -142,8 +142,8 @@ site/
 
 - Dockerfile at repo root (build context must include both `site/` and the library);
   standard hexpm/elixir → debian-slim release build.
-- Precomputed artifacts: currently compiled into the release at build time; if a
-  `mix bsts_site.precompute` task is added, its ETF outputs would ship in the image.
+- Precomputed artifacts: once `mix bsts_site.precompute` is added to the Docker
+  build, its ETF outputs will ship in the image.
   Seeds fixed → reproducible builds.
 - fly.toml: single small machine to start (shared-cpu-2x / 2 GB suggested),
   `min_machines_running = 1` (persistent_term warm), health check on `/`.
