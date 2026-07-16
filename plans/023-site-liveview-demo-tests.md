@@ -192,8 +192,8 @@ end
 ```
 
 Cover for each demo: (a) every key the LiveView/HEEx reads exists, (b) series
-that are plotted together have equal lengths, (c) numeric outputs are finite
-(`x == x` catches NaN), (d) `execution.elapsed_ms` present where the exec
+that are plotted together have equal lengths, (c) numeric outputs pass an
+explicit finite check that rejects NaN and `:infinity`/`:neg_infinity`, (d) `execution.elapsed_ms` present where the exec
 badge is rendered. Include `Scenarios.hero/2` determinism (two calls, equal
 results) if plan 019 hasn't already added it.
 
@@ -207,20 +207,22 @@ results) if plan 019 hasn't already added it.
 
 ## Test plan
 
-This plan IS the test plan. Deliverables: one mount smoke per route, one
+This plan IS the test plan. Deliverables: one mount smoke per parameterless
+application `live` route, one
 instant-lane event test per interactive page, one shape-contract test per
-demo module (16 modules; limiter already covered), slow-tagged where the
-demo is MCMC-tier. Structural pattern: `limiter_test.exs` for plain ExUnit,
+analysis-bearing demo module (currently 16; `limiter.ex` and the `params.ex`
+input helper are covered separately), slow-tagged where the demo is MCMC-tier.
+Structural pattern: `limiter_test.exs` for plain ExUnit,
 `Phoenix.LiveViewTest.live/2` for the smoke tests.
 
 ## Done criteria
 
-- [ ] Every live route in `router.ex` has a mount smoke test (count them: routes in file == tests in `routes_smoke_test.exs`)
-- [ ] Every demo module in `site/lib/bsts_site/demos/` except `limiter.ex` has ≥1 shape test (16 modules)
+- [ ] Every parameterless application `live` route in `router.ex` has a mount smoke test (count them: routes in file == tests in `routes_smoke_test.exs`)
+- [ ] Every analysis-bearing demo module in `site/lib/bsts_site/demos/` except `limiter.ex` and `params.ex` has ≥1 shape test (currently 16 modules)
 - [ ] `cd site && mix test` → 0 failures, wall time <30 s
 - [ ] `cd site && mix test --include slow` → 0 failures
 - [ ] `cd site && mix format --check-formatted` and `mix compile --warnings-as-errors` → exit 0
-- [ ] Only files under `site/test/` changed (`git status --porcelain`)
+- [ ] Only files under `site/test/` and the required `plans/README.md` status-row update changed (`git status --porcelain`)
 - [ ] `plans/README.md` status row updated
 
 ## STOP conditions
