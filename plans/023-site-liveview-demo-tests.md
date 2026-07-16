@@ -83,7 +83,7 @@ the site and the library (they fail in CI when the library drifts), and
 | Purpose | Command | Expected on success |
 |---------|---------|---------------------|
 | Compile | `cd site && mix compile --warnings-as-errors` | exit 0 |
-| Format | `cd site && mix format` | exit 0 |
+| Format | `cd site && mix format --check-formatted` | exit 0 |
 | Site tests | `cd site && mix test` | 0 failures (post-event-test budget: <30 s) |
 | Incl. slow demo tests | `cd site && mix test --include slow` | 0 failures |
 
