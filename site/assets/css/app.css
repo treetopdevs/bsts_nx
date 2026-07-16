@@ -1,0 +1,366 @@
+/* BstsNx showcase site; "the paper that computes itself"
+   Design tokens: cool graph-paper ground, blue-black ink, slate model blue,
+   magenta reserved for lift/effect, grading-pen green reserved for planted truth.
+   Type: STIX Two Text (display/prose), IBM Plex Sans (UI), IBM Plex Mono (data). */
+
+@import "tailwindcss" source(none);
+@import "phoenix-colocated/bsts_site/colocated.css";
+@source "../css";
+@source "../js";
+@source "../../lib/bsts_site_web";
+/* Required for Tailwind to automatically pick up changes in colocated CSS files in dev */
+@source "../../_build/dev/phoenix-colocated/bsts_site/*/";
+
+/* A Tailwind plugin that makes "hero-#{ICON}" classes available.
+   The heroicons installation itself is managed by your mix.exs */
+@plugin "../vendor/heroicons";
+
+@theme {
+  /* Semantic chart colors; used by SVG components via CSS vars */
+  --color-ink: oklch(24.5% 0.05 260);
+  --color-ink-soft: oklch(36.5% 0.045 260);
+  --color-ink-faint: oklch(45.5% 0.038 260);
+  --color-paper: oklch(96.5% 0.006 250);
+  --color-paper-raised: oklch(99% 0.003 250);
+  --color-grid: oklch(87.5% 0.012 250);
+  --color-model: oklch(40.5% 0.095 255);
+  --color-model-band: oklch(40.5% 0.095 255 / 0.2);
+  --color-lift: oklch(40.5% 0.145 6);
+  --color-lift-band: oklch(40.5% 0.145 6 / 0.14);
+  --color-truth: oklch(38.5% 0.105 150);
+  --color-warning: oklch(42% 0.105 78);
+  --color-error: oklch(42% 0.16 28);
+  --color-code-bg: oklch(20.5% 0.045 260);
+  --color-code-fg: oklch(90% 0.018 250);
+  --color-code-keyword: oklch(78% 0.058 255);
+  --color-code-module: oklch(82% 0.07 6);
+  --color-code-number: oklch(80% 0.085 150);
+  --color-code-comment: oklch(70% 0.035 255);
+
+  --font-display: "STIX Two Text", "Times New Roman", serif;
+  --font-prose: "STIX Two Text", Georgia, serif;
+  --font-ui: "IBM Plex Sans", system-ui, sans-serif;
+  --font-data: "IBM Plex Mono", ui-monospace, monospace;
+}
+
+/* ── Fonts (self-hosted, latin subsets) ─────────────────────────── */
+@font-face {
+  font-family: "STIX Two Text";
+  font-style: normal;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/STIXTwoText-400-700-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "STIX Two Text";
+  font-style: italic;
+  font-weight: 400 700;
+  font-display: swap;
+  src: url("/fonts/STIXTwoText-400-700-italic.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/IBMPlexSans-400-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/IBMPlexSans-500-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Sans";
+  font-style: normal;
+  font-weight: 600;
+  font-display: swap;
+  src: url("/fonts/IBMPlexSans-600-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/IBMPlexMono-400-normal.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: italic;
+  font-weight: 400;
+  font-display: swap;
+  src: url("/fonts/IBMPlexMono-400-italic.woff2") format("woff2");
+}
+@font-face {
+  font-family: "IBM Plex Mono";
+  font-style: normal;
+  font-weight: 500;
+  font-display: swap;
+  src: url("/fonts/IBMPlexMono-500-normal.woff2") format("woff2");
+}
+
+/* Add variants based on LiveView classes */
+@custom-variant phx-click-loading (.phx-click-loading&, .phx-click-loading &);
+@custom-variant phx-submit-loading (.phx-submit-loading&, .phx-submit-loading &);
+@custom-variant phx-change-loading (.phx-change-loading&, .phx-change-loading &);
+
+/* Make LiveView wrapper divs transparent for layout */
+[data-phx-session], [data-phx-teleported-src] { display: contents }
+
+/* ── Base ───────────────────────────────────────────────────────── */
+body {
+  font-family: var(--font-ui);
+  background: var(--color-paper);
+  color: var(--color-ink);
+  -webkit-font-smoothing: antialiased;
+}
+
+/* Hand-written controls. The class names stay compact in HEEx, but no
+   component plugin owns their behavior or appearance. */
+.btn {
+  display: inline-flex;
+  min-block-size: 2.5rem;
+  align-items: center;
+  justify-content: center;
+  gap: 0.5rem;
+  border: 1px solid transparent;
+  border-radius: 0.25rem;
+  padding: 0.55rem 1rem;
+  font-weight: 500;
+  line-height: 1.2;
+  cursor: pointer;
+  transition: color 150ms ease, background-color 150ms ease, border-color 150ms ease;
+}
+.btn:hover { filter: brightness(0.94); }
+.btn:focus-visible,
+.select:focus-visible,
+.range:focus-visible,
+.toggle:focus-visible,
+.checkbox:focus-visible {
+  outline: 2px solid var(--color-model);
+  outline-offset: 2px;
+}
+.btn:disabled { cursor: not-allowed; opacity: 0.55; }
+.btn-sm { min-block-size: 2.25rem; padding: 0.4rem 0.75rem; }
+.btn-primary { background: var(--color-ink); color: var(--color-paper-raised); }
+.btn-outline {
+  border-color: var(--color-ink-soft);
+  background: transparent;
+  color: var(--color-ink);
+}
+.btn-ghost { background: transparent; color: var(--color-ink-soft); }
+
+.fieldset { display: grid; gap: 0.375rem; }
+.label { display: flex; align-items: center; gap: 0.5rem; color: var(--color-ink-soft); }
+.select {
+  min-block-size: 2.5rem;
+  border: 1px solid var(--color-grid);
+  border-radius: 0.25rem;
+  background: var(--color-paper-raised);
+  color: var(--color-ink);
+  padding: 0.5rem 2rem 0.5rem 0.75rem;
+}
+.select-sm { min-block-size: 2.25rem; padding-block: 0.375rem; }
+.select-error { border-color: var(--color-error); }
+
+.range {
+  inline-size: 100%;
+  accent-color: var(--color-model);
+  cursor: pointer;
+}
+.range-xs { min-block-size: 1.5rem; }
+.range-primary { accent-color: var(--color-model); }
+
+.toggle,
+.checkbox {
+  accent-color: var(--color-model);
+  cursor: pointer;
+}
+.toggle { inline-size: 2.5rem; block-size: 1.4rem; }
+.toggle-sm { inline-size: 2.1rem; block-size: 1.2rem; }
+
+.toast { position: fixed; z-index: 50; display: grid; gap: 0.75rem; padding: 1rem; }
+.toast-top { inset-block-start: 0; }
+.toast-end { inset-inline-end: 0; }
+.alert {
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  border: 1px solid var(--color-grid);
+  border-radius: 0.375rem;
+  background: var(--color-paper-raised);
+  padding: 0.75rem 1rem;
+  color: var(--color-ink);
+}
+.alert-info { border-color: color-mix(in oklch, var(--color-model) 55%, var(--color-grid)); }
+.alert-error { border-color: color-mix(in oklch, var(--color-error) 60%, var(--color-grid)); }
+
+/* Prose measure for the tutorial voice */
+.report-prose {
+  font-family: var(--font-prose);
+  font-size: 1.0625rem;
+  line-height: 1.7;
+  max-width: 68ch;
+}
+.report-prose strong { font-weight: 600; }
+.report-prose a {
+  color: var(--color-model);
+  text-decoration: underline;
+  text-underline-offset: 3px;
+}
+.report-prose a:hover { color: var(--color-ink); }
+.report-prose code {
+  font-family: var(--font-data);
+  font-size: 0.85em;
+  background: color-mix(in oklch, var(--color-grid) 60%, var(--color-paper));
+  padding: 0.1em 0.35em;
+  border-radius: 0.25rem;
+}
+
+/* ── Signature: figure captions & execution readouts ────────────── */
+.figure-caption {
+  font-family: var(--font-data);
+  font-size: 0.75rem;
+  line-height: 1.5;
+  color: var(--color-ink-soft);
+}
+.figure-caption .fig-no {
+  font-weight: 500;
+  color: var(--color-ink);
+}
+
+/* Execution badge: instrument readout */
+.exec-badge {
+  font-family: var(--font-data);
+  font-size: 0.6875rem;
+  letter-spacing: 0.02em;
+  color: var(--color-ink-soft);
+  border: 1px solid var(--color-grid);
+  background: var(--color-paper-raised);
+  border-radius: 9999px;
+  padding: 0.2rem 0.75rem;
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  white-space: nowrap;
+  max-width: 100%;
+  overflow: hidden;
+}
+.exec-badge .exec-dot {
+  width: 0.4rem;
+  height: 0.4rem;
+  border-radius: 9999px;
+  background: var(--color-truth);
+  flex-shrink: 0;
+}
+
+/* Redaction reveal for planted truths */
+.redacted {
+  position: relative;
+  display: inline-block;
+  max-width: 100%;
+  overflow: hidden;
+  word-break: break-all;
+  border-radius: 0.2rem;
+  background: var(--color-ink);
+  color: transparent;
+  user-select: none;
+  cursor: pointer;
+  transition: background 0.35s ease, color 0.35s ease;
+}
+.redacted.revealed {
+  background: color-mix(in oklch, var(--color-truth) 12%, transparent);
+  color: var(--color-truth);
+  user-select: text;
+  cursor: default;
+}
+
+/* Verdict cards use a full-border tint, never a side stripe. */
+.verdict-card {
+  --verdict-color: var(--color-ink-faint);
+  border: 1px solid color-mix(in oklch, var(--verdict-color) 48%, var(--color-grid));
+  background: color-mix(in oklch, var(--verdict-color) 5%, var(--color-paper-raised));
+}
+.verdict-card-lift { --verdict-color: var(--color-lift); }
+.verdict-card-truth { --verdict-color: var(--color-truth); }
+.verdict-card-warning { --verdict-color: var(--color-warning); }
+.verdict-card-neutral { --verdict-color: var(--color-ink-faint); }
+
+/* Line-draw animation on first render of a figure */
+@media (prefers-reduced-motion: no-preference) {
+  .draw-line {
+    stroke-dasharray: 2000;
+    stroke-dashoffset: 2000;
+    animation: draw-line 0.9s ease-out forwards;
+  }
+  @keyframes draw-line {
+    to { stroke-dashoffset: 0; }
+  }
+}
+
+/* Mantra strip */
+.mantra-step {
+  font-family: var(--font-data);
+  font-size: 0.6875rem;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+  color: var(--color-ink-faint);
+}
+.mantra-step.active { color: var(--color-lift); font-weight: 500; }
+
+/* Under-the-hood code blocks */
+.code-block {
+  font-family: var(--font-data);
+  font-size: 0.8125rem;
+  line-height: 1.6;
+  background: var(--color-code-bg);
+  color: var(--color-code-fg);
+  border-radius: 0.375rem;
+  padding: 1rem 1.25rem;
+  overflow-x: auto;
+}
+.code-block .tok-kw { color: var(--color-code-keyword); }
+.code-block .tok-mod { color: var(--color-code-module); }
+.code-block .tok-num { color: var(--color-code-number); }
+.code-block .tok-comment { color: var(--color-code-comment); font-style: italic; }
+
+@media (pointer: coarse) {
+  /* Touch target sizing for buttons, nav pills, and form controls */
+  .nav-pill,
+  .touch-target,
+  button[type="button"],
+  button[type="submit"],
+  select {
+    min-block-size: 2.75rem;
+  }
+
+  .nav-pill,
+  button[type="button"],
+  button[type="submit"] {
+    display: inline-flex;
+    align-items: center;
+    padding-inline: 1rem;
+  }
+
+  .touch-target {
+    min-inline-size: 2.75rem;
+    justify-content: center;
+  }
+
+  input[type="range"] {
+    min-block-size: 2.75rem;
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  ::before,
+  ::after {
+    animation-duration: 1ms !important;
+    animation-iteration-count: 1 !important;
+    scroll-behavior: auto !important;
+    transition-duration: 1ms !important;
+  }
+}

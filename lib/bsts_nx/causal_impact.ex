@@ -25,6 +25,7 @@ defmodule BstsNx.CausalImpact do
 
   alias BstsNx.Forward
   alias BstsNx.GibbsSampler
+  alias BstsNx.ModelBuilder
   alias BstsNx.Validation
   import BstsNx.Utils, only: [split_key_at: 2]
 
@@ -80,7 +81,7 @@ defmodule BstsNx.CausalImpact do
     # Fit Gibbs sampler on the pre-period data only to sample latent states and variances.
     # Use provided burn_in and thin options to control chain length.
     # Default initial state to first observation for faster convergence.
-    init_state = Keyword.get(opts, :initial_state, List.first(period.pre_data) || 0.0)
+    init_state = Keyword.get(opts, :initial_state, ModelBuilder.first_obs(period.pre_data))
     init_cov = Keyword.get(opts, :initial_cov, 1.0)
     process_var = Keyword.get(opts, :process_var, 1.0)
     obs_var_init = Keyword.get(opts, :obs_var, 1.0)

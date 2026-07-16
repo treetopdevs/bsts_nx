@@ -70,7 +70,7 @@ If you want users to consume the package before public Hex:
 1. Git dependency from a tagged commit:
 
 ```elixir
-{:bsts_nx, git: "https://github.com/Cleveland-Software-LLC/bsts_elixir.git", tag: "vX.Y.Z"}
+{:bsts_nx, git: "https://github.com/treetopdevs/bsts_nx.git", tag: "vX.Y.Z"}
 ```
 
 2. Private Hex org (when ready):

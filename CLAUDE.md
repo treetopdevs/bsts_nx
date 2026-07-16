@@ -97,3 +97,21 @@ optional lanes.
 Structured EMLX GPU runs are currently limited by missing linalg primitive
 coverage. Treat EMLX CPU, EXLA, and BinaryBackend as the practical fallback
 paths until those GPU primitives are available.
+
+## AI Tooling Reference (updated 2026-07-01)
+
+Current Claude model lineup (all active):
+
+| Model | ID | Context / Max out | Price (in/out per MTok) | Best for |
+|---|---|---|---|---|
+| Claude Fable 5 | `claude-fable-5` | 1M / 128K | $10 / $50 | Hardest long-horizon & agentic work (most capable) |
+| Claude Opus 4.8 | `claude-opus-4-8` | 1M / 128K | $5 / $25 | Default high-capability, autonomous work |
+| Claude Sonnet 5 | `claude-sonnet-5` | 1M / 128K | $3 / $15 ($2/$10 intro thru 2026-08-31) | Most coding/agentic work — near-Opus at lower cost |
+| Claude Haiku 4.5 | `claude-haiku-4-5` | 200K / 64K | $1 / $5 | Fast, cheap, simple tasks |
+
+Thinking/effort: Fable 5 / Sonnet 5 / Opus 4.8 use adaptive thinking (`thinking: {type: "adaptive"}`); set depth with `output_config.effort` (`low`…`high`/`xhigh`/`max` — `xhigh` is the sweet spot for coding/agentic). `budget_tokens`, `temperature`, `top_p`, and `top_k` are rejected (400) on these models. Sonnet 5 uses a new tokenizer (~30% more tokens than Sonnet 4.6) — re-baseline token budgets.
+
+CLI coding tools available for delegation / cross-checking:
+- **Claude Code** — primary agentic CLI (this). Fast Mode via `/fast` (Opus 4.8/4.7).
+- **Codex** (`/codex:*`, `codex` runtime) — GPT-based; rescue passes, second opinions, deep root-cause investigation.
+- **Antigravity / `agy`** (`/agy:*`, `agy` CLI) — Google Gemini-backed, recently re-added; delegate coding/research (`/agy:delegate`, `/agy:research`), review a diff (`/agy:review`), or generate images (`/agy:image`, Imagen).

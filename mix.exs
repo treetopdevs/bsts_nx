@@ -17,8 +17,8 @@ defmodule BstsNx.MixProject do
       name: "BstsNx",
       description: description(),
       package: package(),
-      source_url: "https://github.com/Cleveland-Software-LLC/bsts_elixir",
-      homepage_url: "https://github.com/Cleveland-Software-LLC/bsts_elixir",
+      source_url: "https://github.com/treetopdevs/bsts_nx",
+      homepage_url: "https://github.com/treetopdevs/bsts_nx",
       docs: docs(),
       elixirc_paths: elixirc_paths(Mix.env()),
       start_permanent: Mix.env() == :prod,
@@ -55,12 +55,22 @@ defmodule BstsNx.MixProject do
       licenses: ["LGPL-2.1-only"],
       maintainers: ["Cleveland Software LLC"],
       links: %{
-        "GitHub" => "https://github.com/Cleveland-Software-LLC/bsts_elixir",
+        "GitHub" => "https://github.com/treetopdevs/bsts_nx",
         "Docs" => "https://hexdocs.pm/bsts_nx"
       },
       files: [
         "lib",
-        "docs",
+        "docs/overview.md",
+        "docs/getting-started.md",
+        "docs/core-modeling.md",
+        "docs/causal-inference-and-attribution.md",
+        "docs/forecasting-and-applications.md",
+        "docs/synthetic-data-and-validation.md",
+        "docs/module-reference.md",
+        "docs/components.md",
+        "docs/causal-impact.md",
+        "docs/hex-publishing-checklist.md",
+        "docs/release-readiness-plan.md",
         "CHANGELOG.md",
         "mix.exs",
         "README.md",
@@ -97,12 +107,7 @@ defmodule BstsNx.MixProject do
         "docs/synthetic-data-and-validation.md",
         "docs/module-reference.md",
         "docs/components.md",
-        "docs/causal-impact.md",
-        "docs/reviews/bsts_nx_bayesian_review.md",
-        "docs/reviews/CODE_REVIEW.md",
-        "docs/reviews/cdx_code_review_2026-03-02.md",
-        "docs/reviews/cld_code_review.md",
-        "docs/reviews/cldd_code_review_2026-03-03.md"
+        "docs/causal-impact.md"
       ],
       groups_for_extras: [
         Guides: [
@@ -118,13 +123,6 @@ defmodule BstsNx.MixProject do
           "docs/module-reference.md",
           "docs/components.md",
           "docs/causal-impact.md"
-        ],
-        Reviews: [
-          "docs/reviews/bsts_nx_bayesian_review.md",
-          "docs/reviews/CODE_REVIEW.md",
-          "docs/reviews/cdx_code_review_2026-03-02.md",
-          "docs/reviews/cld_code_review.md",
-          "docs/reviews/cldd_code_review_2026-03-03.md"
         ]
       ],
       groups_for_modules: [

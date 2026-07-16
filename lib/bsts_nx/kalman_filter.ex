@@ -504,10 +504,23 @@ defmodule BstsNx.KalmanFilter do
             rank == 2 ->
               # Rank-2 tensors are static observation matrices by default.
               # This avoids misclassifying static multivariate H matrices when
-              # rows(H) == T by coincidence.
-              if obs_dim != 1 and len != obs_dim do
-                raise ArgumentError,
-                      "static observation matrix row count #{len} must match observation dimension #{obs_dim}"
+              # rows(H) == T by coincidence. The scalar time-varying case
+              # (len == t_len) is handled by the clause above, so by the time we
+              # reach here a scalar-observation static H must be a single {1, n}
+              # row; any other row count is ambiguous.
+              cond do
+                obs_dim == 1 and len != 1 ->
+                  raise ArgumentError,
+                        "rank-2 observation matrix with #{len} rows is ambiguous for " <>
+                          "#{t_len} scalar observations; pass a {1, n} row for a static H " <>
+                          "or a {#{t_len}, n} matrix for time-varying H"
+
+                obs_dim != 1 and len != obs_dim ->
+                  raise ArgumentError,
+                        "static observation matrix row count #{len} must match observation dimension #{obs_dim}"
+
+                true ->
+                  :ok
               end
 
               h_t = to_tensor(h)

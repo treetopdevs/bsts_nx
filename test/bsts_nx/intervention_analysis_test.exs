@@ -161,6 +161,30 @@ defmodule BstsNx.InterventionAnalysisTest do
       assert result.execution.method_used == :scalar_forecast_filter
     end
 
+    test "default initial state only uses the configured pre-period" do
+      config = %{pre_period: {3, 5}, post_period: {6, 7}}
+      opts = [method: :filter, q: 0.1, r: 0.1]
+      nan = Nx.to_number(Nx.Constants.nan())
+
+      low_prefix =
+        InterventionAnalysis.analyze(
+          [-1_000.0, -1_000.0, nan, 10.0, 10.0, 12.0, 12.0],
+          config,
+          opts
+        )
+
+      high_prefix =
+        InterventionAnalysis.analyze(
+          [1_000.0, 1_000.0, nan, 10.0, 10.0, 12.0, 12.0],
+          config,
+          opts
+        )
+
+      assert_in_delta low_prefix.summary.cumulative_effect.mean,
+                      high_prefix.summary.cumulative_effect.mean,
+                      1.0e-10
+    end
+
     test "method mcmc compatibility alias runs bayesian lane" do
       :rand.seed(:exsss, {510, 511, 512})
       pre = Enum.map(1..20, fn _ -> 50.0 + :rand.normal() end)
