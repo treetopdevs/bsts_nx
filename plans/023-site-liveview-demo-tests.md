@@ -179,13 +179,18 @@ prep consume. For instant-lane demos, call directly; for MCMC demos, tag
 `@tag :slow` and use the module's smallest workload. Pattern:
 
 ```elixir
+defp finite?(value) when is_number(value),
+  do: value == value and value not in [:infinity, :neg_infinity]
+
+defp finite?(_value), do: false
+
 test "Marketing.fast_lane/1 returns the shape the page consumes" do
   result = BstsSite.Demos.Marketing.fast_lane(<default args — read the module>)
 
   assert is_list(result.counterfactual_mean)
   assert length(result.band_lower) == length(result.counterfactual_mean)
   assert length(result.band_upper) == length(result.counterfactual_mean)
-  assert is_number(result.cumulative) and result.cumulative == result.cumulative
+  assert finite?(result.cumulative)
   assert %{elapsed_ms: _, method_used: _} = result.execution
   assert is_boolean(result.significant?)
 end
@@ -193,9 +198,10 @@ end
 
 Cover for each demo: (a) every key the LiveView/HEEx reads exists, (b) series
 that are plotted together have equal lengths, (c) numeric outputs pass an
-explicit finite check that rejects NaN and `:infinity`/`:neg_infinity`, (d) `execution.elapsed_ms` present where the exec
-badge is rendered. Include `Scenarios.hero/2` determinism (two calls, equal
-results) if plan 019 hasn't already added it.
+explicit finite check that rejects NaN and `:infinity`/`:neg_infinity`,
+(d) `execution.elapsed_ms` present where the exec badge is rendered. Include
+`Scenarios.hero/2` determinism (two calls, equal results) if plan 019 hasn't
+already added it.
 
 **Verify**: `cd site && mix test` (fast lane) and
 `cd site && mix test --include slow` (MCMC shapes) → 0 failures each.
