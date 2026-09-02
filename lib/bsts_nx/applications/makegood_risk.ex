@@ -137,12 +137,15 @@ defmodule BstsNx.Applications.MakegoodRisk do
   end
 
   defp normalize_exposure_weights!(weights, horizon) when is_list(weights) do
-    weights
-    |> Nx.tensor(type: {:f, 64})
-    |> normalize_exposure_weights!(horizon)
-  rescue
-    error in ArgumentError ->
-      raise ArgumentError, "exposure_weights must be numeric: #{Exception.message(error)}"
+    weights_tensor =
+      try do
+        Nx.tensor(weights, type: {:f, 64})
+      rescue
+        error in ArgumentError ->
+          raise ArgumentError, "exposure_weights must be numeric: #{Exception.message(error)}"
+      end
+
+    normalize_exposure_weights!(weights_tensor, horizon)
   end
 
   defp normalize_exposure_weights!(weights, horizon) do
