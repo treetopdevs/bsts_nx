@@ -271,21 +271,17 @@ defmodule BstsNx.Forecast do
   @spec conditional_expected_shortfall(t(), number()) :: [float()]
   def conditional_expected_shortfall(%__MODULE__{} = forecast, threshold) do
     threshold = normalize_finite_number!(threshold, :threshold)
+    type = Nx.type(forecast.draws)
+    threshold_t = Nx.tensor(threshold, type: type)
+    mask = Nx.less(forecast.draws, threshold_t)
+    counts = mask |> Nx.as_type({:f, 64}) |> Nx.sum(axes: [0])
 
-    forecast
-    |> draws_to_lists()
-    |> BstsNx.Utils.transpose_rows()
-    |> Enum.map(fn values ->
-      shortfalls =
-        for value <- values, value < threshold do
-          threshold - value
-        end
-
-      case shortfalls do
-        [] -> 0.0
-        _ -> Enum.sum(shortfalls) / length(shortfalls)
-      end
-    end)
+    threshold_t
+    |> Nx.subtract(forecast.draws)
+    |> Nx.multiply(Nx.as_type(mask, type))
+    |> Nx.sum(axes: [0])
+    |> Nx.divide(Nx.max(counts, 1.0))
+    |> Nx.to_flat_list()
   end
 
   defp rebuild(%__MODULE__{} = source, draws, opts) do
@@ -316,13 +312,16 @@ defmodule BstsNx.Forecast do
       raise ArgumentError, "forecast draws must be non-empty"
     end
 
-    draws
-    |> Nx.tensor(type: {:f, 64})
-    |> normalize_draws!()
-  rescue
-    e in ArgumentError ->
-      raise ArgumentError,
-            "forecast draws must be a rectangular numeric list: #{Exception.message(e)}"
+    draws_tensor =
+      try do
+        Nx.tensor(draws, type: {:f, 64})
+      rescue
+        error in ArgumentError ->
+          raise ArgumentError,
+                "forecast draws must be a rectangular numeric list: #{Exception.message(error)}"
+      end
+
+    normalize_draws!(draws_tensor)
   end
 
   defp normalize_draws!(other) do
@@ -361,12 +360,15 @@ defmodule BstsNx.Forecast do
   end
 
   defp normalize_horizon_vector!(values, horizon, name) when is_list(values) do
-    values
-    |> Nx.tensor(type: {:f, 64})
-    |> normalize_horizon_vector!(horizon, name)
-  rescue
-    e in ArgumentError ->
-      raise ArgumentError, "#{name} must be numeric: #{Exception.message(e)}"
+    values_tensor =
+      try do
+        Nx.tensor(values, type: {:f, 64})
+      rescue
+        error in ArgumentError ->
+          raise ArgumentError, "#{name} must be numeric: #{Exception.message(error)}"
+      end
+
+    normalize_horizon_vector!(values_tensor, horizon, name)
   end
 
   defp normalize_horizon_vector!(value, _horizon, name) do
