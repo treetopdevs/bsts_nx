@@ -158,12 +158,41 @@ BstsNx.Diagnostics.split_r_hat(Enum.map(1..200, fn _ -> :rand.normal() end))
 
 ## Forecasting APIs
 
-### `BstsNx.Forecaster`
+### `BstsNx.Forecast`
 
-Use case: probabilistic forecasting with trend/seasonal/regressor support.
+Use case: retain joint posterior trajectories and calculate quantiles, weighted totals, threshold probabilities, and expected shortfall without discarding cross-period dependence.
 
 ```elixir
-BstsNx.Forecaster.fit_predict(observations, 14, seasonality: 7, num_samples: 200)
+forecast = BstsNx.Forecast.new([[90.0, 105.0], [100.0, 115.0]])
+delivery = BstsNx.Forecast.weighted_sum(forecast, [1.0, 2.0])
+```
+
+### `BstsNx.Forecaster`
+
+Use case: probabilistic forecasting with trend, seasonality, regressors, known relative observation-variance weights, and optional joint posterior-draw output.
+
+```elixir
+fit =
+  BstsNx.Forecaster.fit(observations,
+    seasonality: 7,
+    observation_variance_weights: reliability_weights,
+    num_samples: 200
+  )
+
+BstsNx.Forecaster.predict(fit,
+  horizon: 14,
+  return: :both,
+  format: :tensors
+)
+```
+
+### `BstsNx.ObservationWeights`
+
+Use case: validate and apply the exact Gaussian prewhitening transformation used by measurement-weighted forecasting.
+
+```elixir
+{weighted_observations, weighted_spec} =
+  BstsNx.ObservationWeights.prewhiten(observations, spec, reliability_weights)
 ```
 
 ### `BstsNx.BCT.ARForecaster`
@@ -245,6 +274,22 @@ Use case: interrupted time-series evaluation for policy/regulatory interventions
 
 ```elixir
 BstsNx.Applications.PolicyEvaluator.evaluate(observations, intervention)
+```
+
+### `BstsNx.Applications.AudienceForecast`
+
+Use case: multiply aligned universe, PUT/HUT, and share posterior draws so audience uncertainty is propagated coherently.
+
+```elixir
+BstsNx.Applications.AudienceForecast.combine(viewing_forecast, share_forecast, universe)
+```
+
+### `BstsNx.Applications.MakegoodRisk`
+
+Use case: aggregate scheduled audience delivery and calculate underdelivery probability, expected shortfall, and conservative inventory from joint forecast draws.
+
+```elixir
+BstsNx.Applications.MakegoodRisk.evaluate(audience_forecast, exposure_weights, guarantee)
 ```
 
 ## Internal Module
