@@ -261,7 +261,8 @@ defmodule BstsNx.Forecaster do
             horizon,
             key,
             future_regressors,
-            future_variance_weights
+            future_variance_weights,
+            n_reg
           )
 
         :scalar ->
@@ -372,11 +373,12 @@ defmodule BstsNx.Forecaster do
     do: {spec, :structured}
 
   defp predict_structured(
-         %{posterior_samples: samples, spec: spec, n_regression_dims: n_reg},
+         %{posterior_samples: samples, spec: spec},
          horizon,
          base_key,
          future_regressors,
-         future_variance_weights
+         future_variance_weights,
+         n_reg
        ) do
     h_list = future_h(spec, horizon, future_regressors, n_reg)
 
