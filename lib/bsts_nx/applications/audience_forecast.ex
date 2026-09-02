@@ -108,12 +108,15 @@ defmodule BstsNx.Applications.AudienceForecast do
   end
 
   defp normalize_universe!(universe, num_draws, horizon) when is_list(universe) do
-    universe
-    |> Nx.tensor(type: {:f, 64})
-    |> normalize_universe!(num_draws, horizon)
-  rescue
-    error in ArgumentError ->
-      raise ArgumentError, "universe must be numeric: #{Exception.message(error)}"
+    universe_tensor =
+      try do
+        Nx.tensor(universe, type: {:f, 64})
+      rescue
+        error in ArgumentError ->
+          raise ArgumentError, "universe must be numeric: #{Exception.message(error)}"
+      end
+
+    normalize_universe!(universe_tensor, num_draws, horizon)
   end
 
   defp normalize_universe!(other, _num_draws, _horizon) do
