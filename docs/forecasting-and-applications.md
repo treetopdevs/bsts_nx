@@ -62,9 +62,26 @@ observation variance of a reference period whose weight is `1.0`.
 
 `BstsNx.Forecast` preserves dependence across future periods and provides
 quantiles, weighted sums, threshold probabilities, and shortfall measures.
-Convert a draw-bearing `BstsNx.Forecaster` result into this reusable form:
+Given previously fitted `put_fit` and `share_fit` models, generate compatible
+draw-bearing results and convert them into the reusable forecast form:
 
 ```elixir
+put_result =
+  BstsNx.Forecaster.predict(put_fit,
+    horizon: 14,
+    return: :both,
+    format: :tensors,
+    seed: 43
+  )
+
+share_result =
+  BstsNx.Forecaster.predict(share_fit,
+    horizon: 14,
+    return: :both,
+    format: :tensors,
+    seed: 44
+  )
+
 put_forecast = BstsNx.Forecast.new(put_result.draws, alpha: put_result.alpha)
 share_forecast = BstsNx.Forecast.new(share_result.draws, alpha: share_result.alpha)
 ```
