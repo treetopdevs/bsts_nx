@@ -21,5 +21,7 @@ defmodule BstsNx.ForecasterObservationWeightsMissingTest do
     assert forecast.num_draws == 3
     assert length(forecast.mean) == 2
     assert Enum.all?(forecast.draws, &(length(&1) == 2))
+    assert Enum.all?(forecast.mean, &(is_float(&1) and &1 == &1))
+    assert Enum.all?(List.flatten(forecast.draws), &(&1 == &1))
   end
 end
