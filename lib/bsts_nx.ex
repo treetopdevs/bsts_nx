@@ -17,6 +17,7 @@ defmodule BstsNx do
     * `BstsNx.CausalImpact` — Counterfactual-based causal inference
     * `BstsNx.Components` — Model building blocks (trend, seasonal, regression)
     * `BstsNx.Diagnostics` — MCMC convergence diagnostics (R-hat, ESS)
+    * `BstsNx.Forecast` — Joint posterior draws, summaries, and risk operations
 
   ## High-Level APIs
 
@@ -36,6 +37,8 @@ defmodule BstsNx do
     * `BstsNx.Applications.AnomalyDetector` — Anomaly detection with calibrated uncertainty
     * `BstsNx.Applications.PolicyEvaluator` — Interrupted time series for policy evaluation
     * `BstsNx.Applications.TVAttribution` — TV-to-web ad attribution
+    * `BstsNx.Applications.AudienceForecast` — PUT/HUT × share audience composition
+    * `BstsNx.Applications.MakegoodRisk` — Delivery and under-delivery risk from forecast draws
 
   ## Documentation Map
 
