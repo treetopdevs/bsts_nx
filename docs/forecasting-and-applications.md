@@ -56,7 +56,9 @@ forecast_result =
 
 The returned draw tensor has shape `{draw, horizon}`. Training and prediction
 use exact Gaussian prewhitening, so a weight of `4.0` represents four times the
-observation variance of a reference period whose weight is `1.0`.
+observation variance of a reference period whose weight is `1.0`. These are
+relative variance weights, not precision weights: larger values reduce an
+observation's influence, while smaller positive values increase it.
 
 ## 3. Joint draws, audience composition, and delivery risk
 
@@ -85,6 +87,9 @@ share_result =
 put_forecast = BstsNx.Forecast.new(put_result.draws, alpha: put_result.alpha)
 share_forecast = BstsNx.Forecast.new(share_result.draws, alpha: share_result.alpha)
 ```
+
+Use `return: :draws` instead of `:both` when only trajectories are needed; the
+draw-only path avoids computing and sorting unused marginal summaries.
 
 For television audience forecasting, combine aligned PUT/HUT and share draws
 instead of multiplying their marginal means:
