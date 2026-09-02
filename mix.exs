@@ -154,7 +154,9 @@ defmodule BstsNx.MixProject do
           BstsNx.RSidecar
         ],
         Forecasting: [
+          BstsNx.Forecast,
           BstsNx.Forecaster,
+          BstsNx.ObservationWeights,
           BstsNx.BCT.ARForecaster
         ],
         Applications: [
@@ -162,7 +164,9 @@ defmodule BstsNx.MixProject do
           BstsNx.Applications.MarketingLift,
           BstsNx.Applications.DemandForecaster,
           BstsNx.Applications.AnomalyDetector,
-          BstsNx.Applications.PolicyEvaluator
+          BstsNx.Applications.PolicyEvaluator,
+          BstsNx.Applications.AudienceForecast,
+          BstsNx.Applications.MakegoodRisk
         ],
         "Synthetic Data": [
           BstsNx.Synthetic.Generator,

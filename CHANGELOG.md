@@ -2,6 +2,7 @@
 
 ## Unreleased
 
+- Added measurement-weighted forecasting for known heteroskedastic observation reliability, with `R_t = sigma_r^2 * weight_t`, exact Gaussian prewhitening, future observation-variance weights, and backward-compatible joint posterior-draw output from `BstsNx.Forecaster`. Added `BstsNx.Forecast` for draw-preserving summaries and risk operations, plus audience composition and makegood-risk application helpers.
 - Added fully fused MCMC chains for the scalar and structured (non-spike-and-slab) Gibbs samplers: the Kalman filter, simulation smoother and variance resampling for the entire chain now run inside a single `Nx.Defn` while-loop. With a defn compiler configured (`Nx.Defn.global_default_options(compiler: EXLA)`), this collapses thousands of per-iteration dispatches into one compiled program (~19x faster scalar, ~9x faster structured in `mix bench.gibbs_fusion`). Fusion is enabled by default only when a defn compiler is configured; the `:fused` option on `sample/7`, `sample_general/5` and `sample_structured/4` overrides the default, and both paths produce identical draws for the same PRNG key.
 - Fixed an f32 precision round-trip in `Distributions.gamma_sample_defn/4` and `inv_gamma_sample_defn/4`: numeric (non-tensor) shape/scale parameters were truncated through an f32 tensor before the f64 cast, perturbing posterior parameters such as the structured sampler's observation-variance scale.
 - Added `mix bench.gibbs_fusion` comparing stepwise vs fused Gibbs chains per backend.
