@@ -198,13 +198,19 @@ defmodule BstsNx.Forward do
 
   @doc """
   Projects structured posterior samples into predictive means and standard deviations.
+
+  Each draw starts with zero conditional covariance and propagates in f64.
+  Observation variance is included, with a per-draw variance floor of 1e-12.
+  Between-draw variance uses the unbiased sample denominator, unlike
+  `baseline_moments_from_samples/3`, which retains terminal covariance and
+  reports observation noise separately.
   """
   @spec structured_moments_from_samples([sample()], map(), [Nx.t()] | Nx.t()) ::
           {[float()], [float()]}
   def structured_moments_from_samples(samples, spec, h_steps) do
-    h_rows = h_steps_rows(h_steps)
+    h_tensor = h_steps_tensor(h_steps)
 
-    if h_rows == [] do
+    if Nx.axis_size(h_tensor, 0) == 0 do
       {[], []}
     else
       samples
@@ -216,30 +222,88 @@ defmodule BstsNx.Forward do
         state_dim = Nx.axis_size(init_state, 0)
         zero_cov = Nx.broadcast(Nx.tensor(0.0, type: {:f, 64}), {state_dim, state_dim})
 
-        {_final_state, _final_cov, means_rev, vars_rev} =
-          Enum.reduce(h_rows, {init_state, zero_cov, [], []}, fn h_row,
-                                                                 {state, cov, means_acc, vars_acc} ->
-            next_state = Nx.dot(f, state)
-            next_cov = f |> Nx.dot(cov) |> Nx.dot(Nx.transpose(f)) |> Nx.add(q)
-            h_row_t = Nx.as_type(h_row, {:f, 64})
-            y_mean = Nx.dot(h_row_t, next_state) |> Nx.to_number()
-            h_mat = Nx.new_axis(h_row_t, 0)
+        {means, variances} = state_moments_defn(init_state, zero_cov, f, h_tensor, q)
 
-            proc_var =
-              h_mat
-              |> Nx.dot(next_cov)
-              |> Nx.dot(Nx.transpose(h_mat))
-              |> Nx.squeeze()
-              |> Nx.to_number()
-
-            y_var = max(proc_var + obs_var, 1.0e-12)
-            {next_state, next_cov, [y_mean | means_acc], [y_var | vars_acc]}
-          end)
-
-        %{means: Enum.reverse(means_rev), vars: Enum.reverse(vars_rev)}
+        %{
+          means: Nx.to_flat_list(means),
+          vars: Enum.map(Nx.to_flat_list(variances), &max(&1 + obs_var, 1.0e-12))
+        }
       end)
       |> aggregate_prediction_moments()
     end
+  end
+
+  @doc """
+  Projects retained samples into baseline means and state variances.
+
+  Future observation rows are explicit: a row represents one future step.
+  Unlike predictive moments, each draw starts from its retained terminal
+  `state_covs` entry (or zero when absent/empty), propagates in its terminal
+  state dtype, and clamps projected state variance at zero. Between-draw
+  variance uses the population denominator. Observation variance is averaged
+  and returned separately, without being added to state variance.
+
+  Empty future rows return an empty baseline. Nonempty rows require samples.
+  """
+  @spec baseline_moments_from_samples([sample()], map(), [Nx.t()] | Nx.t()) :: %{
+          mean: [float()],
+          variance: [float()],
+          obs_variance: float()
+        }
+  def baseline_moments_from_samples(_samples, _spec, []) do
+    %{mean: [], variance: [], obs_variance: 0.0}
+  end
+
+  def baseline_moments_from_samples([], _spec, _h_steps) do
+    raise ArgumentError, "baseline moments require non-empty samples"
+  end
+
+  def baseline_moments_from_samples(samples, spec, h_steps) do
+    baseline_moments(samples, spec, h_steps_tensor(h_steps))
+  end
+
+  defp baseline_moments(samples, spec, h_tensor) do
+    n_state = Nx.axis_size(spec.f, 0)
+
+    per_sample =
+      Enum.map(samples, fn sample ->
+        final_state = List.last(sample.states)
+
+        final_cov =
+          case sample do
+            %{state_covs: covs} when is_list(covs) and covs != [] ->
+              List.last(covs)
+
+            _ ->
+              Nx.broadcast(0.0, {n_state, n_state})
+          end
+
+        q_matrix = sample.q_matrix
+        obs_var = Nx.to_number(sample.obs_var)
+
+        {means, vars} = state_moments_defn(final_state, final_cov, spec.f, h_tensor, q_matrix)
+        vars = Nx.max(vars, 0.0)
+
+        {Nx.as_type(means, {:f, 64}), Nx.as_type(vars, {:f, 64}), obs_var}
+      end)
+
+    n = length(samples)
+    mean_tensors = Enum.map(per_sample, &elem(&1, 0))
+    var_tensors = Enum.map(per_sample, &elem(&1, 1))
+    obs_var_acc = Enum.reduce(per_sample, 0.0, fn {_, _, ov}, acc -> acc + ov end)
+
+    mean_stack = Nx.stack(mean_tensors)
+    var_stack = Nx.stack(var_tensors)
+    mean = Nx.mean(mean_stack, axes: [0])
+    mean_sq = Nx.mean(Nx.multiply(mean_stack, mean_stack), axes: [0])
+    process_var = Nx.mean(var_stack, axes: [0])
+    between_var = Nx.max(Nx.subtract(mean_sq, Nx.multiply(mean, mean)), 0.0)
+
+    %{
+      mean: Nx.to_flat_list(mean),
+      variance: between_var |> Nx.add(process_var) |> Nx.to_flat_list(),
+      obs_variance: obs_var_acc / n
+    }
   end
 
   @doc """
@@ -366,15 +430,37 @@ defmodule BstsNx.Forward do
     Nx.slice_along_axis(tensor, idx, 1, axis: 0) |> Nx.squeeze(axes: [0])
   end
 
-  defp h_steps_rows(h_steps) do
-    h_tensor = h_steps_tensor(h_steps)
-    n_steps = Nx.axis_size(h_tensor, 0)
+  defnp state_moments_defn(state, cov, f, h_steps, q_matrix) do
+    x0 = Nx.flatten(state)
+    type = Nx.type(x0)
+    p0 = Nx.as_type(cov, type)
+    f_t = Nx.as_type(f, type)
+    f_t_t = Nx.transpose(f_t)
+    q_t = Nx.as_type(q_matrix, type)
+    h_t = Nx.as_type(h_steps, type)
+    horizon = Nx.axis_size(h_t, 0)
+    state_dim = Nx.axis_size(h_t, 1)
+    zero = Nx.tensor(0.0, type: type)
+    means = Nx.broadcast(zero, {horizon})
+    variances = Nx.broadcast(zero, {horizon})
 
-    if n_steps == 0 do
-      []
-    else
-      Enum.map(0..(n_steps - 1), &Utils.take_time_slice_at(h_tensor, &1))
-    end
+    {_, means_out, variances_out, _, _, _, _, _, _} =
+      while {i = Nx.tensor(0, type: {:s, 64}), means_acc = means, vars_acc = variances, x = x0,
+             p = p0, f_in = f_t, f_trans = f_t_t, q_in = q_t, h_in = h_t},
+            i < horizon do
+        x_pred = Nx.dot(f_in, x)
+        p_pred = Nx.add(Nx.dot(Nx.dot(f_in, p), f_trans), q_in)
+        h_i = Nx.take(h_in, Nx.reshape(i, {1}), axis: 0) |> Nx.reshape({state_dim})
+        mean = Nx.dot(h_i, x_pred)
+        raw_variance = Nx.dot(h_i, Nx.dot(p_pred, h_i))
+
+        means_new = Nx.put_slice(means_acc, [i], Nx.reshape(mean, {1}))
+        vars_new = Nx.put_slice(vars_acc, [i], Nx.reshape(raw_variance, {1}))
+
+        {i + 1, means_new, vars_new, x_pred, p_pred, f_in, f_trans, q_in, h_in}
+      end
+
+    {means_out, variances_out}
   end
 
   defp h_steps_tensor([]), do: Nx.tensor([], type: {:f, 64}) |> Nx.reshape({0, 0})

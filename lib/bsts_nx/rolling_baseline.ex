@@ -28,9 +28,9 @@ defmodule BstsNx.RollingBaseline do
 
   alias BstsNx.Components
   alias BstsNx.Diagnostics
+  alias BstsNx.Forward
   alias BstsNx.GibbsSampler
   alias BstsNx.ModelSpec
-  import Nx.Defn
 
   @default_num_seasons 96
   @default_num_samples 200
@@ -254,51 +254,13 @@ defmodule BstsNx.RollingBaseline do
 
     h_series = build_h_for_counterfactual(spec.h, n_state, n_reg, post_regressors, horizon)
 
-    per_sample =
-      Enum.map(samples, fn sample ->
-        final_state = List.last(sample.states)
+    h_steps =
+      case h_series do
+        %Nx.Tensor{} = h_row -> List.duplicate(h_row, horizon)
+        h_list when is_list(h_list) -> h_list
+      end
 
-        final_cov =
-          case sample do
-            %{state_covs: covs} when is_list(covs) and covs != [] ->
-              List.last(covs)
-
-            _ ->
-              Nx.broadcast(0.0, {n_state, n_state})
-          end
-
-        q_matrix = sample.q_matrix
-        obs_var = Nx.to_number(sample.obs_var)
-
-        {means, vars} =
-          case h_series do
-            %Nx.Tensor{} = h_row ->
-              forward_simulate(final_state, final_cov, spec.f, h_row, q_matrix, horizon)
-
-            h_list when is_list(h_list) ->
-              forward_simulate_h(final_state, final_cov, spec.f, h_list, q_matrix, horizon)
-          end
-
-        {Nx.as_type(means, {:f, 64}), Nx.as_type(vars, {:f, 64}), obs_var}
-      end)
-
-    n = length(samples)
-    mean_tensors = Enum.map(per_sample, &elem(&1, 0))
-    var_tensors = Enum.map(per_sample, &elem(&1, 1))
-    obs_var_acc = Enum.reduce(per_sample, 0.0, fn {_, _, ov}, acc -> acc + ov end)
-
-    mean_stack = Nx.stack(mean_tensors)
-    var_stack = Nx.stack(var_tensors)
-    mean = Nx.mean(mean_stack, axes: [0])
-    mean_sq = Nx.mean(Nx.multiply(mean_stack, mean_stack), axes: [0])
-    process_var = Nx.mean(var_stack, axes: [0])
-    between_var = Nx.max(Nx.subtract(mean_sq, Nx.multiply(mean, mean)), 0.0)
-
-    %{
-      mean: Nx.to_flat_list(mean),
-      variance: between_var |> Nx.add(process_var) |> Nx.to_flat_list(),
-      obs_variance: obs_var_acc / n
-    }
+    Forward.baseline_moments_from_samples(samples, spec, h_steps)
   end
 
   @doc """
@@ -492,65 +454,6 @@ defmodule BstsNx.RollingBaseline do
   defp converged?(_r_hat, _ess), do: false
 
   # -- Private helpers --
-
-  defp forward_simulate(state, cov, f, h_row, q_matrix, horizon) do
-    h_vec = Nx.flatten(h_row)
-    h_steps = Nx.broadcast(h_vec, {horizon, Nx.axis_size(h_vec, 0)})
-    forward_simulate_defn(state, cov, f, h_steps, q_matrix)
-  end
-
-  # Forward-simulates with per-step time-varying H (list of {1, n_state} tensors).
-  defp forward_simulate_h(state, cov, f, h_list, q_matrix, _horizon) do
-    h_steps = h_steps_tensor(h_list)
-    forward_simulate_defn(state, cov, f, h_steps, q_matrix)
-  end
-
-  defp h_steps_tensor(h_list) do
-    stacked = Nx.stack(h_list)
-    horizon = Nx.axis_size(stacked, 0)
-
-    case Nx.rank(stacked) do
-      2 ->
-        stacked
-
-      3 ->
-        Nx.reshape(stacked, {horizon, Nx.axis_size(stacked, 2)})
-    end
-  end
-
-  defnp forward_simulate_defn(state, cov, f, h_steps, q_matrix) do
-    x0 = Nx.flatten(state)
-    type = Nx.type(x0)
-    p0 = Nx.as_type(cov, type)
-    f_t = Nx.as_type(f, type)
-    f_t_t = Nx.transpose(f_t)
-    q_t = Nx.as_type(q_matrix, type)
-    h_t = Nx.as_type(h_steps, type)
-    horizon = Nx.axis_size(h_t, 0)
-    state_dim = Nx.axis_size(h_t, 1)
-    zero = Nx.tensor(0.0, type: type)
-    means = Nx.broadcast(zero, {horizon})
-    variances = Nx.broadcast(zero, {horizon})
-
-    {_, means_out, variances_out, _, _, _, _, _, _} =
-      while {i = Nx.tensor(0, type: {:s, 64}), means_acc = means, vars_acc = variances, x = x0,
-             p = p0, f_in = f_t, f_trans = f_t_t, q_in = q_t, h_in = h_t},
-            i < horizon do
-        x_pred = Nx.dot(f_in, x)
-        p_pred = Nx.add(Nx.dot(Nx.dot(f_in, p), f_trans), q_in)
-        h_i = Nx.take(h_in, Nx.reshape(i, {1}), axis: 0) |> Nx.reshape({state_dim})
-        mean = Nx.dot(h_i, x_pred)
-        raw_variance = Nx.dot(h_i, Nx.dot(p_pred, h_i))
-        variance = Nx.select(Nx.less(raw_variance, zero), zero, raw_variance)
-
-        means_new = Nx.put_slice(means_acc, [i], Nx.reshape(mean, {1}))
-        vars_new = Nx.put_slice(vars_acc, [i], Nx.reshape(variance, {1}))
-
-        {i + 1, means_new, vars_new, x_pred, p_pred, f_in, f_trans, q_in, h_in}
-      end
-
-    {means_out, variances_out}
-  end
 
   # Builds the H observation matrix/series for counterfactual forward simulation.
   # Returns either a static {1, n_state} tensor or a list of {1, n_state} tensors.
