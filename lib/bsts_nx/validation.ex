@@ -12,11 +12,136 @@ defmodule BstsNx.Validation do
   5. **Effect stability** — sensitivity to window perturbation
   6. **Assess** — aggregate pass/warn/fail verdicts
 
+  Use `evaluate/1` to assemble evidence and verdicts in one call, or use the
+  individual checks below when only a single statistic is needed.
+
   The first three functions operate on Nx tensors directly. The placebo and
   stability functions accept callback functions so callers can plug in any
   estimator (Kalman filter, seasonal regression, etc.) without this module
   depending on those implementations.
   """
+
+  @doc """
+  Evaluates model-quality evidence and returns details, residuals, and verdicts.
+
+  The request requires `:actual` and `:baseline` rank-1 Nx tensors of equal
+  length and `:indices`, a list of zero-based positions evaluated in the given
+  order. Prediction error and Durbin-Watson are always requested; the existing
+  checks return nil when there are too few indices.
+
+  Optional request entries (omitted or nil means skipped):
+
+    * `:coverage` — a map with `:state_variances` and `:obs_variance`, plus
+      optional `:h` (default 1.0) and `:confidence_level` (default 0.95).
+      These have the same meanings as `coverage/7`. Supplied variance and h
+      shapes, scalar observation variance, and confidence range are checked
+      even when evaluation indices are empty.
+    * `:placebo` — a map with `:sessions`, `:on_air_indices`, and
+      `:estimate_fn`, as accepted by `placebo_test/3`. Its indices are separate
+      from the evaluation indices and remain zero-based.
+    * `:effect_stability` — a map with `:main_lift`, `:estimate_at_window_fn`,
+      `:window`, and optional `:delta` (default 5), as in `effect_stability/4`.
+
+  Refits run synchronously: placebo at most once (subject to its existing
+  short-period rule), then stability twice. Callback exceptions propagate;
+  this function does not select, retry, or replace an estimator. Supplied
+  configurations must contain their required keys; they are never silently
+  treated as skipped.
+
+  Returns `%{details: map, verdicts: map, residuals: tensor}`. Details always
+  contain the five check names; skipped evidence is nil and its verdict is
+  `:skip`. Verdicts use `assess/1` unchanged and do not establish release
+  readiness. Residuals cover the entire input, not just the selected indices.
+  """
+  @spec evaluate(map()) :: %{details: map(), verdicts: map(), residuals: Nx.t()}
+  def evaluate(%{actual: actual, baseline: baseline, indices: indices} = request) do
+    validate_evaluation_inputs!(actual, baseline, indices)
+
+    residuals = Nx.subtract(actual, baseline)
+    prediction = prediction_error(actual, baseline, indices)
+    coverage = evaluate_coverage(request[:coverage], actual, baseline, indices)
+    dw = durbin_watson(residuals, indices)
+    placebo = evaluate_placebo(request[:placebo])
+    stability = evaluate_stability(request[:effect_stability])
+
+    details = %{
+      prediction_error: prediction,
+      coverage: coverage,
+      durbin_watson: dw,
+      placebo: placebo,
+      effect_stability: stability
+    }
+
+    %{details: details, verdicts: assess(details), residuals: residuals}
+  end
+
+  defp validate_evaluation_inputs!(actual, baseline, indices) do
+    unless Nx.rank(actual) == 1 and Nx.shape(actual) == Nx.shape(baseline) do
+      raise ArgumentError, "actual and baseline must be rank-1 tensors of equal length"
+    end
+
+    count = Nx.size(actual)
+
+    unless is_list(indices) and
+             Enum.all?(indices, &(is_integer(&1) and &1 >= 0 and &1 < count)) do
+      raise ArgumentError, "indices must be zero-based positions within actual and baseline"
+    end
+  end
+
+  defp evaluate_coverage(nil, _actual, _baseline, _indices), do: nil
+
+  defp evaluate_coverage(config, actual, baseline, indices) do
+    state_variances = Map.fetch!(config, :state_variances)
+    obs_variance = Map.fetch!(config, :obs_variance)
+    h = Map.get(config, :h, 1.0)
+    confidence_level = Map.get(config, :confidence_level, 0.95)
+
+    unless match?(%Nx.Tensor{}, state_variances) and
+             Nx.shape(state_variances) == Nx.shape(actual) do
+      raise ArgumentError, "coverage state_variances must match the actual vector shape"
+    end
+
+    unless evaluation_scalar?(obs_variance) do
+      raise ArgumentError, "coverage obs_variance must be a number or scalar tensor"
+    end
+
+    unless evaluation_scalar?(h) or
+             (match?(%Nx.Tensor{}, h) and Nx.shape(h) == Nx.shape(actual)) do
+      raise ArgumentError, "coverage h must be scalar or match the actual vector shape"
+    end
+
+    unless is_number(confidence_level) and confidence_level > 0 and confidence_level < 1 do
+      raise ArgumentError, "coverage confidence_level must be in (0, 1)"
+    end
+
+    coverage(actual, baseline, state_variances, obs_variance, indices, h,
+      confidence_level: confidence_level
+    )
+  end
+
+  defp evaluation_scalar?(%Nx.Tensor{} = tensor), do: Nx.rank(tensor) == 0
+  defp evaluation_scalar?(value), do: is_number(value)
+
+  defp evaluate_placebo(nil), do: nil
+
+  defp evaluate_placebo(config) do
+    placebo_test(
+      Map.fetch!(config, :sessions),
+      Map.fetch!(config, :on_air_indices),
+      Map.fetch!(config, :estimate_fn)
+    )
+  end
+
+  defp evaluate_stability(nil), do: nil
+
+  defp evaluate_stability(config) do
+    effect_stability(
+      Map.fetch!(config, :main_lift),
+      Map.fetch!(config, :estimate_at_window_fn),
+      Map.fetch!(config, :window),
+      Map.get(config, :delta, 5)
+    )
+  end
 
   @relative_effect_epsilon 1.0e-10
 

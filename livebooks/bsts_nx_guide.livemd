@@ -1899,7 +1899,8 @@ post_obs_list = Enum.slice(obs, 96..143)
 
 {rolling_cf, rolling_fit} =
   RollingBaseline.fit_and_predict(
-    Enum.take(obs, 96), 48,
+    Enum.take(obs, 96),
+    48,
     num_seasons: 24,
     num_samples: 30,
     burn_in: 15,
@@ -1911,51 +1912,44 @@ baseline_t = Nx.tensor(rolling_cf.mean)
 state_var_t = Nx.tensor(rolling_cf.variance)
 indices = Enum.to_list(0..(length(post_obs_list) - 1))
 
-# 1. Prediction error
-pred_err = Validation.prediction_error(actual_t, baseline_t, indices)
-
-# 2. Coverage
-coverage = Validation.coverage(actual_t, baseline_t, state_var_t, rolling_cf.obs_variance, indices)
-
-# 3. Durbin-Watson (residual autocorrelation)
-residuals = Nx.subtract(actual_t, baseline_t)
-dw = Validation.durbin_watson(residuals, indices)
-
-# 4. Placebo test
 estimate_fn = fn sessions, idxs ->
   vals = Enum.map(idxs, &Enum.at(sessions, &1))
   lift = Enum.sum(vals) - length(vals) * (Enum.sum(sessions) / length(sessions))
   sd = max(abs(lift) * 0.1, 1.0)
-  %{lift_sessions: lift, lift_pct: lift / max(Enum.sum(sessions), 1.0),
-    lift_ci95: %{lower: lift - 1.96 * sd, upper: lift + 1.96 * sd, sd: sd}}
+
+  %{
+    lift_sessions: lift,
+    lift_pct: lift / max(Enum.sum(sessions), 1.0),
+    lift_ci95: %{lower: lift - 1.96 * sd, upper: lift + 1.96 * sd, sd: sd}
+  }
 end
 
-placebo = Validation.placebo_test(post_obs_list, Enum.to_list(5..12), estimate_fn)
-
-# 5. Effect stability
-stability =
-  Validation.effect_stability(
-    summary_structured.cumulative_effect.mean,
-    fn window ->
-      h = max(1, div(window, 60))
-      post_slice = Enum.take(post_obs_list, h)
-      base_slice = Enum.take(counterfactual_mean, h)
-      Enum.zip(post_slice, base_slice) |> Enum.reduce(0.0, fn {a, b}, acc -> acc + (a - b) end)
-    end,
-    120, 30
-  )
-
-# Aggregate assessment
-assessment =
-  Validation.assess(%{
-    prediction_error: pred_err,
-    coverage: coverage,
-    durbin_watson: dw,
-    placebo: placebo,
-    effect_stability: stability
+evaluation =
+  Validation.evaluate(%{
+    actual: actual_t,
+    baseline: baseline_t,
+    indices: indices,
+    coverage: %{state_variances: state_var_t, obs_variance: rolling_cf.obs_variance},
+    placebo: %{
+      sessions: post_obs_list,
+      on_air_indices: Enum.to_list(5..12),
+      estimate_fn: estimate_fn
+    },
+    effect_stability: %{
+      main_lift: summary_structured.cumulative_effect.mean,
+      estimate_at_window_fn: fn window ->
+        h = max(1, div(window, 60))
+        post_slice = Enum.take(post_obs_list, h)
+        base_slice = Enum.take(counterfactual_mean, h)
+        Enum.zip(post_slice, base_slice) |> Enum.reduce(0.0, fn {a, b}, acc -> acc + (a - b) end)
+      end,
+      window: 120,
+      delta: 30
+    }
   })
 
-release_ready? = Enum.all?(assessment, fn {_k, v} -> v in [:pass, :skip] end)
+assessment = evaluation.verdicts
+checks_satisfied? = Enum.all?(assessment, fn {_k, v} -> v in [:pass, :skip] end)
 ```
 
 ```elixir
@@ -1970,7 +1964,8 @@ Kino.Markdown.new("""
 | Placebo | Does the method find false effects in null periods? | #{Map.get(assessment, :placebo, :skip)} |
 | Stability | Does the effect estimate stabilize? | #{Map.get(assessment, :effect_stability, :skip)} |
 
-**Release ready?** #{if release_ready?, do: "Yes ✓ — all checks pass", else: "No ✗ — investigate failing checks before publishing"}
+**Requested checks satisfied?** #{if checks_satisfied?, do: "Yes — requested checks pass or were skipped", else: "No — investigate warnings and failures"}
+Skipped checks supply no evidence; this is not a release-readiness decision.
 """)
 ```
 

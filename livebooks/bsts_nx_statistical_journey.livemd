@@ -1722,18 +1722,13 @@ This section runs five diagnostic checks:
 
 5. **Effect stability**: Check whether the cumulative effect estimate changes dramatically as you extend the post-period window. A stable effect that accumulates steadily is more credible than one that swings wildly with each additional hour.
 
-The `Validation.assess/1` function aggregates these checks into pass/fail verdicts. A result is "release-ready" only if all checks pass.
+The `Validation.evaluate/1` function assembles these checks and their verdicts. Skipped checks supply no evidence; these model-quality checks alone do not establish release readiness.
 
 ```elixir
 actual_t = Nx.tensor(post_obs)
 baseline_t = Nx.tensor(rolling_cf.mean)
 state_var_t = Nx.tensor(rolling_cf.variance)
 indices = Enum.to_list(0..(length(post_obs) - 1))
-
-pred_err = Validation.prediction_error(actual_t, baseline_t, indices)
-coverage = Validation.coverage(actual_t, baseline_t, state_var_t, rolling_cf.obs_variance, indices)
-residuals = Nx.subtract(actual_t, baseline_t)
-dw = Validation.durbin_watson(residuals, indices)
 
 estimate_fn = fn sessions, idxs ->
   vals = Enum.map(idxs, &Enum.at(sessions, &1))
@@ -1747,40 +1742,31 @@ estimate_fn = fn sessions, idxs ->
   }
 end
 
-placebo = Validation.placebo_test(post_obs, Enum.to_list(5..12), estimate_fn)
+evaluation =
+  Validation.evaluate(%{
+    actual: actual_t,
+    baseline: baseline_t,
+    indices: indices,
+    coverage: %{state_variances: state_var_t, obs_variance: rolling_cf.obs_variance},
+    placebo: %{sessions: post_obs, on_air_indices: Enum.to_list(5..12), estimate_fn: estimate_fn},
+    effect_stability: %{
+      main_lift: summary_structured.cumulative_effect.mean,
+      estimate_at_window_fn: fn window ->
+        h = max(1, div(window, 60))
 
-stability =
-  Validation.effect_stability(
-    summary_structured.cumulative_effect.mean,
-    fn window ->
-      h = max(1, div(window, 60))
-
-      post_slice = Enum.take(post_obs, h)
-      base_slice = Enum.take(counterfactual_mean, h)
-      Enum.zip(post_slice, base_slice) |> Enum.reduce(0.0, fn {a, b}, acc -> acc + (a - b) end)
-    end,
-    120,
-    30
-  )
-
-assessment =
-  Validation.assess(%{
-    prediction_error: pred_err,
-    coverage: coverage,
-    durbin_watson: dw,
-    placebo: placebo,
-    effect_stability: stability
+        post_slice = Enum.take(post_obs, h)
+        base_slice = Enum.take(counterfactual_mean, h)
+        Enum.zip(post_slice, base_slice) |> Enum.reduce(0.0, fn {a, b}, acc -> acc + (a - b) end)
+      end,
+      window: 120,
+      delta: 30
+    }
   })
 
-%{
-  prediction_error: pred_err,
-  coverage: coverage,
-  durbin_watson: dw,
-  placebo: placebo,
-  stability: stability,
-  assessment: assessment,
-  release_ready?: Enum.all?(assessment, fn {_k, v} -> v in [:pass, :skip] end)
-}
+assessment = evaluation.verdicts
+checks_satisfied? = Enum.all?(assessment, fn {_k, v} -> v in [:pass, :skip] end)
+
+%{details: evaluation.details, assessment: assessment, checks_satisfied?: checks_satisfied?}
 ```
 
 ### Calibration: can the method recover a known lift?
