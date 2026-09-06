@@ -98,6 +98,139 @@ defmodule BstsNx.Applications.DemandForecasterTest do
     end
   end
 
+  describe "Forecaster compatibility" do
+    test "preserves demand priors, multiple seasonalities, and constant regressor columns" do
+      observations = Enum.map(1..12, fn t -> 20.0 + t / 2 + rem(t, 3) end)
+
+      for {seasonality, regressors, num_samples} <- [
+            {nil, nil, 1},
+            {[3, 4], nil, 4},
+            {nil,
+             %{
+               training: Enum.map(1..12, fn t -> [t / 12, 1.0] end),
+               future: [[2.0, 3.0], [3.0, 4.0]]
+             }, 4}
+          ] do
+        opts = [
+          horizon: 2,
+          seasonality: seasonality,
+          regressors: regressors,
+          num_samples: num_samples,
+          burn_in: 1,
+          thin: 2,
+          alpha: 0.2,
+          seed: 42
+        ]
+
+        spec =
+          BstsNx.Components.local_linear_trend_spec(
+            initial_level: hd(observations),
+            initial_cov_level: 10.0,
+            var_level: 0.1,
+            var_slope: 0.01
+          )
+
+        spec =
+          Enum.reduce(List.wrap(seasonality), spec, fn period, spec ->
+            BstsNx.Components.compose_specs(spec, BstsNx.Components.seasonal_spec(period))
+          end)
+
+        {spec, training, future} =
+          case regressors do
+            nil ->
+              {spec, nil, nil}
+
+            %{training: training, future: future} ->
+              {BstsNx.Components.compose_specs(
+                 spec,
+                 BstsNx.Components.regression_spec(Nx.tensor(training))
+               ), training, future}
+          end
+
+        keys = Nx.Random.split(Nx.Random.key(42), parts: 2)
+
+        fit =
+          BstsNx.Forecaster.fit(observations,
+            model_spec: spec,
+            regressors: training,
+            num_samples: num_samples,
+            burn_in: 1,
+            thin: 2,
+            key: BstsNx.Utils.split_key_at(keys, 0)
+          )
+
+        expected =
+          BstsNx.Forecaster.predict(fit,
+            horizon: 2,
+            alpha: 0.2,
+            future_regressors: future,
+            key: BstsNx.Utils.split_key_at(keys, 1)
+          )
+
+        {actual, decomposition} = DemandForecaster.forecast_with_decomposition(observations, opts)
+
+        assert Map.keys(actual) |> Enum.sort() ==
+                 Enum.sort([:mean, :sd, :lower, :upper, :horizon, :alpha, :components])
+
+        assert actual.components == nil
+        assert actual.horizon == 2
+        assert actual.alpha == 0.2
+
+        for field <- [:mean, :sd, :lower, :upper] do
+          assert length(actual[field]) == length(expected[field])
+
+          for {actual_value, expected_value} <- Enum.zip(actual[field], expected[field]) do
+            assert_in_delta actual_value, expected_value, 1.0e-9
+          end
+        end
+
+        assert decomposition == BstsNx.Forecaster.decompose(fit)
+      end
+    end
+
+    test "explicit key wins over seed and unrelated forecasting options stay ignored" do
+      observations = Enum.map(1..8, &(&1 * 1.0))
+      opts = [horizon: 2, num_samples: 2, burn_in: 0, seed: 42]
+      expected = DemandForecaster.forecast(observations, opts)
+
+      actual =
+        DemandForecaster.forecast(
+          observations,
+          opts ++
+            [
+              key: Nx.Random.key(42),
+              return: :draws,
+              format: :tensors,
+              observation_variance_weights: :invalid,
+              future_observation_variance_weights: :invalid
+            ]
+        )
+
+      assert actual == expected
+      assert DemandForecaster.forecast(observations, Keyword.put(opts, :seed, 99)) != expected
+
+      assert DemandForecaster.forecast(
+               observations,
+               opts |> Keyword.put(:seed, 99) |> Keyword.put(:key, Nx.Random.key(42))
+             ) == expected
+    end
+
+    test "sample count and model errors retain their precedence" do
+      assert_raise ArgumentError, ~r/num_samples/, fn ->
+        DemandForecaster.forecast([1.0, 2.0], horizon: 1, num_samples: 0, seasonality: 1)
+      end
+
+      assert_raise ArgumentError, ~r/future regressors columns/, fn ->
+        DemandForecaster.forecast([1.0, 2.0],
+          horizon: 1,
+          num_samples: 1,
+          burn_in: -1,
+          regressors: %{training: [[1.0], [2.0]], future: [[1.0, 2.0]]}
+        )
+      end
+    end
+  end
+
   describe "safety_stock/2" do
     test "computes safety stock from forecast" do
       forecast = %{

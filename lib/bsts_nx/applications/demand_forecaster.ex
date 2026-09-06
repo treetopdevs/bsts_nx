@@ -57,8 +57,6 @@ defmodule BstsNx.Applications.DemandForecaster do
 
   alias BstsNx.Components
   alias BstsNx.Forecaster
-  alias BstsNx.Forward
-  alias BstsNx.GibbsSampler
   alias BstsNx.ModelBuilder
   alias BstsNx.Validation
   import BstsNx.Utils, only: [split_key_at: 2]
@@ -94,7 +92,7 @@ defmodule BstsNx.Applications.DemandForecaster do
   """
   @spec forecast([number()], keyword()) :: forecast_result()
   def forecast(observations, opts \\ []) do
-    {forecast_result, _samples, _spec, _obs_list} = do_forecast(observations, opts)
+    {forecast_result, _fit} = do_forecast(observations, opts)
     Map.put(forecast_result, :components, nil)
   end
 
@@ -109,15 +107,8 @@ defmodule BstsNx.Applications.DemandForecaster do
   @spec forecast_with_decomposition([number()], keyword()) ::
           {forecast_result(), map()}
   def forecast_with_decomposition(observations, opts) do
-    {forecast_result, samples, spec, obs_list} = do_forecast(observations, opts)
+    {forecast_result, fit_result} = do_forecast(observations, opts)
     forecast_result = Map.put(forecast_result, :components, nil)
-
-    fit_result = %{
-      posterior_samples: samples,
-      spec: spec,
-      training_length: length(obs_list),
-      method: :structured
-    }
 
     decomp = Forecaster.decompose(fit_result) || %{fitted: [], states: []}
 
@@ -234,24 +225,28 @@ defmodule BstsNx.Applications.DemandForecaster do
     regressors = Keyword.get(opts, :regressors)
     seasonality = Keyword.get(opts, :seasonality)
 
-    {spec, future_h} = build_demand_model(obs_list, horizon, seasonality, regressors)
+    {spec, training_regressors, future_regressors} =
+      build_demand_model(obs_list, horizon, seasonality, regressors)
 
-    burn_in = Keyword.get(opts, :burn_in, div(num_samples, 2))
-
-    sampler_opts =
+    fit_opts =
       opts
-      |> Keyword.take([:thin])
+      |> Keyword.take([:num_samples, :burn_in, :thin])
+      |> Keyword.put(:model_spec, spec)
+      # Supply the declared columns, including constant training regressors.
+      |> Keyword.put(:regressors, training_regressors)
       |> Keyword.put(:key, sampler_key)
-      |> Keyword.put(:burn_in, burn_in)
 
-    samples = GibbsSampler.sample_structured(obs_list, spec, num_samples, sampler_opts)
+    fit_result = Forecaster.fit(obs_list, fit_opts)
 
-    h_steps = resolve_future_h(spec, future_h, horizon, Nx.axis_size(spec.f, 0))
-    trajectories = Forward.posterior_structured_trajectories(samples, spec, h_steps, forecast_key)
+    result =
+      Forecaster.predict(fit_result,
+        horizon: horizon,
+        alpha: alpha,
+        future_regressors: future_regressors,
+        key: forecast_key
+      )
 
-    result = aggregate(trajectories, horizon, alpha)
-
-    {result, samples, spec, obs_list}
+    {result, fit_result}
   end
 
   defp build_demand_model(obs_list, horizon, seasonality, regressors) do
@@ -285,7 +280,7 @@ defmodule BstsNx.Applications.DemandForecaster do
     # Add regressors if provided
     case regressors do
       nil ->
-        {spec, nil}
+        {spec, nil, nil}
 
       %{training: training, future: future} ->
         train_t = ensure_tensor(training)
@@ -313,62 +308,8 @@ defmodule BstsNx.Applications.DemandForecaster do
         reg_spec = Components.regression_spec(train_t)
         combined = Components.compose_specs(spec, reg_spec)
 
-        # Build future H using shared helper
-        future_h = ModelBuilder.build_future_h(combined, future_t, p)
-
-        {combined, future_h}
+        {combined, train_t, future_t}
     end
-  end
-
-  defp resolve_future_h(_spec, future_h, _horizon, _n_state) when is_list(future_h), do: future_h
-
-  defp resolve_future_h(spec, nil, horizon, _n_state) do
-    # No future regressors — use static H
-    h =
-      case spec.h do
-        list when is_list(list) -> List.last(list)
-        %Nx.Tensor{} = t -> t
-      end
-
-    List.duplicate(h, horizon)
-  end
-
-  defp aggregate(trajectories, horizon, alpha) do
-    n = length(trajectories)
-
-    # Transpose: from list-of-trajectories to list-of-timesteps.
-    # Enum.zip_with/2 is O(horizon * n) vs O(horizon² * n) with Enum.at.
-    per_step_values =
-      if n == 0,
-        do: List.duplicate([], horizon),
-        else: Enum.zip_with(trajectories, & &1)
-
-    per_step =
-      Enum.map(per_step_values, fn vals ->
-        vals = Enum.sort(vals)
-
-        mean = Enum.sum(vals) / n
-
-        sd =
-          if n < 2 do
-            0.0
-          else
-            ss = Enum.reduce(vals, 0.0, fn v, acc -> acc + (v - mean) * (v - mean) end)
-            :math.sqrt(ss / (n - 1))
-          end
-
-        {lower, upper} = BstsNx.Utils.percentile_interval(vals, n, alpha)
-        {mean, sd, lower, upper}
-      end)
-
-    %{
-      mean: Enum.map(per_step, &elem(&1, 0)),
-      sd: Enum.map(per_step, &elem(&1, 1)),
-      lower: Enum.map(per_step, &elem(&1, 2)),
-      upper: Enum.map(per_step, &elem(&1, 3)),
-      horizon: horizon,
-      alpha: alpha
-    }
   end
 
   defp ensure_tensor(v), do: ModelBuilder.ensure_tensor(v)
