@@ -281,15 +281,23 @@ defmodule BstsSite.Demos.Diagnostics do
 
     alias BstsNx.Validation
 
-    verdicts =
-      Validation.assess(%{
-        prediction_error: Validation.prediction_error(actual, baseline, pre_idx),
-        coverage: Validation.coverage(actual, baseline, state_vars, obs_var, pre_idx),
-        durbin_watson: Validation.durbin_watson(residuals, pre_idx),
+    evaluation =
+      Validation.evaluate(%{
+        actual: actual_t,
+        baseline: baseline_t,
+        indices: pre_idx,
+        coverage: %{state_variances: state_vars_t, obs_variance: obs_var},
         # both callbacks re-fit the model — a fake window, a nudged window
-        placebo: Validation.placebo_test(observations, post_idx, &placebo_fit/2),
-        effect_stability: Validation.effect_stability(rate, &rate_at/1, 30, 5)
+        placebo: %{sessions: obs, on_air_indices: on_air, estimate_fn: &placebo_fit/2},
+        effect_stability: %{
+          main_lift: main_rate,
+          estimate_at_window_fn: &rate_at_window(obs, &1),
+          window: 30,
+          delta: 5
+        }
       })
+
+    evaluation.verdicts
     #=> %{prediction_error: :pass, coverage: :pass, durbin_watson: :pass,
     #     placebo: :pass, effect_stability: :pass}
     """
