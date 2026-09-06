@@ -127,6 +127,73 @@ defmodule BstsNx.ForwardTest do
       assert_in_delta Enum.at(sds, 1), :math.sqrt(55.75), 1.0e-12
     end
 
+    test "baseline moments accept explicit row forms and validate retained samples" do
+      spec = %{f: Nx.tensor([[1.0]])}
+
+      sample = %{
+        states: [Nx.tensor([2.0])],
+        q_matrix: Nx.tensor([[0.0]]),
+        obs_var: Nx.tensor(0.0)
+      }
+
+      for rows <- [
+            [Nx.tensor([[1.0]])],
+            Nx.tensor([1.0]),
+            Nx.tensor([[1.0]]),
+            Nx.tensor([[[1.0]]])
+          ] do
+        assert Forward.baseline_moments_from_samples([sample], spec, rows) ==
+                 %{mean: [2.0], variance: [0.0], obs_variance: 0.0}
+
+        assert Forward.structured_moments_from_samples([sample], spec, rows) ==
+                 {[2.0], [1.0e-6]}
+      end
+
+      assert Forward.baseline_moments_from_samples([], %{}, []) ==
+               %{mean: [], variance: [], obs_variance: 0.0}
+
+      assert_raise ArgumentError, ~r/non-empty samples/, fn ->
+        Forward.baseline_moments_from_samples([], spec, [Nx.tensor([[1.0]])])
+      end
+    end
+
+    test "baseline preserves terminal state precision while predictive propagation uses f64" do
+      spec = %{f: Nx.tensor([[1.0, 1.0], [0.0, 1.0]])}
+
+      sample = %{
+        states: [Nx.tensor([16_777_216.0, 1.0], type: :f32)],
+        q_matrix: Nx.broadcast(0.0, {2, 2}),
+        obs_var: Nx.tensor(0.0)
+      }
+
+      rows = [Nx.tensor([[1.0, 0.0]]), Nx.tensor([[1.0, 0.0]])]
+
+      baseline = Forward.baseline_moments_from_samples([sample], spec, rows)
+      {predictive, _sds} = Forward.structured_moments_from_samples([sample], spec, rows)
+      assert baseline.mean == [16_777_216.0, 16_777_216.0]
+      assert predictive == [16_777_217.0, 16_777_218.0]
+    end
+
+    test "baseline clamps state variance separately from predictive observation noise" do
+      # Deliberate numerical stress: keep the legacy handling of negative variance.
+      spec = %{f: Nx.tensor([[1.0]])}
+
+      sample = %{
+        states: [Nx.tensor([2.0])],
+        q_matrix: Nx.tensor([[-0.25]]),
+        obs_var: Nx.tensor(1.0)
+      }
+
+      rows = [Nx.tensor([[1.0]])]
+
+      assert Forward.baseline_moments_from_samples([sample], spec, rows) ==
+               %{mean: [2.0], variance: [0.0], obs_variance: 1.0}
+
+      {means, [sd]} = Forward.structured_moments_from_samples([sample], spec, rows)
+      assert means == [2.0]
+      assert_in_delta sd, :math.sqrt(0.75), 1.0e-12
+    end
+
     test "projects operational moments in f64 and preserves cross-step covariance" do
       {means, vars, cumulative_var} =
         Forward.forecast_moments_defn(
