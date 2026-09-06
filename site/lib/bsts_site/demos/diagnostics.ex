@@ -145,29 +145,26 @@ defmodule BstsSite.Demos.Diagnostics do
     obs_var = samples |> Enum.map(&Nx.to_number(&1.obs_var)) |> average()
 
     actual_t = Nx.tensor(pre, type: {:f, 64})
-    residuals_t = Nx.subtract(actual_t, baseline_t)
     pre_idx = Enum.to_list(0..(@n_pre - 1))
-
-    prediction_error = Validation.prediction_error(actual_t, baseline_t, pre_idx)
-    coverage = Validation.coverage(actual_t, baseline_t, state_vars_t, obs_var, pre_idx)
-    durbin_watson = Validation.durbin_watson(residuals_t, pre_idx)
-
     on_air = Enum.to_list((@post_start - 1)..(@post_end - 1))
-    placebo = Validation.placebo_test(obs, on_air, &placebo_fit/2)
-
     main_rate = summary.cumulative_effect.mean / @n_post
 
-    stability =
-      Validation.effect_stability(main_rate, &rate_at_window(obs, &1), @n_post, @window_delta)
-
-    verdicts =
-      Validation.assess(%{
-        prediction_error: prediction_error,
-        coverage: coverage,
-        durbin_watson: durbin_watson,
-        placebo: placebo,
-        effect_stability: stability
+    evaluation =
+      Validation.evaluate(%{
+        actual: actual_t,
+        baseline: baseline_t,
+        indices: pre_idx,
+        coverage: %{state_variances: state_vars_t, obs_variance: obs_var},
+        placebo: %{sessions: obs, on_air_indices: on_air, estimate_fn: &placebo_fit/2},
+        effect_stability: %{
+          main_lift: main_rate,
+          estimate_at_window_fn: &rate_at_window(obs, &1),
+          window: @n_post,
+          delta: @window_delta
+        }
       })
+
+    residuals_t = evaluation.residuals
 
     z = Validation.z_score(0.05)
     resid_sd = Nx.sqrt(Nx.add(state_vars_t, obs_var))
@@ -177,15 +174,8 @@ defmodule BstsSite.Demos.Diagnostics do
       residuals: Nx.to_flat_list(residuals_t),
       resid_lower: Nx.to_flat_list(Nx.multiply(resid_sd, -z)),
       resid_upper: Nx.to_flat_list(Nx.multiply(resid_sd, z)),
-      details: %{
-        prediction_error: prediction_error,
-        coverage: coverage,
-        durbin_watson: durbin_watson,
-        placebo: placebo,
-        effect_stability: stability,
-        placebo_window: placebo_window(obs, on_air)
-      },
-      verdicts: verdicts
+      details: Map.put(evaluation.details, :placebo_window, placebo_window(obs, on_air)),
+      verdicts: evaluation.verdicts
     }
   end
 

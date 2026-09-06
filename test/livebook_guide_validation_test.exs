@@ -692,17 +692,19 @@ defmodule LivebookGuideValidationTest do
     state_var_t = Nx.tensor(rolling_cf.variance)
     indices = Enum.to_list(0..(length(post_obs_list) - 1))
 
-    pred_err = Validation.prediction_error(actual_t, baseline_t, indices)
+    evaluation =
+      Validation.evaluate(%{
+        actual: actual_t,
+        baseline: baseline_t,
+        indices: indices,
+        coverage: %{state_variances: state_var_t, obs_variance: rolling_cf.obs_variance}
+      })
 
-    coverage =
-      Validation.coverage(actual_t, baseline_t, state_var_t, rolling_cf.obs_variance, indices)
-
-    residuals = Nx.subtract(actual_t, baseline_t)
-    dw = Validation.durbin_watson(residuals, indices)
-
-    assert is_map(pred_err) or is_number(pred_err)
-    assert is_map(coverage) or is_number(coverage)
-    assert is_map(dw) or is_number(dw)
+    assert is_map(evaluation.details.prediction_error)
+    assert is_map(evaluation.details.coverage)
+    assert is_map(evaluation.details.durbin_watson)
+    assert evaluation.verdicts.placebo == :skip
+    assert evaluation.verdicts.effect_stability == :skip
 
     # Calibration
     calibration =
