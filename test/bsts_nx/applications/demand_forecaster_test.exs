@@ -176,9 +176,12 @@ defmodule BstsNx.Applications.DemandForecasterTest do
         assert actual.horizon == 2
         assert actual.alpha == 0.2
 
-        for field <- [:mean, :sd, :lower, :upper],
-            {actual_value, expected_value} <- Enum.zip(actual[field], expected[field]) do
-          assert_in_delta actual_value, expected_value, 1.0e-9
+        for field <- [:mean, :sd, :lower, :upper] do
+          assert length(actual[field]) == length(expected[field])
+
+          for {actual_value, expected_value} <- Enum.zip(actual[field], expected[field]) do
+            assert_in_delta actual_value, expected_value, 1.0e-9
+          end
         end
 
         assert decomposition == BstsNx.Forecaster.decompose(fit)
