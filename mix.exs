@@ -61,6 +61,7 @@ defmodule BstsNx.MixProject do
       files: [
         "lib",
         "docs/roadmap.md",
+        "docs/implementation-plan.md",
         "docs/overview.md",
         "docs/getting-started.md",
         "docs/core-modeling.md",
@@ -99,6 +100,7 @@ defmodule BstsNx.MixProject do
         "README.md",
         "CHANGELOG.md",
         "docs/roadmap.md",
+        "docs/implementation-plan.md",
         "docs/overview.md",
         "docs/hex-publishing-checklist.md",
         "docs/release-readiness-plan.md",
@@ -115,6 +117,7 @@ defmodule BstsNx.MixProject do
         Guides: [
           "CHANGELOG.md",
           "docs/roadmap.md",
+          "docs/implementation-plan.md",
           "docs/overview.md",
           "docs/hex-publishing-checklist.md",
           "docs/release-readiness-plan.md",
