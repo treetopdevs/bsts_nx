@@ -1,5 +1,10 @@
 # BSTS Elixir — Implementation Plan
 
+> **Historical record:** This document describes the original implementation
+> sequence and the state of the repository as of 2026-02-10. The active product
+> vision, target architecture, external-provider strategy, and staged roadmap
+> are maintained in [Complete Vision and Roadmap](roadmap.md).
+
 ## Current State (as of 2026-02-10)
 
 - **501 tests pass** (405 tests + 57 properties + 39 doctests)

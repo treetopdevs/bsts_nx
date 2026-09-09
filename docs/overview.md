@@ -3,6 +3,10 @@
 This guide helps you navigate `BstsNx` quickly when you are new to the codebase,
 building production workflows, or prompting an LLM to generate code.
 
+For the complete product thesis, target architecture, TimesFM integration,
+sports and specials strategy, and staged delivery plan, start with the
+[Complete Vision and Roadmap](roadmap.html).
+
 ## What `BstsNx` Is
 
 `BstsNx` is a Bayesian Structural Time Series toolkit built on `Nx`.
@@ -86,12 +90,13 @@ result.spots
 
 ## Recommended Reading Order
 
-1. [Getting Started](getting-started.html)
-2. [Core Modeling](core-modeling.html)
-3. [Causal Inference and Attribution](causal-inference-and-attribution.html)
-4. [Forecasting and Applications](forecasting-and-applications.html)
-5. [Synthetic Data and Validation](synthetic-data-and-validation.html)
-6. [Module Reference](module-reference.html)
+1. [Complete Vision and Roadmap](roadmap.html)
+2. [Getting Started](getting-started.html)
+3. [Core Modeling](core-modeling.html)
+4. [Causal Inference and Attribution](causal-inference-and-attribution.html)
+5. [Forecasting and Applications](forecasting-and-applications.html)
+6. [Synthetic Data and Validation](synthetic-data-and-validation.html)
+7. [Module Reference](module-reference.html)
 
 ## Publishing Prep
 

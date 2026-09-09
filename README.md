@@ -190,6 +190,7 @@ dispatch input.
 
 ## Documentation
 
+- `docs/roadmap.md` for the complete product vision, architecture, and staged roadmap
 - `docs/overview.md` for a map of modules and workflows
 - `docs/hex-publishing-checklist.md` for release and Hex publish prep
 - `docs/release-readiness-plan.md` for staged no-publish release planning
@@ -217,5 +218,6 @@ execution metadata, plus optional R-backed offline parity/reporting. The goal is
 not to outpace CRAN `bsts`/`CausalImpact` immediately, but to make causal impact
 and attribution usable inside Elixir systems while using R as a reference.
 
-The roadmap includes richer component families and full multivariate-observation support
-through structured MCMC and downstream APIs.
+The complete direction—including pluggable forecast providers, hybrid foundation-model
+forecasting, scenario-aware sports and specials, hierarchical panels, and decision risk—is
+specified in `docs/roadmap.md`.
